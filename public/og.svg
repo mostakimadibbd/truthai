@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="accent" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#f29cd4"/>
+      <stop offset="1" stop-color="#b89af5"/>
+    </linearGradient>
+    <radialGradient id="wash">
+      <stop offset="0" stop-color="#30223b"/>
+      <stop offset="1" stop-color="#0a090d"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#0a090d"/>
+  <circle cx="850" cy="210" r="430" fill="url(#wash)"/>
+  <rect x="96" y="113" width="46" height="46" rx="15" fill="none" stroke="#a48bc3" stroke-width="2"/>
+  <text x="119" y="147" fill="#f4b4e2" font-family="Arial,sans-serif" font-size="29" text-anchor="middle">x</text>
+  <text x="161" y="147" fill="#f4f0f7" font-family="Arial,sans-serif" font-size="29" font-weight="600">xyro<tspan fill="#aaa4b2" font-weight="400">ai</tspan></text>
+  <text x="96" y="301" fill="#f4f0f7" font-family="Arial,sans-serif" font-size="70" font-weight="600" letter-spacing="-4">Big questions.</text>
+  <text x="96" y="389" fill="url(#accent)" font-family="Arial,sans-serif" font-size="70" font-weight="600" letter-spacing="-4">Better starting points.</text>
+  <text x="98" y="466" fill="#aaa4b2" font-family="Arial,sans-serif" font-size="22">A thoughtful workspace for curious people.</text>
+</svg>

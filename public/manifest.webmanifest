@@ -1,0 +1,17 @@
+{
+  "name": "Xyro AI",
+  "short_name": "Xyro AI",
+  "description": "A thoughtful workspace for asking questions, exploring ideas, and creating with AI.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a090d",
+  "theme_color": "#0a090d",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

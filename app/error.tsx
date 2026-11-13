@@ -1,0 +1,22 @@
+"use client";
+
+import Link from "next/link";
+
+export default function ErrorPage({
+  reset,
+}: {
+  error: Error & { digest?: string };
+  reset: () => void;
+}) {
+  return (
+    <section className="error-page" role="alert">
+      <span className="eyebrow">Something went wrong</span>
+      <h1>Let’s try that again.</h1>
+      <p>We couldn’t show this page just now.</p>
+      <div className="hero-actions">
+        <button className="button button-primary" onClick={() => reset()}>Try again</button>
+        <Link href="/" className="button button-quiet">Go home</Link>
+      </div>
+    </section>
+  );
+}
