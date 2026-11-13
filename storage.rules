@@ -1,0 +1,36 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function ownsUser(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    function isSupportedUserFile() {
+      return request.resource.size > 0
+        && request.resource.size <= 20 * 1024 * 1024
+        && request.resource.contentType in [
+          'image/jpeg',
+          'image/png',
+          'image/webp',
+          'application/pdf',
+          'text/plain',
+          'text/csv',
+          'application/json',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        ];
+    }
+
+    match /users/{userId}/{filePath=**} {
+      allow read: if ownsUser(userId);
+      allow create, update: if ownsUser(userId) && isSupportedUserFile();
+      allow delete: if ownsUser(userId);
+    }
+
+    match /{filePath=**} {
+      allow read, write: if false;
+    }
+  }
+}

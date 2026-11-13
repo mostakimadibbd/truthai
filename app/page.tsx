@@ -34,7 +34,7 @@ const questions = [
   },
   {
     q: "Can I use Xyro AI without an account?",
-    a: "Account and guest access are not available on this information site. Product access details will be shared when the service is ready.",
+    a: "Google and email/password sign-in are available when Firebase is configured. Guest access is not available, and chat features are still in development.",
   },
 ];
 
@@ -65,8 +65,8 @@ export default function Home() {
             time moving ideas forward.
           </p>
           <div className="hero-actions">
-            <Link href="/about" className="button button-primary">
-              Get to know Xyro AI <span aria-hidden="true">↗</span>
+            <Link href="/sign-in" className="button button-primary">
+              Sign in to Xyro AI <span aria-hidden="true">↗</span>
             </Link>
             <Link href="/help" className="button button-quiet">See how it works</Link>
           </div>

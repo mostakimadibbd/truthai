@@ -14,6 +14,11 @@ const nextConfig: NextConfig = {
     ];
 
     if (process.env.NODE_ENV === "production") {
+      const authDomain = process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN?.trim();
+      const authOrigin = authDomain
+        ? new URL(`https://${authDomain}`).origin
+        : "https://*.firebaseapp.com";
+
       headers.push(
         {
           key: "Strict-Transport-Security",
@@ -31,8 +36,10 @@ const nextConfig: NextConfig = {
             "font-src 'self' data:",
             "style-src 'self' 'unsafe-inline'",
             "script-src 'self' 'unsafe-inline'",
-            "connect-src 'self'",
+            `connect-src 'self' ${authOrigin} https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://www.googleapis.com https://firebasestorage.googleapis.com https://storage.googleapis.com`,
+            `frame-src 'self' ${authOrigin} https://accounts.google.com`,
             "worker-src 'self'",
+            "media-src 'self' blob:",
             "manifest-src 'self'",
           ].join("; "),
         },

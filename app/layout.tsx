@@ -62,8 +62,8 @@ export default function RootLayout({
             <Link href="/pricing">Pricing</Link>
             <Link href="/help">Help</Link>
           </nav>
-          <Link className="header-cta" href="/about">
-            Explore Xyro AI <span aria-hidden="true">↗</span>
+          <Link className="header-cta" href="/sign-in">
+            Sign in <span aria-hidden="true">↗</span>
           </Link>
         </header>
         <main id="main">{children}</main>
