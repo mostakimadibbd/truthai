@@ -173,7 +173,10 @@ export default async function InformationPage({
       </header>
       <div className="article-body">
         {article.sections.map((section) => (
-          <section key={section.title}>
+          <section
+            key={section.title}
+            id={slug === "help" && section.title === "Work with files" ? "files" : undefined}
+          >
             <h2>{section.title}</h2>
             {section.body.map((paragraph, index) => (
               <p key={index}>{renderText(paragraph)}</p>
