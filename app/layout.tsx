@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
+import PwaRegistration from "./pwa-registration";
 import "./globals.css";
 
 const siteUrl = "https://xyro.ai";
@@ -44,6 +45,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
+        <PwaRegistration />
         <a className="skip-link" href="#main">
           Skip to content
         </a>
