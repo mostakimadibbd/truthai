@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { siteUrl } from "@/lib/site";
 
 const capabilities = [
   {
@@ -45,7 +46,7 @@ export default function Home() {
     applicationCategory: "ProductivityApplication",
     description:
       "A thoughtful workspace for asking questions, exploring ideas, and creating with AI.",
-    url: "https://xyro.ai",
+    url: siteUrl,
   };
 
   return (

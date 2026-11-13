@@ -1,9 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import PwaRegistration from "./pwa-registration";
+import { siteUrl } from "@/lib/site";
 import "./globals.css";
-
-const siteUrl = "https://xyro.ai";
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
@@ -30,7 +29,10 @@ export const metadata: Metadata = {
       "A thoughtful workspace for asking questions, exploring ideas, and creating with AI.",
   },
   manifest: "/manifest.webmanifest",
-  robots: { index: true, follow: true },
+  robots:
+    process.env.VERCEL_ENV === "preview"
+      ? { index: false, follow: false }
+      : { index: true, follow: true },
 };
 
 export const viewport: Viewport = {

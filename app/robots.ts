@@ -1,8 +1,13 @@
 import type { MetadataRoute } from "next";
+import { siteUrl } from "@/lib/site";
 
 export default function robots(): MetadataRoute.Robots {
+  const isPreview = process.env.VERCEL_ENV === "preview";
+
   return {
-    rules: { userAgent: "*", allow: "/" },
-    sitemap: "https://xyro.ai/sitemap.xml",
+    rules: isPreview
+      ? { userAgent: "*", disallow: "/" }
+      : { userAgent: "*", allow: "/" },
+    sitemap: isPreview ? undefined : `${siteUrl}/sitemap.xml`,
   };
 }

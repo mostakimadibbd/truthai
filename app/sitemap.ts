@@ -1,4 +1,5 @@
 import type { MetadataRoute } from "next";
+import { siteUrl } from "@/lib/site";
 
 const pages = [
   "",
@@ -16,7 +17,7 @@ const pages = [
 
 export default function sitemap(): MetadataRoute.Sitemap {
   return pages.map((page) => ({
-    url: `https://xyro.ai${page ? `/${page}` : ""}`,
+    url: `${siteUrl}${page ? `/${page}` : ""}`,
     lastModified: new Date("2026-11-13"),
     changeFrequency: page ? "monthly" : "weekly",
     priority: page ? 0.6 : 1,
