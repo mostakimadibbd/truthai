@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
 export function middleware(request: NextRequest) {
-  const nonce = Buffer.from(`${request.url}-${Date.now()}`).toString("base64");
+  const nonceBytes = new Uint8Array(16);
+  crypto.getRandomValues(nonceBytes);
+  const nonce = btoa(String.fromCharCode(...nonceBytes));
   const response = NextResponse.next();
   const authDomain = process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN?.trim();
   const authOrigin = authDomain ? `https://${authDomain}` : "https://*.firebaseapp.com";
