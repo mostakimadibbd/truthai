@@ -58,13 +58,28 @@ export default function RootLayout({
           </Link>
           <nav className="main-nav" aria-label="Main navigation">
             <Link href="/about">About</Link>
-            <Link href="/company">Company</Link>
-            <Link href="/pricing">Pricing</Link>
-            <Link href="/help">Help</Link>
+            <Link href="/help">How it works</Link>
+            <Link href="/pricing">Plans</Link>
           </nav>
-          <Link className="header-cta" href="/sign-in">
-            Sign in <span aria-hidden="true">↗</span>
-          </Link>
+          <div className="header-actions">
+            <Link className="header-signin" href="/sign-in">Sign in</Link>
+            <Link className="header-cta" href="/sign-up">
+              Get started <span aria-hidden="true">↗</span>
+            </Link>
+          </div>
+          <details className="mobile-menu">
+            <summary aria-label="Open navigation menu">
+              <span aria-hidden="true" />
+              <span aria-hidden="true" />
+            </summary>
+            <nav aria-label="Mobile navigation">
+              <Link href="/about">About</Link>
+              <Link href="/help">How it works</Link>
+              <Link href="/pricing">Plans</Link>
+              <Link href="/sign-in">Sign in</Link>
+              <Link className="mobile-menu-cta" href="/sign-up">Get started</Link>
+            </nav>
+          </details>
         </header>
         <main id="main">{children}</main>
         <footer className="site-footer">
@@ -74,20 +89,18 @@ export default function RootLayout({
                 <span className="wordmark-icon" aria-hidden="true">x</span>
                 <span>xyro<span className="wordmark-light">ai</span></span>
               </Link>
-              <p>Make room for better questions.</p>
+              <p>A little more room to think.</p>
             </div>
             <div className="footer-links">
               <div>
                 <span className="footer-heading">Explore</span>
                 <Link href="/about">About</Link>
-                <Link href="/company">Company</Link>
-                <Link href="/pricing">Pricing</Link>
-                <Link href="/changelog">Changelog</Link>
+                <Link href="/help">How it works</Link>
+                <Link href="/pricing">Plans</Link>
               </div>
               <div>
-                <span className="footer-heading">Resources</span>
+                <span className="footer-heading">Support</span>
                 <Link href="/help">Help center</Link>
-                <Link href="/xyroaidetect">XyroAIDetect</Link>
                 <Link href="/contact">Contact</Link>
               </div>
               <div>
@@ -100,7 +113,7 @@ export default function RootLayout({
           </div>
           <div className="footer-bottom">
             <span>© {new Date().getFullYear()} Xyro AI</span>
-            <span>Thoughtful tools for curious people.</span>
+            <span>AI can make mistakes. Keep your judgment in the loop.</span>
           </div>
         </footer>
       </body>
