@@ -9,7 +9,15 @@ import {
   signOut,
   type User,
 } from "firebase/auth";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import FirebasePresence from "@/components/firebase-presence";
 import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/auth-client";
 
@@ -86,7 +94,7 @@ function Icon({
   name: "menu" | "plus" | "search" | "send" | "stop" | "copy" | "trash" | "close" | "spark";
   size?: number;
 }) {
-  const paths: Record<typeof name, React.ReactNode> = {
+  const paths: Record<typeof name, ReactNode> = {
     menu: <><path d="M4 6h16M4 12h16M4 18h16" /></>,
     plus: <><path d="M12 5v14M5 12h14" /></>,
     search: <><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4 4" /></>,
@@ -144,11 +152,17 @@ export default function ChatWorkspace() {
 
     return onAuthStateChanged(getFirebaseAuth(), (currentUser) => {
       if (!currentUser) {
+        setHistoryLoaded(false);
+        setChats([]);
+        setActiveChatId(null);
         setAuthState("signed-out");
         router.replace("/sign-in");
         return;
       }
 
+      setHistoryLoaded(false);
+      setChats([]);
+      setActiveChatId(null);
       setUser(currentUser);
       if (!currentUser.emailVerified) {
         setAuthState("unverified");
@@ -193,6 +207,8 @@ export default function ChatWorkspace() {
     textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`;
   }, [draft]);
 
+  useEffect(() => () => controllerRef.current?.abort(), []);
+
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
       const isMac = navigator.platform.toLowerCase().includes("mac");
@@ -204,8 +220,9 @@ export default function ChatWorkspace() {
       } else if (modifierPressed && event.shiftKey && event.key.toLowerCase() === "o") {
         event.preventDefault();
         startNewChat();
-      } else if (event.key === "Escape" && sending) {
-        controllerRef.current?.abort();
+      } else if (event.key === "Escape") {
+        if (sending) controllerRef.current?.abort();
+        else setSidebarOpen(false);
       }
     }
     window.addEventListener("keydown", handleShortcut);
@@ -300,6 +317,10 @@ export default function ChatWorkspace() {
     ]
       .slice(-MESSAGE_LIMIT)
       .map(({ role, content: messageContent }) => ({ role, content: messageContent }));
+    let requestLength = requestMessages.reduce((total, item) => total + item.content.length, 0);
+    while (requestLength > 36_000 && requestMessages.length > 1) {
+      requestLength -= requestMessages.shift()?.content.length ?? 0;
+    }
     const controller = new AbortController();
     controllerRef.current = controller;
 
