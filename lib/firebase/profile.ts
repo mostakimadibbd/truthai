@@ -6,14 +6,14 @@ import {
   runTransaction,
   serverTimestamp,
 } from "firebase/firestore";
-import { getFirebaseServices } from "./client";
+import { getFirebaseFirestore } from "./firestore-client";
 
 export async function saveUserProfile(user: User): Promise<void> {
   if (!user.email) {
     throw new Error("An email address is required to create an Xyro AI profile.");
   }
 
-  const { db } = getFirebaseServices();
+  const db = getFirebaseFirestore();
   const profileRef = doc(db, "users", user.uid);
 
   await runTransaction(db, async (transaction) => {
