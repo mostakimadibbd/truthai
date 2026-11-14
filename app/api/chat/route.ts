@@ -1,4 +1,4 @@
-import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import { Timestamp } from "firebase-admin/firestore";
 import { NextRequest, NextResponse } from "next/server";
 import {
   buildOpenRouterMessages,
@@ -40,6 +40,7 @@ class ChatRouteError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    readonly headers?: Record<string, string>,
   ) {
     super(message);
   }
@@ -125,7 +126,7 @@ function parseDelta(line: string): { text?: string; done?: boolean; error?: stri
   try {
     event = JSON.parse(payload);
   } catch {
-    return {};
+    return { error: "The model returned a response we couldn’t read." };
   }
   if (typeof event !== "object" || event === null) return {};
   if (
@@ -265,6 +266,7 @@ export async function POST(request: NextRequest) {
   let responseText = "";
   let locked = false;
   let userMessageSaved = false;
+  let assistantCreated = false;
   let assistantSaved = false;
   let modelMessages: StoredChatMessage[] = [];
 
@@ -417,6 +419,8 @@ export async function POST(request: NextRequest) {
       updatedAt: Timestamp.now(),
     }, { merge: true });
     await batch.commit();
+    userMessageSaved = !regenerate;
+    assistantCreated = true;
 
     const contextMessages = regenerate
       ? [...history]
@@ -451,7 +455,7 @@ export async function POST(request: NextRequest) {
           model: "openrouter/free",
           messages: prepared.messages,
           ...(prepared.includesPdf
-            ? [{ id: "file-parser", pdf: { engine: "cloudflare-ai" } }]
+            ? { plugins: [{ id: "file-parser", pdf: { engine: "cloudflare-ai" } }] }
             : {}),
           stream: true,
           max_tokens: 2048,
@@ -463,6 +467,9 @@ export async function POST(request: NextRequest) {
         cache: "no-store",
       });
     } catch {
+      if (request.signal.aborted) {
+        throw new ChatRouteError(499, "RESPONSE_STOPPED", "Response stopped.");
+      }
       throw new ChatRouteError(502, "MODEL_UNAVAILABLE", "The free model service is temporarily unavailable.");
     }
 
@@ -476,6 +483,7 @@ export async function POST(request: NextRequest) {
         status === 429
           ? "Free models are busy right now. Please wait a moment and try again."
           : "The model couldn’t process this request. Try again or remove an attachment.",
+        retryAfter ? { "Retry-After": retryAfter } : undefined,
       );
     }
 
@@ -545,7 +553,7 @@ export async function POST(request: NextRequest) {
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
-    if (assistantRef && userMessageSaved && !assistantSaved) {
+    if (assistantRef && assistantCreated && !assistantSaved) {
       try {
         if (responseText) {
           await assistantRef.update({
@@ -564,7 +572,10 @@ export async function POST(request: NextRequest) {
       if (error.status === 499) {
         return errorResponse(499, error.code, error.message);
       }
-      return errorResponse(error.status, error.code, error.message);
+      return errorResponse(error.status, error.code, error.message, error.headers);
+    }
+    if (request.signal.aborted) {
+      return errorResponse(499, "RESPONSE_STOPPED", "Response stopped.");
     }
     console.error("Chat request failed.", error);
     return errorResponse(503, "CHAT_REQUEST_FAILED", "The response couldn’t be completed or saved. Please try again.");
