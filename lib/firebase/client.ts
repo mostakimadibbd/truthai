@@ -38,7 +38,7 @@ function readFirebaseConfig(): FirebaseOptions {
       "NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN",
       process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
     ),
-    databaseURL: process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL?.trim(),
+    databaseURL: process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL?.trim() || undefined,
     projectId: requiredValue(
       "NEXT_PUBLIC_FIREBASE_PROJECT_ID",
       process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,

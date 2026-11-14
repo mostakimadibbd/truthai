@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { onAuthStateChanged, signOut, type User } from "firebase/auth";
 import { doc, onSnapshot } from "firebase/firestore";
 import FirebasePresence from "@/components/firebase-presence";
+import { stopUserPresence } from "@/lib/firebase/presence";
 import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/auth-client";
 import { getFirebaseFirestore } from "@/lib/firebase/firestore-client";
 
@@ -111,6 +112,7 @@ export default function AccountPanel() {
     setSigningOut(true);
     setError("");
     try {
+      if (user) stopUserPresence(user.uid);
       await signOut(getFirebaseAuth());
       router.replace("/sign-in");
     } catch {

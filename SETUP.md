@@ -17,12 +17,15 @@ This project is designed for a totally free stack and intentionally avoids paid 
 
 - In Firebase Authentication > Settings > Authorized domains, add:
   - localhost
-  - your production domain (for example `app.example.com`)
-  - your Vercel preview domain when testing preview deploys
+  - the stable production hostname (including its `vercel.app` alias, if used)
+  - your custom production domain, if any
+  - exact Vercel preview hostnames only when testing those deployments
 - Set the Google OAuth redirect URI to:
   - `https://<domain>/__/auth/handler`
-- For production, set `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` to the same custom domain.
-  The Next.js rewrite proxies `/__/auth/*` to `<project-id>.firebaseapp.com`.
+- Keep the Firebase project's default `firebaseapp.com` auth domain unless a
+  custom auth domain is configured. If using a custom domain, set
+  `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` to it and confirm the `/__/auth/*` rewrite
+  reaches `<project-id>.firebaseapp.com`.
 - Confirm the Firebase project allows Google sign-in and email/password sign-in.
 - Create the Cloud Firestore database and deploy the repository's `firestore.rules`.
 - Create a Realtime Database and deploy `database.rules.json`.
@@ -87,7 +90,8 @@ This project is designed for a totally free stack and intentionally avoids paid 
 ## Deployment checklist
 
 - [ ] Firebase web config values are in place
-- [ ] `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` matches your production domain
+- [ ] The stable Vercel production hostname is in Firebase Auth authorized domains
+- [ ] `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` matches the Firebase auth domain configured for the app
 - [ ] `SITE_URL` is set to the canonical HTTPS origin
 - [ ] Vercel Preview and Production env vars are populated
 - [ ] Google OAuth redirect URL is configured
@@ -108,6 +112,13 @@ This project is designed for a totally free stack and intentionally avoids paid 
 ## Notes
 
 - Vercel Hobby is non-commercial and personal-use only.
+- Firebase Auth, Firestore, and Realtime Database browser SDK requests go
+  directly from the browser to Firebase; Vercel runtime logs do not show those
+  failures. Use the browser console/network panel and the Firebase consoles to
+  diagnose client-side auth or database errors.
+- The per-request CSP nonce requires dynamic HTML rendering so Next.js can put
+  the matching nonce on its scripts. Static assets remain cacheable, but HTML
+  pages are rendered per request.
 - This app keeps host-specific configuration isolated when reasonable so features are easy to move later.
 - No paid provider add-ons or billing-backed features should be enabled for this project.
 - The password breach check sends only a SHA-1 hash range to the server; the
