@@ -32,8 +32,11 @@ This project is designed for a totally free stack and intentionally avoids paid 
 - Set the web app configuration in `.env.local` or Vercel environment variables.
 - Set `NEXT_PUBLIC_FIREBASE_DATABASE_URL` to the exact Realtime Database URL.
 - Keep the project on the free Firebase plan. Do not enable paid Identity Platform features.
-- Signup saves the basic user profile to Firestore immediately after Firebase
-  Authentication creates the account. Email verification is required before
+- Signup requires a completed Turnstile challenge and explicit acceptance of
+  the Terms and Conditions and Privacy Policy. The backend verifies the
+  challenge, creates the Firebase Authentication account with Firebase Admin,
+  then signs the browser in with a custom token. The browser saves the basic
+  user profile to Firestore. Email verification is required before
   accessing AI features; if Firestore rejects the profile write, the sign-in
   screen offers a retry. Verify that the deployed rules allow each signed-in
   user to read and write only their own `users/{uid}` profile.
@@ -51,8 +54,16 @@ This project is designed for a totally free stack and intentionally avoids paid 
 ## Required Cloudflare / Turnstile settings
 
 - Create a Turnstile site and secret key.
-- Add the site key to `TURNSTILE_SITE_KEY` and secret key to `TURNSTILE_SECRET_KEY`.
-- Use Turnstile on sign-up, sign-in, password reset, and other high-risk actions.
+- Add `NEXT_PUBLIC_TURNSTILE_SITE_KEY` and `TURNSTILE_SECRET_KEY` to local and Vercel environments. The site key is public; keep the secret server-side.
+- Allow the exact local, production, and preview hostnames in the Turnstile widget configuration.
+- Sign-up validates the token with Cloudflare Siteverify on the server before creating an account; Google account creation is also gated by server-side token verification.
+
+## Required Firebase Admin settings for account creation
+
+- Create a dedicated Firebase service account with only the permissions needed by Firebase Authentication.
+- Set `FIREBASE_ADMIN_PROJECT_ID`, `FIREBASE_ADMIN_CLIENT_EMAIL`, and `FIREBASE_ADMIN_PRIVATE_KEY` in `.env.local` and Vercel Production/Preview environments. Keep these server-only; never use a `NEXT_PUBLIC_` prefix or commit the service-account JSON.
+- For `.env.local`, encode newlines in the private key as `\n`. Use a newly issued key if a previous service-account key was ever shared or exposed.
+- The sign-in form's Remember me checkbox selects persistent or browser-session Firebase Auth persistence. Signup requires a separate Terms and Conditions acceptance checkbox.
 
 ## Required OpenRouter settings
 
@@ -111,7 +122,8 @@ This project is designed for a totally free stack and intentionally avoids paid 
 - [ ] Realtime Database rules are deployed
 - [ ] Storage rules are deployed as deny-all
 - [ ] OpenRouter API key is set server-side only
-- [ ] Turnstile keys are configured
+- [ ] `NEXT_PUBLIC_TURNSTILE_SITE_KEY` and `TURNSTILE_SECRET_KEY` are configured
+- [ ] Firebase Admin project ID, client email, and private key are configured server-side
 - [ ] Cloudinary keys are configured
 - [ ] Redis keys are configured
 - [ ] Email provider API key is configured

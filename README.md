@@ -32,7 +32,7 @@ Vercel detects Next.js automatically; no custom `vercel.json` is required. Impor
 
 Set the `NEXT_PUBLIC_FIREBASE_*` Web App values in Vercel's project settings for Production and Preview. Set `SITE_URL` to the canonical production origin (for example, `https://your-domain.example`); Preview deployments use Vercel's generated preview URL and are marked `noindex`. Add the stable production hostname (including its `vercel.app` alias, if used) to Firebase Authentication's authorized domains. Environment-variable changes apply to new deployments, so redeploy after updating them.
 
-`OPENROUTER_API_KEY` and the Upstash Redis URL/token are required for text chat. Keep them server-side; never prefix them with `NEXT_PUBLIC_`. The current chat endpoint verifies Firebase ID tokens and email verification, limits each user to 10 requests per minute and 60 per day, and streams only text responses. No Firebase Admin credentials are needed for the current profile or chat flow. The `FIREBASE_ADMIN_*` and watermark variables remain reserved for later features.
+`OPENROUTER_API_KEY` and the Upstash Redis URL/token are required for text chat. Keep them server-side; never prefix them with `NEXT_PUBLIC_`. The current chat endpoint verifies Firebase ID tokens and email verification, limits each user to 10 requests per minute and 60 per day, and streams only text responses. Account creation requires a Cloudflare Turnstile site key and secret plus server-only Firebase Admin credentials; the browser never receives the service-account key.
 
 ## Firebase setup
 
@@ -77,20 +77,20 @@ The legal pages remain drafts. Chat text is stored in browser local storage and 
 
 ## Configuration and secrets
 
-Firebase web configuration is required for account sign-in and profile storage; `NEXT_PUBLIC_FIREBASE_DATABASE_URL` is also required for Realtime Database presence. `.env.example` lists these public web configuration values and placeholders for planned integrations. Configure secrets only in the server/deployment environment—never in `NEXT_PUBLIC_*` variables.
+Firebase web configuration is required for account sign-in and profile storage; `NEXT_PUBLIC_FIREBASE_DATABASE_URL` is also required for Realtime Database presence. Account creation also uses `NEXT_PUBLIC_TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY`, and `FIREBASE_ADMIN_*`. Only the site key is public; configure the Turnstile secret and Firebase Admin credentials only in the server/deployment environment.
 
 The planned integrations will require, at minimum:
 
 - `OPENROUTER_API_KEY` for server-side model requests
 - `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` for the required chat capacity guard
-- Firebase Web App configuration for current sign-in; Firebase Admin credentials are reserved for future server routes
+- Firebase Web App configuration for sign-in, plus `FIREBASE_ADMIN_PROJECT_ID`, `FIREBASE_ADMIN_CLIENT_EMAIL`, and `FIREBASE_ADMIN_PRIVATE_KEY` for server-verified account creation
 - `MARK_KEY` and `MARK_SERVICE_SECRET` for server-side watermark operations
 
 Do not add real credentials to this repository. Xyro AI is standalone; no shared XyroSocial domain, Firebase project, user collection, or SSO credentials have been provided.
 
 ## Security and deployment status
 
-The current Next.js configuration adds browser security headers. Authentication uses Firebase's client SDK, Firestore profile rules, and owner-only Realtime Database presence rules. The chat endpoint verifies Firebase ID tokens, requires verified email, streams model responses, and applies per-user limits through Upstash Redis. Firebase Admin routes, upload handlers, audit logs, payment integrations, and operational health checks are not implemented yet.
+The current Next.js configuration adds browser security headers. Account creation validates Cloudflare Turnstile server-side before Firebase Admin creates the user; Firebase's client SDK then completes email verification and profile setup. Firestore profile rules and owner-only Realtime Database presence rules remain in force. The chat endpoint verifies Firebase ID tokens, requires verified email, streams model responses, and applies per-user limits through Upstash Redis. Upload handlers, audit logs, payment integrations, and operational health checks are not implemented yet.
 
 The legal pages are drafts. Governing law, the legal operator, privacy contact, final data retention periods, and provider disclosures remain unspecified and require review before launch. The static site does not set non-essential cookies.
 

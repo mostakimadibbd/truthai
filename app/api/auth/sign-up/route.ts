@@ -145,10 +145,12 @@ export async function POST(request: NextRequest) {
 
   let user;
   try {
+    const displayName =
+      typeof body.displayName === "string" ? body.displayName.trim() : "";
     user = await adminAuth.createUser({
       email: body.email.trim(),
       password: body.password,
-      displayName: typeof body.displayName === "string" ? body.displayName.trim() : undefined,
+      displayName: displayName || undefined,
     });
   } catch (error) {
     const code = getErrorCode(error);

@@ -251,6 +251,18 @@ h1, h2, h3, p { margin-top: 0; }
 .auth-submit:disabled, .button-google:disabled { cursor: not-allowed; opacity: .56; }
 .auth-legal { margin: 18px 0 0; color: #898192; text-align: center; font-size: 9px; line-height: 1.7; }
 .auth-legal a { color: #d5b0e1; text-decoration: underline; text-underline-offset: 3px; }
+.auth-signup-security { display: grid; gap: 12px; margin-bottom: 15px; padding: 14px; border: 1px solid #342e3c; border-radius: 11px; background: #100e15; }
+.auth-checkbox-row { display: grid; grid-template-columns: 19px minmax(0, 1fr); align-items: center; gap: 10px; color: #c9c0cf; font-size: 12px; line-height: 1.6; cursor: pointer; }
+.auth-checkbox-row input { width: 18px; height: 18px; margin: 0; accent-color: #c8a4df; cursor: pointer; }
+.auth-checkbox-row input:disabled { cursor: not-allowed; }
+.auth-consent-row { align-items: start; }
+.auth-consent-row input { margin-top: 2px; }
+.auth-consent-row a { color: #e1bdea; text-decoration: underline; text-decoration-color: #755d81; text-underline-offset: 3px; }
+.auth-consent-row a:hover { color: #f5d8fa; }
+.turnstile-field { display: flex; min-height: 65px; justify-content: center; overflow: hidden; }
+.turnstile-status { margin: 0; color: #e3b8c2; font-size: 11px; line-height: 1.55; }
+.auth-remember-row { grid-template-columns: 19px auto minmax(0, 1fr); gap: 9px; }
+.auth-remember-row small { justify-self: end; color: #92899a; font-size: 10px; font-weight: 400; text-align: right; }
 .verification-card { display: flex; flex-direction: column; align-items: center; padding: 14px 3px 4px; text-align: center; }
 .verification-icon { display: grid; width: 54px; height: 54px; place-items: center; margin-bottom: 16px; border: 1px solid #62516e; border-radius: 16px; color: #efb9e3; background: #211a28; font-size: 21px; }
 .verification-card h3 { margin: 0 0 9px; font-size: 18px; font-weight: 580; }
