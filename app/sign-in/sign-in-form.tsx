@@ -13,7 +13,6 @@ import {
   signInWithEmailAndPassword,
   signInWithPopup,
   signInWithRedirect,
-  signOut,
   updateProfile,
   type User,
 } from "firebase/auth";
@@ -50,6 +49,10 @@ function getAuthErrorMessage(error: unknown): string {
       return "The Google sign-in window was closed before you finished.";
     case "auth/too-many-requests":
       return "There have been too many attempts. Wait a little while, then try again.";
+    case "auth/missing-email":
+      return "Enter your email address.";
+    case "auth/missing-password":
+      return "Enter your password.";
     case "auth/network-request-failed":
       return "We couldn’t reach the sign-in service. Check your connection and try again.";
     case "auth/account-exists-with-different-credential":
@@ -75,18 +78,28 @@ async function checkPasswordNotBreached(password: string): Promise<boolean> {
     .map((part) => part.toString(16).padStart(2, "0"))
     .join("")
     .toUpperCase();
-  const response = await fetch("/api/password/check", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prefix: hash.slice(0, 5), suffix: hash.slice(5) }),
-    cache: "no-store",
-  });
+  let response: Response;
+  try {
+    response = await fetch("/api/password/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prefix: hash.slice(0, 5), suffix: hash.slice(5) }),
+      cache: "no-store",
+    });
+  } catch {
+    throw new Error("password-check-unavailable");
+  }
 
   if (!response.ok) {
     throw new Error("password-check-unavailable");
   }
 
-  const result: unknown = await response.json();
+  let result: unknown;
+  try {
+    result = await response.json();
+  } catch {
+    throw new Error("password-check-unavailable");
+  }
   if (
     typeof result !== "object" ||
     result === null ||
@@ -104,7 +117,6 @@ export default function SignInForm({
   initialMode?: AuthMode;
 }) {
   const router = useRouter();
-  const [mode, setMode] = useState<AuthMode>(initialMode);
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -113,6 +125,7 @@ export default function SignInForm({
   const [notice, setNotice] = useState("");
   const [verificationUser, setVerificationUser] = useState<User | null>(null);
   const configured = isFirebaseConfigured;
+  const mode = initialMode;
 
   const completeSignIn = useCallback(async (user: User) => {
     await reload(user);
@@ -133,8 +146,15 @@ export default function SignInForm({
     if (!configured) return;
 
     let active = true;
-    const auth = getFirebaseAuth();
-    void getRedirectResult(auth)
+    let redirectResult: ReturnType<typeof getRedirectResult>;
+    try {
+      redirectResult = getRedirectResult(getFirebaseAuth());
+    } catch (redirectError) {
+      setError(getAuthErrorMessage(redirectError));
+      return;
+    }
+
+    void redirectResult
       .then(async (result) => {
         if (result?.user && active) {
           await completeSignIn(result.user);
@@ -174,15 +194,21 @@ export default function SignInForm({
           email.trim(),
           password,
         );
+        setVerificationUser(credential.user);
+        setPassword("");
         if (displayName.trim()) {
           await updateProfile(credential.user, {
             displayName: displayName.trim().slice(0, 100),
           });
         }
-        await sendEmailVerification(credential.user);
+        try {
+          await sendEmailVerification(credential.user);
+        } catch {
+          setError("Your account was created, but we couldn’t send the verification email. Use the resend option below.");
+          return;
+        }
         setVerificationUser(credential.user);
         setNotice("Your account is ready. Verify your email to unlock your workspace.");
-        setPassword("");
         return;
       }
 
@@ -288,14 +314,6 @@ export default function SignInForm({
     }
   }
 
-  function changeMode(nextMode: AuthMode) {
-    setMode(nextMode);
-    setError("");
-    setNotice("");
-    setVerificationUser(null);
-    setPassword("");
-  }
-
   return (
     <div className="auth-layout">
       <section className="auth-story" aria-labelledby="auth-heading">
@@ -324,24 +342,20 @@ export default function SignInForm({
       <section className="auth-panel" aria-label={mode === "sign-in" ? "Sign in form" : "Create account form"}>
         <div className="auth-panel-heading">
           <div className="auth-mode-switch" aria-label="Account action">
-            <button
+            <Link
+              href="/sign-in"
               className={mode === "sign-in" ? "auth-mode active" : "auth-mode"}
-              type="button"
-              onClick={() => changeMode("sign-in")}
-              aria-pressed={mode === "sign-in"}
-              disabled={busy}
+              aria-current={mode === "sign-in" ? "page" : undefined}
             >
               Sign in
-            </button>
-            <button
+            </Link>
+            <Link
+              href="/sign-up"
               className={mode === "sign-up" ? "auth-mode active" : "auth-mode"}
-              type="button"
-              onClick={() => changeMode("sign-up")}
-              aria-pressed={mode === "sign-up"}
-              disabled={busy}
+              aria-current={mode === "sign-up" ? "page" : undefined}
             >
               Create account
-            </button>
+            </Link>
           </div>
           <h2>{mode === "sign-in" ? "Welcome back" : "Start with a free account"}</h2>
           <p>
@@ -397,7 +411,7 @@ export default function SignInForm({
 
             <div className="auth-separator"><span>or continue with email</span></div>
 
-            <form className="auth-form" onSubmit={handleSubmit} noValidate>
+            <form className="auth-form" onSubmit={handleSubmit}>
               {mode === "sign-up" && (
                 <label className="form-field">
                   <span>Your name <span className="optional-label">Optional</span></span>

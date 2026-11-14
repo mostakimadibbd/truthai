@@ -218,7 +218,7 @@ h1, h2, h3, p { margin-top: 0; }
 .auth-panel { width: 100%; padding: 31px; border: 1px solid #342e3c; border-radius: 18px; background: linear-gradient(150deg, #17141d, #110f16 80%); box-shadow: var(--shadow); }
 .auth-panel-heading { margin-bottom: 24px; }
 .auth-mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border: 1px solid #322d39; border-radius: 10px; background: #0e0c12; }
-.auth-mode { min-height: 39px; border: 0; border-radius: 7px; color: #a39aaa; background: transparent; font-size: 11px; font-weight: 570; cursor: pointer; transition: color .15s ease, background .15s ease; }
+.auth-mode { min-height: 39px; display: grid; place-items: center; border: 0; border-radius: 7px; color: #a39aaa; background: transparent; font-size: 11px; font-weight: 570; text-decoration: none; cursor: pointer; transition: color .15s ease, background .15s ease; }
 .auth-mode.active { color: #f3eaf5; background: #25202d; box-shadow: inset 0 0 0 1px #3a3242; }
 .auth-mode:disabled { cursor: not-allowed; opacity: .6; }
 .auth-panel-heading h2 { margin: 24px 0 7px; font-size: 24px; font-weight: 560; letter-spacing: -.045em; }
@@ -287,15 +287,18 @@ h1, h2, h3, p { margin-top: 0; }
 .workspace-callout-icon { color: #e6b4e5; font-size: 16px; }
 .workspace-callout p { margin: 0; color: #a89eae; font-size: 10px; line-height: 1.75; }
 .workspace-callout strong { color: #eae0ec; font-weight: 590; }
+.workspace-actions { margin-top: 21px; }
 
 .settings-page { min-height: 70vh; padding-block: 70px 100px; }
 .settings-layout { display: grid; grid-template-columns: minmax(180px, 240px) minmax(0, 1fr); gap: 28px; margin-top: 30px; }
+.settings-sections { display: grid; gap: 12px; }
 .settings-nav { display: grid; align-content: start; gap: 5px; padding: 9px; border: 1px solid #302b38; border-radius: 12px; background: #141119; }
 .settings-nav a { padding: 11px 12px; border-radius: 8px; color: #b4aaba; font-size: 10px; }
 .settings-nav a[aria-current="page"] { color: #f2e7f5; background: #27212e; }
 .settings-content { padding: 25px; border: 1px solid #302b38; border-radius: 14px; background: linear-gradient(150deg, #17141d, #110f16); }
 .settings-content h2 { margin: 0 0 7px; font-size: 17px; font-weight: 570; }
 .settings-content > p { margin: 0 0 22px; color: #a39aaa; font-size: 11px; line-height: 1.8; }
+.settings-content .account-card { max-width: none; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
 .settings-info-row { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 14px 0; border-top: 1px solid #322d39; }
 .settings-info-row span { color: #cfc5d4; font-size: 10px; }
 .settings-info-row small { color: #968c9c; font-size: 9px; text-align: right; }

@@ -22,6 +22,10 @@ type AccountState =
   | "invalid-profile"
   | "error";
 
+function getAccountErrorMessage(): string {
+  return "We couldn’t load your account details. Check your connection and try again.";
+}
+
 export default function AccountPanel() {
   const router = useRouter();
   const [state, setState] = useState<AccountState>("loading");
@@ -84,15 +88,15 @@ export default function AccountPanel() {
             });
             setState("profile");
           },
-          (snapshotError) => {
+          () => {
             setState("error");
-            setError(`Could not read your profile from Firestore: ${snapshotError.message}`);
+            setError(getAccountErrorMessage());
           },
         );
       },
-      (authError) => {
+      () => {
         setState("error");
-        setError(`Could not check your Firebase sign-in state: ${authError.message}`);
+        setError(getAccountErrorMessage());
       },
     );
 
@@ -108,12 +112,8 @@ export default function AccountPanel() {
     try {
       await signOut(getFirebaseAuth());
       router.replace("/sign-in");
-    } catch (signOutError) {
-      setError(
-        signOutError instanceof Error
-          ? `Could not sign out: ${signOutError.message}`
-          : "Could not sign out. Please try again.",
-      );
+    } catch {
+      setError("We couldn’t sign you out. Check your connection and try again.");
     } finally {
       setSigningOut(false);
     }

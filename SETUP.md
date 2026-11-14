@@ -21,9 +21,13 @@ This project is designed for a totally free stack and intentionally avoids paid 
   - your Vercel preview domain when testing preview deploys
 - Set the Google OAuth redirect URI to:
   - `https://<domain>/__/auth/handler`
+- For production, set `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` to the same custom domain.
+  The Next.js rewrite proxies `/__/auth/*` to `<project-id>.firebaseapp.com`.
 - Confirm the Firebase project allows Google sign-in and email/password sign-in.
 - Set the web app configuration in `.env.local` or Vercel environment variables.
 - Keep the project on the free Firebase plan. Do not enable paid Identity Platform features.
+- Email/password accounts must verify their email before their profile is saved
+  and workspace access is granted.
 
 ## Required Vercel settings
 
@@ -79,6 +83,7 @@ This project is designed for a totally free stack and intentionally avoids paid 
 - [ ] Vercel Preview and Production env vars are populated
 - [ ] Google OAuth redirect URL is configured
 - [ ] Firebase Auth authorized domains include local and production hosts
+- [ ] `https://<domain>/__/auth/handler` is set as the Google OAuth redirect URI
 - [ ] Firestore rules are deployed
 - [ ] Storage rules are deployed as deny-all
 - [ ] OpenRouter API key is set server-side only
@@ -94,3 +99,9 @@ This project is designed for a totally free stack and intentionally avoids paid 
 - Vercel Hobby is non-commercial and personal-use only.
 - This app keeps host-specific configuration isolated when reasonable so features are easy to move later.
 - No paid provider add-ons or billing-backed features should be enabled for this project.
+- The password breach check sends only a SHA-1 hash range to the server; the
+  server queries the Have I Been Pwned k-anonymity endpoint and never receives
+  the plaintext password.
+- The current site is not load-tested for 100,000 simultaneous users. Firebase
+  Spark's daily quotas and Vercel Hobby limits do not establish that capacity;
+  high-concurrency chat requires a separately designed and measured backend.

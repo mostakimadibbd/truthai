@@ -6,6 +6,15 @@ type PasswordCheckRequest = {
 };
 
 export async function POST(request: Request) {
+  const contentType = request.headers.get("content-type")?.split(";")[0].trim();
+  const contentLength = Number(request.headers.get("content-length"));
+  if (
+    contentType !== "application/json" ||
+    (Number.isFinite(contentLength) && contentLength > 256)
+  ) {
+    return NextResponse.json({ error: "invalid_request" }, { status: 400 });
+  }
+
   let body: PasswordCheckRequest;
   try {
     body = (await request.json()) as PasswordCheckRequest;
@@ -46,8 +55,17 @@ export async function POST(request: Request) {
     );
   }
 
+  let lines: string[];
+  try {
+    lines = (await response.text()).split(/\r?\n/);
+  } catch {
+    return NextResponse.json(
+      { error: "password_check_unavailable" },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
   const suffix = body.suffix.toUpperCase();
-  const lines = (await response.text()).split(/\r?\n/);
   const pwned = lines.some((line) => {
     const [candidate, count] = line.split(":");
     return candidate?.toUpperCase() === suffix && Number(count) > 0;

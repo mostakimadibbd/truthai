@@ -22,7 +22,6 @@ export function middleware(request: NextRequest) {
     "media-src 'self' blob:",
     "manifest-src 'self'",
     "require-trusted-types-for 'script'",
-    "trusted-types default nextjs",
   ].join("; ");
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);
