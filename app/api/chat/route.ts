@@ -265,7 +265,6 @@ export async function POST(request: NextRequest) {
   const assistantRef = messagesRef.doc(assistantMessageId);
   let responseText = "";
   let locked = false;
-  let userMessageSaved = false;
   let assistantCreated = false;
   let assistantSaved = false;
   let modelMessages: StoredChatMessage[] = [];
@@ -390,7 +389,6 @@ export async function POST(request: NextRequest) {
         status: "complete",
         createdAt: Timestamp.now(),
       });
-      userMessageSaved = true;
     }
     batch.create(assistantRef, {
       role: "assistant",
@@ -419,7 +417,6 @@ export async function POST(request: NextRequest) {
       updatedAt: Timestamp.now(),
     }, { merge: true });
     await batch.commit();
-    userMessageSaved = !regenerate;
     assistantCreated = true;
 
     const contextMessages = regenerate
@@ -459,10 +456,7 @@ export async function POST(request: NextRequest) {
             : {}),
           stream: true,
           max_tokens: 2048,
-        }).replace(
-          /"plugins":\[\{"id":"file-parser","pdf":\{"engine":"cloudflare-ai"\}\}\]/,
-          '"plugins":[{"id":"file-parser","pdf":{"engine":"cloudflare-ai"}}]',
-        ),
+        }),
         signal: AbortSignal.any([request.signal, AbortSignal.timeout(45_000)]),
         cache: "no-store",
       });
@@ -553,7 +547,7 @@ export async function POST(request: NextRequest) {
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
-    if (assistantRef && assistantCreated && !assistantSaved) {
+    if (assistantCreated && !assistantSaved) {
       try {
         if (responseText) {
           await assistantRef.update({
