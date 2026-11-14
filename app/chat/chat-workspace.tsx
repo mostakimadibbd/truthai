@@ -9,6 +9,14 @@ import {
   signOut,
   type User,
 } from "firebase/auth";
+import { onValue, ref } from "firebase/database";
+import {
+  collection,
+  limit,
+  onSnapshot,
+  orderBy,
+  query,
+} from "firebase/firestore";
 import {
   useCallback,
   useEffect,
@@ -20,12 +28,27 @@ import {
 } from "react";
 import FirebasePresence from "@/components/firebase-presence";
 import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/auth-client";
+import {
+  getFirebaseFirestore,
+  getFirebaseRealtimeDatabase,
+} from "@/lib/firebase/client";
+
+type Attachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  accessUrl?: string;
+  uploading?: boolean;
+};
 
 type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
   createdAt: number;
+  attachments: Attachment[];
+  status?: "generating" | "complete" | "failed" | "stopped";
 };
 
 type Chat = {
@@ -33,6 +56,9 @@ type Chat = {
   title: string;
   updatedAt: number;
   messages: Message[];
+  searchText?: string;
+  lastMessagePreview?: string;
+  persisted?: boolean;
 };
 
 type AuthState = "loading" | "not-configured" | "signed-out" | "unverified" | "ready";
@@ -40,6 +66,37 @@ type AuthState = "loading" | "not-configured" | "signed-out" | "unverified" | "r
 const HISTORY_LIMIT = 20;
 const MESSAGE_LIMIT = 30;
 const MESSAGE_MAX_LENGTH = 12_000;
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const MAX_FILES_PER_MESSAGE = 5;
+const ACCEPTED_FILE_TYPES = ".jpg,.jpeg,.png,.webp,.gif,.pdf,.txt,.md,.csv";
+
+function toMillis(value: unknown, fallback = Date.now()): number {
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "toMillis" in value &&
+    typeof value.toMillis === "function"
+  ) {
+    return value.toMillis();
+  }
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+async function getApiError(response: Response, fallback: string): Promise<string> {
+  const result: unknown = await response.json().catch(() => null);
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "error" in result &&
+    typeof result.error === "object" &&
+    result.error !== null &&
+    "message" in result.error &&
+    typeof result.error.message === "string"
+  ) {
+    return result.error.message;
+  }
+  return fallback;
+}
 
 function isChat(value: unknown): value is Chat {
   if (typeof value !== "object" || value === null) return false;
@@ -71,11 +128,13 @@ function newChat(): Chat {
     title: "New chat",
     updatedAt: Date.now(),
     messages: [],
+    searchText: "",
+    persisted: false,
   };
 }
 
 function newMessage(role: Message["role"], content = ""): Message {
-  return { id: crypto.randomUUID(), role, content, createdAt: Date.now() };
+  return { id: crypto.randomUUID(), role, content, createdAt: Date.now(), attachments: [] };
 }
 
 function getChatGroup(timestamp: number): string {
@@ -157,6 +216,7 @@ export default function ChatWorkspace() {
   const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
   const [attachmentUrls, setAttachmentUrls] = useState<Record<string, string>>({});
   const controllerRef = useRef<AbortController | null>(null);
+  const attachmentUrlLoadingRef = useRef(new Set<string>());
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -164,6 +224,9 @@ export default function ChatWorkspace() {
   const previousChatIdRef = useRef<string | null>(null);
   const activeChat = chats.find((chat) => chat.id === activeChatId) ?? null;
   const activeMessages = activeChat?.messages ?? [];
+  const attachmentPreviewKey = activeMessages
+    .flatMap((message) => message.attachments.map((attachment) => attachment.id))
+    .join(",");
   const updateChat = useCallback((chatId: string, update: (chat: Chat) => Chat) => {
     setChats((previous) =>
       previous.map((chat) => (chat.id === chatId ? update(chat) : chat))
@@ -261,6 +324,7 @@ export default function ChatWorkspace() {
                 searchText: typeof data.searchText === "string" ? data.searchText : "",
                 lastMessagePreview:
                   typeof data.lastMessagePreview === "string" ? data.lastMessagePreview : "",
+                persisted: true,
               };
             });
             setChats(loadedChats);
@@ -352,6 +416,52 @@ export default function ChatWorkspace() {
     }
     return () => unsubscribeMessages?.();
   }, [activeChatId, authState, updateChat, user]);
+
+  useEffect(() => {
+    if (!user) return;
+    let active = true;
+    for (const attachment of activeMessages.flatMap((message) => message.attachments)) {
+      if (attachment.accessUrl || attachmentUrlLoadingRef.current.has(attachment.id)) continue;
+      attachmentUrlLoadingRef.current.add(attachment.id);
+      void (async () => {
+        try {
+          const idToken = await user.getIdToken();
+          const response = await fetch(
+            `/api/uploads/access?assetId=${encodeURIComponent(attachment.id)}`,
+            { headers: { Authorization: `Bearer ${idToken}` }, cache: "no-store" },
+          );
+          if (!response.ok) {
+            throw new Error(await getApiError(response, "This attachment is temporarily unavailable."));
+          }
+          const result: unknown = await response.json();
+          if (
+            typeof result !== "object" ||
+            result === null ||
+            !("accessUrl" in result) ||
+            typeof result.accessUrl !== "string"
+          ) {
+            throw new Error("This attachment is temporarily unavailable.");
+          }
+          if (active) {
+            setAttachmentUrls((previous) => ({
+              ...previous,
+              [attachment.id]: result.accessUrl,
+            }));
+          }
+        } catch (error) {
+          if (active) {
+            console.error("Couldn’t load a private chat attachment.", error);
+            setNotice("An attachment preview couldn’t be loaded. Try again shortly.");
+          }
+        } finally {
+          attachmentUrlLoadingRef.current.delete(attachment.id);
+        }
+      })();
+    }
+    return () => {
+      active = false;
+    };
+  }, [activeChatId, attachmentPreviewKey, user]);
 
   useEffect(() => {
     if (!user || !activeChatId || authState !== "ready") return;
