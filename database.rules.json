@@ -11,6 +11,14 @@
             ".validate": "newData.isBoolean() && newData.val() == true"
           }
         }
+      },
+      "chatStreams": {
+        "$uid": {
+          "$chatId": {
+            ".read": "auth != null && auth.uid == $uid",
+            ".write": false
+          }
+        }
       }
     }
   }

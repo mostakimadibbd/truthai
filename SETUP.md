@@ -40,9 +40,11 @@ This project is designed for a totally free stack and intentionally avoids paid 
   accessing AI features; if Firestore rejects the profile write, the sign-in
   screen offers a retry. Verify that the deployed rules allow each signed-in
   user to read and write only their own `users/{uid}` profile.
-- Firestore is the source of truth for user profiles. Realtime Database stores
-  only per-device presence connections; authentication credentials belong only
-  in Firebase Authentication and are never copied to either database.
+- Firestore is the source of truth for user profiles and durable chat history.
+  Realtime Database stores per-device presence connections and temporary
+  in-progress response text. Chat and upload writes use Firebase Admin on the
+  server; clients can read only their own chat history and live responses.
+  Authentication credentials belong only in Firebase Authentication.
 
 ## Required Vercel settings
 
@@ -75,17 +77,29 @@ This project is designed for a totally free stack and intentionally avoids paid 
 
 ## Required chat storage and limits
 
-- The current chat release stores conversations only in the signed-in user's browser local storage. It does not sync history to Firestore or another device and does not encrypt that local history. Clearing browser storage deletes the saved history.
+- Firestore stores chat metadata and messages at `users/{uid}/chats/{chatId}`.
+  Realtime Database stores only the active response stream at
+  `chatStreams/{uid}/{chatId}`; the final response is saved to Firestore.
+- Existing browser-local chat history is imported to Firestore at first sign-in.
+  The local copy is removed only after the migration succeeds.
 - Configure `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`; chat fails closed if the capacity guard is unavailable.
 - The chat endpoint allows up to 10 requests per minute and 60 per day for each Firebase user. These are temporary MVP caps, not the planned configurable token budget or global model queue.
-- Text messages are limited to 12,000 characters each and a request carries at most 30 messages. Attachments, web search, deep research, image generation, projects, and model selection are not available yet.
+- Text messages are limited to 12,000 characters each and a request carries at most 30 messages. Free model availability and vision support vary by provider; unsupported attachments return an error rather than silently dropping the file.
 
 ## Required Cloudinary settings
 
-- Create a Cloudinary free account and keep storage under the per-user limit.
-- Set `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` in the server env.
-- Keep image sizes compressed to 2048px maximum and under the 5 MB upload cap.
-- Use the app's own proxy route rather than public Cloudinary URLs when possible.
+- Create a Cloudinary free account. Configure a **signed** upload preset that
+  allows only `jpg`, `jpeg`, `png`, `webp`, `gif`, `pdf`, `txt`, `md`, and `csv`,
+  with a 10 MB maximum file size. Do not enable unsigned uploads.
+- Set `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`,
+  `CLOUDINARY_API_SECRET`, and `CLOUDINARY_UPLOAD_PRESET` in local and Vercel
+  server environments. Never expose the API secret to the browser.
+- Images and documents upload directly from the browser to Cloudinary so the
+  file body does not pass through a Vercel Function. Assets use authenticated
+  delivery and short-lived private download URLs. Each message accepts up to
+  five files (20 MB combined); each chat allows up to 50 uploads.
+- Deleting a chat deletes its Firestore history and associated Cloudinary
+  assets. Uploads are retained until the chat is deleted.
 
 ## Required Upstash settings
 
@@ -124,7 +138,7 @@ This project is designed for a totally free stack and intentionally avoids paid 
 - [ ] OpenRouter API key is set server-side only
 - [ ] `NEXT_PUBLIC_TURNSTILE_SITE_KEY` and `TURNSTILE_SECRET_KEY` are configured
 - [ ] Firebase Admin project ID, client email, and private key are configured server-side
-- [ ] Cloudinary keys are configured
+- [ ] Cloudinary credentials and signed upload preset are configured
 - [ ] Redis keys are configured
 - [ ] Email provider API key is configured
 - [ ] App Check keys are configured

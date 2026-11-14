@@ -8,6 +8,7 @@ export function getFirebaseAdminApp() {
   const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL?.trim();
   const privateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY?.replace(/\\n/g, "\n").trim();
   const clientProjectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID?.trim();
+  const databaseURL = process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL?.trim();
 
   if (!projectId || !clientEmail || !privateKey) {
     throw new Error("Firebase Admin credentials are not configured.");
@@ -19,7 +20,11 @@ export function getFirebaseAdminApp() {
   const appName = "xyro-auth";
   return getApps().find((candidate) => candidate.name === appName) ??
     initializeApp(
-      { credential: cert({ projectId, clientEmail, privateKey }), projectId },
+      {
+        credential: cert({ projectId, clientEmail, privateKey }),
+        projectId,
+        databaseURL,
+      },
       appName,
     );
 }
@@ -37,5 +42,5 @@ export function getFirebaseAdminDatabase() {
   if (!databaseURL) {
     throw new Error("Realtime Database is not configured.");
   }
-  return getDatabase(getFirebaseAdminApp(), databaseURL);
+  return getDatabase(getFirebaseAdminApp());
 }
