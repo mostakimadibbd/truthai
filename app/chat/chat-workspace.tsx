@@ -79,6 +79,7 @@ const HISTORY_LIMIT = 20;
 const MESSAGE_LIMIT = 30;
 const MESSAGE_MAX_LENGTH = 12_000;
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const MAX_FILE_BYTES_PER_MESSAGE = 20 * 1024 * 1024;
 const MAX_FILES_PER_MESSAGE = 5;
 const ACCEPTED_FILE_TYPES = ".jpg,.jpeg,.png,.webp,.gif,.pdf,.txt,.md,.csv";
 
@@ -715,7 +716,7 @@ export default function ChatWorkspace() {
     try {
       const chat = chats.find((item) => item.id === chatId);
       if (!chat) return;
-      const persistedChat = await ensurePersistedChat(chat);
+      await ensurePersistedChat(chat);
       const idToken = await user.getIdToken();
       const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}`, {
         method: "PATCH",
@@ -728,10 +729,189 @@ export default function ChatWorkspace() {
       if (!response.ok) {
         throw new Error(await getApiError(response, "The conversation name couldn’t be saved."));
       }
-      updateChat(chatId, (current) => ({ ...current, ...persistedChat, title }));
+      updateChat(chatId, (current) => ({ ...current, persisted: true, title }));
     } catch (error) {
       updateChat(chatId, (chat) => ({ ...chat, title: previousTitle }));
       setNotice(error instanceof Error ? error.message : "The conversation name couldn’t be saved.");
+    }
+  }
+
+  async function handleFilesSelected(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+    if (!files.length || !user) return;
+    if (sending || uploadingFiles) return;
+
+    const slots = MAX_FILES_PER_MESSAGE - pendingAttachments.length;
+    if (slots <= 0) {
+      setNotice(`Attach up to ${MAX_FILES_PER_MESSAGE} files to one message.`);
+      return;
+    }
+
+    const validFiles: File[] = [];
+    let totalBytes = pendingAttachments.reduce((total, item) => total + item.size, 0);
+    for (const file of files.slice(0, slots)) {
+      const extension = file.name.split(".").at(-1)?.toLowerCase();
+      const accepted = ACCEPTED_FILE_TYPES.split(",").includes(`.${extension}`);
+      if (!accepted || file.size < 1 || file.size > MAX_FILE_SIZE) {
+        setNotice("Use an image, PDF, TXT, Markdown, or CSV file no larger than 10 MB.");
+        continue;
+      }
+      if (totalBytes + file.size > MAX_FILE_BYTES_PER_MESSAGE) {
+        setNotice("Files in one message can total no more than 20 MB.");
+        continue;
+      }
+      totalBytes += file.size;
+      validFiles.push(file);
+    }
+    if (files.length > slots) {
+      setNotice(`Attach up to ${MAX_FILES_PER_MESSAGE} files to one message.`);
+    }
+    if (!validFiles.length) return;
+
+    setUploadingFiles(true);
+    setNotice("");
+    try {
+      let chat = chats.find((item) => item.id === activeChatId);
+      if (!chat) {
+        chat = newChat();
+        setChats((previous) => [chat!, ...previous].slice(0, HISTORY_LIMIT));
+        setActiveChatId(chat.id);
+      }
+      await ensurePersistedChat(chat);
+
+      for (const file of validFiles) {
+        const placeholder: Attachment = {
+          id: `uploading-${crypto.randomUUID()}`,
+          name: file.name,
+          mimeType: file.type || "application/octet-stream",
+          size: file.size,
+          uploading: true,
+        };
+        setPendingAttachments((previous) => [...previous, placeholder]);
+        let assetId = "";
+        try {
+          const idToken = await user.getIdToken();
+          const signatureResponse = await fetch("/api/uploads/sign", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${idToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              chatId: chat.id,
+              name: file.name,
+              mimeType: file.type,
+              size: file.size,
+            }),
+          });
+          if (!signatureResponse.ok) {
+            throw new Error(await getApiError(signatureResponse, "The file couldn’t be prepared for upload."));
+          }
+          const signatureValue: unknown = await signatureResponse.json();
+          if (!isUploadSignature(signatureValue)) {
+            throw new Error("The upload service returned invalid signing details.");
+          }
+          assetId = signatureValue.assetId;
+
+          const uploadData = new FormData();
+          uploadData.append("file", file);
+          uploadData.append("api_key", signatureValue.apiKey);
+          uploadData.append("timestamp", String(signatureValue.timestamp));
+          uploadData.append("public_id", signatureValue.publicId);
+          uploadData.append("type", signatureValue.deliveryType);
+          uploadData.append("overwrite", "false");
+          uploadData.append("upload_preset", signatureValue.uploadPreset);
+          uploadData.append("signature", signatureValue.signature);
+
+          const cloudinaryResponse = await fetch(
+            `https://api.cloudinary.com/v1_1/${encodeURIComponent(signatureValue.cloudName)}/${signatureValue.resourceType}/upload`,
+            { method: "POST", body: uploadData },
+          );
+          if (!cloudinaryResponse.ok) {
+            throw new Error("Cloudinary couldn’t upload this file. Please try again.");
+          }
+
+          const confirmResponse = await fetch("/api/uploads/confirm", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${idToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ assetId }),
+          });
+          if (!confirmResponse.ok) {
+            throw new Error(await getApiError(confirmResponse, "The uploaded file couldn’t be verified."));
+          }
+          const confirmation: unknown = await confirmResponse.json();
+          const attachmentValue =
+            typeof confirmation === "object" &&
+            confirmation !== null &&
+            "attachment" in confirmation
+              ? confirmation.attachment
+              : undefined;
+          if (!isAttachment(attachmentValue) || attachmentValue.size !== file.size) {
+            throw new Error("The uploaded file didn’t match its verified metadata.");
+          }
+
+          setPendingAttachments((previous) =>
+            previous.map((item) => item.id === placeholder.id ? attachmentValue : item),
+          );
+          setAttachmentUrls((previous) => ({
+            ...previous,
+            [attachmentValue.id]: attachmentValue.accessUrl!,
+          }));
+        } catch (error) {
+          if (assetId) {
+            try {
+              const cleanupToken = await user.getIdToken();
+              const cleanupResponse = await fetch(`/api/uploads/${encodeURIComponent(assetId)}`, {
+                method: "DELETE",
+                headers: { Authorization: `Bearer ${cleanupToken}` },
+              });
+              if (!cleanupResponse.ok) {
+                console.error(
+                  "Couldn’t remove the failed upload.",
+                  await getApiError(cleanupResponse, "Cloudinary cleanup failed."),
+                );
+              }
+            } catch (cleanupError) {
+              console.error("Couldn’t remove the failed upload.", cleanupError);
+            }
+          }
+          setPendingAttachments((previous) =>
+            previous.filter((item) => item.id !== placeholder.id),
+          );
+          setNotice(
+            `${file.name}: ${
+              error instanceof Error ? error.message : "The file couldn’t be uploaded."
+            }`,
+          );
+        }
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Files couldn’t be uploaded.");
+    } finally {
+      setUploadingFiles(false);
+    }
+  }
+
+  async function removePendingAttachment(attachment: Attachment) {
+    if (attachment.uploading || !user) return;
+    try {
+      const idToken = await user.getIdToken();
+      const response = await fetch(`/api/uploads/${encodeURIComponent(attachment.id)}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (!response.ok) {
+        throw new Error(await getApiError(response, "This attachment couldn’t be removed."));
+      }
+      setPendingAttachments((previous) =>
+        previous.filter((item) => item.id !== attachment.id),
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "This attachment couldn’t be removed.");
     }
   }
 
@@ -762,7 +942,7 @@ export default function ChatWorkspace() {
 
   async function sendMessage(text: string, regenerate = false) {
     const content = text.trim();
-    if (!user || !content || sending) return;
+    if (!user || sending) return;
     if (content.length > MESSAGE_MAX_LENGTH) {
       setNotice(`Messages must be ${MESSAGE_MAX_LENGTH.toLocaleString()} characters or fewer.`);
       return;
@@ -771,52 +951,36 @@ export default function ChatWorkspace() {
     let chat = chats.find((item) => item.id === activeChatId);
     if (!chat) {
       chat = newChat();
+      setChats((previous) => [chat!, ...previous].slice(0, HISTORY_LIMIT));
       setActiveChatId(chat.id);
     }
+    const lastUserMessage = [...chat.messages].reverse().find((item) => item.role === "user");
+    const attachments = regenerate
+      ? lastUserMessage?.attachments ?? []
+      : pendingAttachments.filter((attachment) => !attachment.uploading);
+    if (pendingAttachments.some((attachment) => attachment.uploading) || uploadingFiles) {
+      setNotice("Wait for your uploads to finish before sending.");
+      return;
+    }
+    if (regenerate && !lastUserMessage) return;
+    if (!regenerate && !content && !attachments.length) return;
+    if (attachments.length > MAX_FILES_PER_MESSAGE) {
+      setNotice(`Attach up to ${MAX_FILES_PER_MESSAGE} files to one message.`);
+      return;
+    }
 
-    const conversation = [...chat.messages];
-    if (regenerate && conversation.at(-1)?.role === "assistant") conversation.pop();
-    const message = regenerate ? null : newMessage("user", content);
-    const assistantMessage = newMessage("assistant");
-    const nextMessages = [
-      ...conversation,
-      ...(message ? [message] : []),
-      assistantMessage,
-    ].slice(-MESSAGE_LIMIT);
-    const title =
-      chat.title === "New chat" && message
-        ? content.slice(0, 60).replace(/\s+\S*$/, "").trim() || content.slice(0, 60)
-        : chat.title;
-    const initialChat: Chat = {
-      ...chat,
-      title,
-      updatedAt: Date.now(),
-      messages: nextMessages,
-    };
-
-    setChats((previous) => [
-      initialChat,
-      ...previous.filter((item) => item.id !== initialChat.id),
-    ].slice(0, HISTORY_LIMIT));
-    setActiveChatId(initialChat.id);
+    const messageContent = regenerate ? lastUserMessage?.content ?? "" : content;
+    const userMessageId = regenerate ? lastUserMessage?.id : crypto.randomUUID();
+    if (!userMessageId) return;
+    const assistantMessageId = crypto.randomUUID();
+    const responseId = crypto.randomUUID();
+    const controller = new AbortController();
+    controllerRef.current = controller;
     setDraft("");
     setNotice("");
     setSending(true);
-
-    const requestMessages = [
-      ...conversation,
-      ...(message ? [message] : []),
-    ]
-      .slice(-MESSAGE_LIMIT)
-      .map(({ role, content: messageContent }) => ({ role, content: messageContent }));
-    let requestLength = requestMessages.reduce((total, item) => total + item.content.length, 0);
-    while (requestLength > 36_000 && requestMessages.length > 1) {
-      requestLength -= requestMessages.shift()?.content.length ?? 0;
-    }
-    const controller = new AbortController();
-    controllerRef.current = controller;
-
     try {
+      chat = await ensurePersistedChat(chat);
       const idToken = await user.getIdToken();
       const response = await fetch("/api/chat", {
         method: "POST",
@@ -824,121 +988,41 @@ export default function ChatWorkspace() {
           Authorization: `Bearer ${idToken}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ messages: requestMessages }),
+        body: JSON.stringify({
+          chatId: chat.id,
+          responseId,
+          userMessageId,
+          assistantMessageId,
+          content: messageContent,
+          attachmentIds: attachments.map((attachment) => attachment.id),
+          regenerate,
+        }),
         signal: controller.signal,
       });
 
       if (!response.ok) {
-        const result: unknown = await response.json().catch(() => null);
-        const errorMessage =
-          typeof result === "object" &&
-          result !== null &&
-          "error" in result &&
-          typeof result.error === "object" &&
-          result.error !== null &&
-          "message" in result.error &&
-          typeof result.error.message === "string"
-            ? result.error.message
-            : "The assistant couldn’t respond. Please try again.";
-        throw new Error(errorMessage);
+        throw new Error(await getApiError(response, "The assistant couldn’t respond. Please try again."));
       }
-      if (!response.body) throw new Error("The assistant returned an empty response.");
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let streamError = "";
-      let streamDone = false;
-
-      function handleEventLine(line: string) {
-        if (!line.startsWith("data:")) return;
-        const payload = line.slice(5).trim();
-        if (!payload || payload === "[DONE]") {
-          if (payload === "[DONE]") streamDone = true;
-          return;
-        }
-        try {
-          const event: unknown = JSON.parse(payload);
-          if (typeof event !== "object" || event === null) return;
-          if (
-            "error" in event &&
-            typeof event.error === "object" &&
-            event.error !== null &&
-            "message" in event.error &&
-            typeof event.error.message === "string"
-          ) {
-            streamError = "The model stream stopped unexpectedly. Please try again.";
-            return;
-          }
-          if (!("choices" in event) || !Array.isArray(event.choices)) return;
-          const delta = event.choices[0];
-          if (
-            typeof delta !== "object" ||
-            delta === null ||
-            !("delta" in delta) ||
-            typeof delta.delta !== "object" ||
-            delta.delta === null ||
-            !("content" in delta.delta) ||
-            typeof delta.delta.content !== "string"
-          ) {
-            return;
-          }
-          const textDelta = delta.delta.content;
-          if (!textDelta) return;
-          updateChat(initialChat.id, (current) => ({
-            ...current,
-            updatedAt: Date.now(),
-            messages: current.messages.map((item) =>
-              item.id === assistantMessage.id
-                ? { ...item, content: item.content + textDelta }
-                : item,
-            ),
-          }));
-        } catch {
-          streamError = "The assistant returned a response we couldn’t read.";
-        }
+      const result: unknown = await response.json();
+      if (
+        typeof result !== "object" ||
+        result === null ||
+        !("success" in result) ||
+        result.success !== true
+      ) {
+        throw new Error("The assistant returned an invalid response.");
       }
-
-      while (true) {
-        const { done, value } = await reader.read();
-        buffer += decoder.decode(value, { stream: !done });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) handleEventLine(line.trimEnd());
-        if (done) break;
-      }
-      if (buffer) handleEventLine(buffer.trimEnd());
-      if (streamError) throw new Error(streamError);
-      if (!streamDone && !controller.signal.aborted) {
-        updateChat(initialChat.id, (current) => ({
-          ...current,
-          messages: current.messages.map((item) =>
-            item.id === assistantMessage.id && !item.content
-              ? { ...item, content: "The response ended before any text arrived. Please try again." }
-              : item,
-          ),
-        }));
-      }
+      if (!regenerate) setPendingAttachments([]);
     } catch (sendError) {
       if (sendError instanceof Error && sendError.name === "AbortError") {
         setNotice("Response stopped.");
       } else {
-        const messageText =
+        setDraft(content);
+        setNotice(
           sendError instanceof Error
             ? sendError.message
-            : "The assistant couldn’t respond. Please try again.";
-        updateChat(initialChat.id, (current) => {
-          const hasResponse = current.messages.some(
-            (item) => item.id === assistantMessage.id && item.content,
-          );
-          return {
-            ...current,
-            messages: hasResponse
-              ? current.messages
-              : current.messages.filter((item) => item.id !== assistantMessage.id),
-          };
-        });
-        setNotice(messageText);
+            : "The assistant couldn’t respond. Please try again.",
+        );
       }
     } finally {
       controllerRef.current = null;
@@ -1275,6 +1359,36 @@ export default function ChatWorkspace() {
                     <span className="chat-message-author">
                       {message.role === "assistant" ? "Xyro AI" : "You"}
                     </span>
+                    {message.attachments.length > 0 && (
+                      <div className="chat-message-attachments">
+                        {message.attachments.map((attachment) => {
+                          const accessUrl =
+                            attachmentUrls[attachment.id] ?? attachment.accessUrl;
+                          return (
+                            <a
+                              className="chat-message-attachment"
+                              key={attachment.id}
+                              href={accessUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              aria-label={`Open ${attachment.name}`}
+                            >
+                              {attachment.mimeType.startsWith("image/") && accessUrl ? (
+                                <img src={accessUrl} alt={attachment.name} loading="lazy" />
+                              ) : (
+                                <span className="chat-file-badge" aria-hidden="true">
+                                  {attachment.name.split(".").at(-1)?.toUpperCase() ?? "FILE"}
+                                </span>
+                              )}
+                              <span className="chat-attachment-name">{attachment.name}</span>
+                              <span className="chat-attachment-size">
+                                {formatFileSize(attachment.size)}
+                              </span>
+                            </a>
+                          );
+                        })}
+                      </div>
+                    )}
                     <div className="chat-message-content">
                       {message.content || (sending && message.role === "assistant" ? (
                         <span className="chat-thinking" role="status"><i /><i /><i /> Thinking</span>
@@ -1311,7 +1425,48 @@ export default function ChatWorkspace() {
 
         <div className="chat-composer-area">
           {notice && <p className="chat-notice" role="status">{notice}</p>}
+          {pendingAttachments.length > 0 && (
+            <div className="chat-pending-attachments" aria-label="Attachments to send">
+              {pendingAttachments.map((attachment) => {
+                const accessUrl =
+                  attachmentUrls[attachment.id] ?? attachment.accessUrl;
+                return (
+                  <div className="chat-pending-attachment" key={attachment.id}>
+                    {attachment.mimeType.startsWith("image/") && accessUrl ? (
+                      <img src={accessUrl} alt="" />
+                    ) : (
+                      <span className="chat-file-badge" aria-hidden="true">
+                        {attachment.name.split(".").at(-1)?.toUpperCase() ?? "FILE"}
+                      </span>
+                    )}
+                    <span className="chat-attachment-name">{attachment.name}</span>
+                    <span className="chat-attachment-size">
+                      {attachment.uploading ? "Uploading…" : formatFileSize(attachment.size)}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label={`Remove ${attachment.name}`}
+                      disabled={attachment.uploading || uploadingFiles || sending}
+                      onClick={() => void removePendingAttachment(attachment)}
+                    >
+                      <Icon name="close" size={14} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <form className="chat-composer" onSubmit={handleSubmit}>
+            <input
+              ref={fileInputRef}
+              className="chat-file-input"
+              type="file"
+              accept={ACCEPTED_FILE_TYPES}
+              multiple
+              onChange={handleFilesSelected}
+              disabled={sending || uploadingFiles}
+              aria-label="Attach images or documents"
+            />
             <textarea
               ref={textareaRef}
               value={draft}
@@ -1332,8 +1487,24 @@ export default function ChatWorkspace() {
               <span className="chat-composer-hint">
                 {draft.length > MESSAGE_MAX_LENGTH - 500
                   ? `${draft.length.toLocaleString()} / ${MESSAGE_MAX_LENGTH.toLocaleString()}`
-                  : "Shift + Enter for a new line"}
+                  : uploadingFiles
+                    ? "Uploading files…"
+                    : "Shift + Enter for a new line"}
               </span>
+              <button
+                className="chat-attach-button"
+                type="button"
+                aria-label="Attach images or documents"
+                title="Attach images or documents (10 MB max per file)"
+                disabled={
+                  sending ||
+                  uploadingFiles ||
+                  pendingAttachments.length >= MAX_FILES_PER_MESSAGE
+                }
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Icon name="attach" size={18} />
+              </button>
               {sending ? (
                 <button
                   className="chat-send-button chat-stop-button"
@@ -1350,7 +1521,10 @@ export default function ChatWorkspace() {
                   type="submit"
                   aria-label="Send message"
                   title="Send message"
-                  disabled={!draft.trim()}
+                  disabled={
+                    !draft.trim() &&
+                    pendingAttachments.length === 0
+                  }
                 >
                   <Icon name="send" size={17} />
                 </button>
