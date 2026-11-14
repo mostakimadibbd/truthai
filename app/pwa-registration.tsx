@@ -11,10 +11,10 @@ declare global {
   }
 }
 
-type ServiceWorkerPolicy = Pick<
-  TrustedTypePolicy<{ createScriptURL: (url: string) => string }>,
-  "name" | "createScriptURL"
->;
+type ServiceWorkerPolicy = {
+  name: string;
+  createScriptURL(url: string): TrustedScriptURL;
+};
 
 let serviceWorkerPolicy: ServiceWorkerPolicy | undefined;
 
