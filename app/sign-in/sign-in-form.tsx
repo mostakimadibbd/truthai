@@ -305,26 +305,26 @@ export default function SignInForm({
     } catch (authError) {
       setError(getAuthErrorMessage(authError));
     } finally {
-        if (mode === "sign-up") resetTurnstile();
+      if (mode === "sign-up") resetTurnstile();
       setBusy(false);
     }
   }
 
   async function handleGoogleSignIn() {
-      if (mode === "sign-up") {
-        if (!termsAccepted) {
-          setError("Please agree to the Terms and Conditions and Privacy Policy to create an account.");
-          return;
-        }
-        if (!turnstileSiteKey) {
-          setError("Account security verification isn’t configured. Please contact the site administrator.");
-          return;
-        }
-        if (!turnstileToken) {
-          setError("Complete the security check before creating an account.");
-          return;
-        }
+    if (mode === "sign-up") {
+      if (!termsAccepted) {
+        setError("Please agree to the Terms and Conditions and Privacy Policy to create an account.");
+        return;
       }
+      if (!turnstileSiteKey) {
+        setError("Account security verification isn’t configured. Please contact the site administrator.");
+        return;
+      }
+      if (!turnstileToken) {
+        setError("Complete the security check before creating an account.");
+        return;
+      }
+    }
 
     setBusy(true);
     setError("");
@@ -332,22 +332,22 @@ export default function SignInForm({
 
     try {
       const auth = getFirebaseAuth();
-        await setPersistence(
-          auth,
-          rememberMe ? browserLocalPersistence : browserSessionPersistence,
-        );
-        if (mode === "sign-up") {
-          const response = await fetch("/api/auth/turnstile", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ token: turnstileToken }),
-            cache: "no-store",
-          });
-          if (!response.ok) {
-            setError(await getApiErrorMessage(response, "The security check failed. Please try again."));
-            return;
-          }
+      await setPersistence(
+        auth,
+        rememberMe ? browserLocalPersistence : browserSessionPersistence,
+      );
+      if (mode === "sign-up") {
+        const response = await fetch("/api/auth/turnstile", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: turnstileToken }),
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          setError(await getApiErrorMessage(response, "The security check failed. Please try again."));
+          return;
         }
+      }
 
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: "select_account" });
@@ -583,11 +583,59 @@ export default function SignInForm({
           </div>
         ) : (
           <>
+            {mode === "sign-up" && (
+              <div className="auth-signup-security">
+                <label className="auth-checkbox-row auth-consent-row">
+                  <input
+                    type="checkbox"
+                    checked={termsAccepted}
+                    onChange={(event) => {
+                      setTermsAccepted(event.target.checked);
+                      setError("");
+                    }}
+                    disabled={!configured || busy}
+                  />
+                  <span>
+                    I agree to the <Link href="/terms">Terms and Conditions</Link> and have read the{" "}
+                    <Link href="/privacy">Privacy Policy</Link>.
+                  </span>
+                </label>
+                {turnstileSiteKey ? (
+                  <>
+                    <Script
+                      src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
+                      strategy="afterInteractive"
+                      onReady={notifyTurnstileReady}
+                      onError={() => setTurnstileStatus("The security check couldn’t load. Please refresh and try again.")}
+                    />
+                    <TurnstileField
+                      key={turnstileResetKey}
+                      siteKey={turnstileSiteKey}
+                      resetKey={turnstileResetKey}
+                      onToken={setTurnstileToken}
+                      onStatus={setTurnstileStatus}
+                    />
+                    {turnstileStatus && (
+                      <p className="turnstile-status" role="status">{turnstileStatus}</p>
+                    )}
+                  </>
+                ) : (
+                  <p className="turnstile-status" role="alert">
+                    Account creation security verification isn’t configured for this deployment.
+                  </p>
+                )}
+              </div>
+            )}
+
             <button
               className="button button-google"
               type="button"
               onClick={handleGoogleSignIn}
-              disabled={!configured || busy}
+              disabled={
+                !configured ||
+                busy ||
+                (mode === "sign-up" && (!termsAccepted || !turnstileSiteKey || !turnstileToken))
+              }
             >
               <span className="google-mark" aria-hidden="true">G</span>
               <span>Continue with Google</span>
@@ -634,6 +682,7 @@ export default function SignInForm({
                   name="password"
                   autoComplete={mode === "sign-in" ? "current-password" : "new-password"}
                   minLength={mode === "sign-up" ? 10 : 1}
+                  maxLength={1024}
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                   disabled={!configured || busy}
@@ -644,9 +693,22 @@ export default function SignInForm({
 
               {mode === "sign-up" && (
                 <p className="password-help">
-                  Use 10 or more characters. We’ll check that it hasn’t appeared in known breaches.
+                  Use 10 or more characters. We’ll check it securely against known breaches before creating your account.
                 </p>
               )}
+
+              <label className="auth-checkbox-row auth-remember-row">
+                <input
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={(event) => setRememberMe(event.target.checked)}
+                  disabled={!configured || busy}
+                />
+                <span>Remember me</span>
+                <small>
+                  {rememberMe ? "Stay signed in on this device" : "Sign out when you close the browser"}
+                </small>
+              </label>
 
               {mode === "sign-in" && (
                 <button
@@ -662,7 +724,11 @@ export default function SignInForm({
               <button
                 className="button button-primary auth-submit"
                 type="submit"
-                disabled={!configured || busy}
+                disabled={
+                  !configured ||
+                  busy ||
+                  (mode === "sign-up" && (!termsAccepted || !turnstileSiteKey || !turnstileToken))
+                }
               >
                 {busy
                   ? "Please wait…"
@@ -673,10 +739,16 @@ export default function SignInForm({
               </button>
             </form>
 
-            <p className="auth-legal">
-              By continuing, you agree to our <Link href="/terms">Terms</Link> and{" "}
-              <Link href="/privacy">Privacy Policy</Link>.
-            </p>
+            {mode === "sign-in" ? (
+              <p className="auth-legal">
+                By continuing, you agree to our <Link href="/terms">Terms</Link> and{" "}
+                <Link href="/privacy">Privacy Policy</Link>.
+              </p>
+            ) : (
+              <p className="auth-legal">
+                Your account stays yours. You can review or update your profile after signing in.
+              </p>
+            )}
           </>
         )}
       </section>
