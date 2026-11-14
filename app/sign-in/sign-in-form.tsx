@@ -28,9 +28,7 @@ type AuthMode = "sign-in" | "sign-up";
 
 function getAuthErrorMessage(error: unknown): string {
   if (!(error instanceof FirebaseError)) {
-    return error instanceof Error && error.message === "password-check-unavailable"
-      ? "We couldn’t check this password right now. Please try again in a moment."
-      : "Something went wrong. Please check your connection and try again.";
+    return "Something went wrong. Please check your connection and try again.";
   }
 
   switch (error.code) {
@@ -71,6 +69,27 @@ function getAuthErrorMessage(error: unknown): string {
     default:
       return "We couldn’t complete sign-in. Please try again.";
   }
+}
+
+async function getApiErrorMessage(response: Response, fallback: string): Promise<string> {
+  let result: unknown;
+  try {
+    result = await response.json();
+  } catch {
+    return fallback;
+  }
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "error" in result &&
+    typeof result.error === "object" &&
+    result.error !== null &&
+    "message" in result.error &&
+    typeof result.error.message === "string"
+  ) {
+    return result.error.message;
+  }
+  return fallback;
 }
 
 function getProfileSaveErrorMessage(error: unknown): string {
@@ -142,6 +161,12 @@ export default function SignInForm({
     router.refresh();
   }, [router]);
 
+  function resetTurnstile() {
+    setTurnstileToken("");
+    setTurnstileStatus("");
+    setTurnstileResetKey((key) => key + 1);
+  }
+
   useEffect(() => {
     if (!configured) return;
 
@@ -171,6 +196,21 @@ export default function SignInForm({
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (mode === "sign-up") {
+      if (!termsAccepted) {
+        setError("Please agree to the Terms and Conditions and Privacy Policy to create an account.");
+        return;
+      }
+      if (!turnstileSiteKey) {
+        setError("Account security verification isn’t configured. Please contact the site administrator.");
+        return;
+      }
+      if (!turnstileToken) {
+        setError("Complete the security check before creating your account.");
+        return;
+      }
+    }
+
     setBusy(true);
     setError("");
     setNotice("");
@@ -180,22 +220,44 @@ export default function SignInForm({
 
     try {
       const auth = getFirebaseAuth();
+      await setPersistence(
+        auth,
+        rememberMe ? browserLocalPersistence : browserSessionPersistence,
+      );
       if (mode === "sign-up") {
         if (password.length < 10) {
           setError("Use a password with at least 10 characters.");
           return;
         }
 
-        if (await checkPasswordNotBreached(password)) {
-          setError("This password appears in known data breaches. Please choose another one.");
+        const response = await fetch("/api/auth/sign-up", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: email.trim(),
+            password,
+            displayName: displayName.trim().slice(0, 100),
+            turnstileToken,
+          }),
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          setError(await getApiErrorMessage(response, "We couldn’t create your account. Please try again."));
           return;
         }
 
-        const credential = await createUserWithEmailAndPassword(
-          auth,
-          email.trim(),
-          password,
-        );
+        const result: unknown = await response.json();
+        if (
+          typeof result !== "object" ||
+          result === null ||
+          !("customToken" in result) ||
+          typeof result.customToken !== "string"
+        ) {
+          setError("The account service returned an invalid response. Please try again.");
+          return;
+        }
+
+        const credential = await signInWithCustomToken(auth, result.customToken);
         setVerificationUser(credential.user);
         setProfileSaved(false);
         setEmailVerified(false);
@@ -243,17 +305,50 @@ export default function SignInForm({
     } catch (authError) {
       setError(getAuthErrorMessage(authError));
     } finally {
+        if (mode === "sign-up") resetTurnstile();
       setBusy(false);
     }
   }
 
   async function handleGoogleSignIn() {
+      if (mode === "sign-up") {
+        if (!termsAccepted) {
+          setError("Please agree to the Terms and Conditions and Privacy Policy to create an account.");
+          return;
+        }
+        if (!turnstileSiteKey) {
+          setError("Account security verification isn’t configured. Please contact the site administrator.");
+          return;
+        }
+        if (!turnstileToken) {
+          setError("Complete the security check before creating an account.");
+          return;
+        }
+      }
+
     setBusy(true);
     setError("");
     setNotice("");
 
     try {
       const auth = getFirebaseAuth();
+        await setPersistence(
+          auth,
+          rememberMe ? browserLocalPersistence : browserSessionPersistence,
+        );
+        if (mode === "sign-up") {
+          const response = await fetch("/api/auth/turnstile", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token: turnstileToken }),
+            cache: "no-store",
+          });
+          if (!response.ok) {
+            setError(await getApiErrorMessage(response, "The security check failed. Please try again."));
+            return;
+          }
+        }
+
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: "select_account" });
       if (shouldUseRedirect()) {
@@ -277,6 +372,7 @@ export default function SignInForm({
     } catch (authError) {
       setError(getAuthErrorMessage(authError));
     } finally {
+      if (mode === "sign-up") resetTurnstile();
       setBusy(false);
     }
   }
