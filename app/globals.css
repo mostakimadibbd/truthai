@@ -427,6 +427,11 @@ h1, h2, h3, p { margin-top: 0; }
   .settings-info-row { align-items: flex-start; flex-direction: column; }
   .settings-info-row small { text-align: left; }
 }
+@media (max-width: 520px) {
+  .auth-signup-security { padding: 11px; }
+  .auth-remember-row { grid-template-columns: 19px minmax(0, 1fr); }
+  .auth-remember-row small { grid-column: 2; justify-self: start; margin-top: -6px; text-align: left; }
+}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }

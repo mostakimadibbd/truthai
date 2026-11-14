@@ -142,9 +142,9 @@ This project is designed for a totally free stack and intentionally avoids paid 
   pages are rendered per request.
 - This app keeps host-specific configuration isolated when reasonable so features are easy to move later.
 - No paid provider add-ons or billing-backed features should be enabled for this project.
-- The password breach check sends only a SHA-1 hash range to the server; the
-  server queries the Have I Been Pwned k-anonymity endpoint and never receives
-  the plaintext password.
+- During signup, the server hashes the password and sends only the first five
+  SHA-1 characters to the Have I Been Pwned k-anonymity endpoint; the endpoint
+  never receives the plaintext password.
 - The current site is not load-tested for 100,000 simultaneous users. Firebase
   Spark's daily quotas and Vercel Hobby limits do not establish that capacity;
   high-concurrency chat requires a separately designed and measured backend.
