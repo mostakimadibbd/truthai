@@ -91,7 +91,18 @@ function Icon({
   name,
   size = 18,
 }: {
-  name: "menu" | "plus" | "search" | "send" | "stop" | "copy" | "trash" | "close" | "spark";
+  name:
+    | "menu"
+    | "plus"
+    | "search"
+    | "send"
+    | "stop"
+    | "copy"
+    | "trash"
+    | "close"
+    | "spark"
+    | "edit"
+    | "download";
   size?: number;
 }) {
   const paths: Record<typeof name, ReactNode> = {
@@ -104,6 +115,8 @@ function Icon({
     trash: <><path d="M4 7h16M10 11v6M14 11v6M5 7l1 13h12l1-13M9 7V4h6v3" /></>,
     close: <><path d="m6 6 12 12M18 6 6 18" /></>,
     spark: <><path d="m12 3 1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3ZM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16Z" /></>,
+    edit: <><path d="m14 5 5 5M4 20l4.3-.9L19 8.4 15.6 5 4.9 15.7 4 20Z" /></>,
+    download: <><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v3h16v-3" /></>,
   };
 
   return (
@@ -136,11 +149,15 @@ export default function ChatWorkspace() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState("");
+  const [editingChatId, setEditingChatId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   const [verificationBusy, setVerificationBusy] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState("");
   const controllerRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const conversationRef = useRef<HTMLDivElement>(null);
+  const previousChatIdRef = useRef<string | null>(null);
   const activeChat = chats.find((chat) => chat.id === activeChatId) ?? null;
   const activeMessages = activeChat?.messages ?? [];
 
@@ -231,7 +248,12 @@ export default function ChatWorkspace() {
 
   const visibleChats = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return chats.filter((chat) => !query || chat.title.toLowerCase().includes(query));
+    return chats.filter(
+      (chat) =>
+        !query ||
+        chat.title.toLowerCase().includes(query) ||
+        chat.messages.some((message) => message.content.toLowerCase().includes(query)),
+    );
   }, [chats, search]);
 
   const updateChat = useCallback((chatId: string, update: (chat: Chat) => Chat) => {
@@ -241,6 +263,22 @@ export default function ChatWorkspace() {
         .slice(0, HISTORY_LIMIT),
     );
   }, []);
+
+  useEffect(() => {
+    const conversation = conversationRef.current;
+    if (!conversation) return;
+
+    const chatChanged = previousChatIdRef.current !== activeChatId;
+    previousChatIdRef.current = activeChatId;
+    const distanceFromBottom =
+      conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight;
+    if (chatChanged || distanceFromBottom < 140) {
+      conversation.scrollTo({
+        top: conversation.scrollHeight,
+        behavior: chatChanged ? "smooth" : "auto",
+      });
+    }
+  }, [activeChatId, activeMessages.at(-1)?.content, activeMessages.length]);
 
   function startNewChat() {
     if (sending) return;
@@ -262,10 +300,48 @@ export default function ChatWorkspace() {
 
   function deleteChat(chatId: string) {
     setChats((previous) => previous.filter((chat) => chat.id !== chatId));
+    if (editingChatId === chatId) setEditingChatId(null);
     if (activeChatId === chatId) {
       const nextChat = chats.find((chat) => chat.id !== chatId);
       setActiveChatId(nextChat?.id ?? null);
     }
+  }
+
+  function beginRenameChat(chat: Chat) {
+    setEditingChatId(chat.id);
+    setRenameDraft(chat.title);
+  }
+
+  function saveChatRename(chatId: string) {
+    const title = renameDraft.trim().slice(0, 60);
+    if (title) updateChat(chatId, (chat) => ({ ...chat, title }));
+    setEditingChatId(null);
+    setRenameDraft("");
+  }
+
+  function exportChat(chat: Chat) {
+    if (!chat.messages.length) {
+      setNotice("Add a message before exporting this conversation.");
+      return;
+    }
+
+    const markdown = chat.messages
+      .map((message) => `## ${message.role === "user" ? "You" : "Xyro AI"}\n\n${message.content}`)
+      .join("\n\n---\n\n");
+    const fileName =
+      chat.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
+      "xyro-conversation";
+    const url = URL.createObjectURL(
+      new Blob([`# ${chat.title}\n\n${markdown}\n`], { type: "text/markdown;charset=utf-8" }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${fileName}.md`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setNotice("");
   }
 
   async function sendMessage(text: string, regenerate = false) {
@@ -624,9 +700,47 @@ export default function ChatWorkspace() {
                   className={`chat-history-item${chat.id === activeChatId ? " chat-history-active" : ""}`}
                   key={chat.id}
                 >
-                  <button type="button" onClick={() => selectChat(chat.id)}>
-                    <span>{chat.title}</span>
-                  </button>
+                  {editingChatId === chat.id ? (
+                    <form
+                      className="chat-rename-form"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        saveChatRename(chat.id);
+                      }}
+                    >
+                      <input
+                        autoFocus
+                        aria-label="Conversation name"
+                        maxLength={60}
+                        value={renameDraft}
+                        onChange={(event) => setRenameDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            setEditingChatId(null);
+                            setRenameDraft("");
+                          }
+                        }}
+                      />
+                      <button type="submit" aria-label="Save conversation name">
+                        <Icon name="send" size={14} />
+                      </button>
+                    </form>
+                  ) : (
+                    <button type="button" onClick={() => selectChat(chat.id)}>
+                      <span>{chat.title}</span>
+                    </button>
+                  )}
+                  {editingChatId !== chat.id && (
+                    <button
+                      className="chat-history-rename"
+                      type="button"
+                      aria-label={`Rename ${chat.title}`}
+                      title="Rename chat"
+                      onClick={() => beginRenameChat(chat)}
+                    >
+                      <Icon name="edit" size={14} />
+                    </button>
+                  )}
                   <button
                     className="chat-history-delete"
                     type="button"
@@ -670,24 +784,42 @@ export default function ChatWorkspace() {
           >
             <Icon name="menu" />
           </button>
-          <label className="chat-model-picker">
+          <div className="chat-model-picker" aria-label="OpenRouter free models">
             <span className="chat-model-dot" />
-            <select aria-label="AI model" value="openrouter/free" disabled>
-              <option value="openrouter/free">Auto · Free models</option>
-            </select>
-            <span className="chat-model-chevron" aria-hidden="true">⌄</span>
-          </label>
+            <span>OpenRouter</span>
+            <span className="chat-model-tier">Free models</span>
+          </div>
+          <div className="chat-topbar-actions">
+            {activeChat && activeMessages.length > 0 && (
+              <button
+                className="chat-topbar-button"
+                type="button"
+                onClick={() => exportChat(activeChat)}
+                title="Export conversation as Markdown"
+              >
+                <Icon name="download" size={16} />
+                <span>Export</span>
+              </button>
+            )}
+            <button className="chat-topbar-button chat-topbar-new" type="button" onClick={startNewChat}>
+              <Icon name="plus" size={16} />
+              <span>New chat</span>
+            </button>
+          </div>
           <Link className="chat-topbar-link" href="/help">Help</Link>
         </header>
 
-        <div className={`chat-conversation${activeMessages.length ? " chat-conversation-has-messages" : ""}`}>
+        <div
+          ref={conversationRef}
+          className={`chat-conversation${activeMessages.length ? " chat-conversation-has-messages" : ""}`}
+        >
           {activeMessages.length === 0 ? (
             <section className="chat-empty-state">
               <span className="chat-empty-mark"><Icon name="spark" size={25} /></span>
-              <p className="chat-empty-eyebrow">Your AI workspace</p>
-              <h1>What would you like to explore?</h1>
+              <p className="chat-empty-eyebrow">Your workspace, ready when you are</p>
+              <h1>What can I help you with{user?.displayName ? `, ${user.displayName.split(" ")[0]}` : " today"}?</h1>
               <p className="chat-empty-description">
-                Ask a question, work through an idea, or get a first draft. Start with a prompt below.
+                Ask a question, work through an idea, or get a first draft. Choose a prompt or start with your own.
               </p>
               <div className="chat-suggestions">
                 {[

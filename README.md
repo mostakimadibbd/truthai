@@ -70,7 +70,7 @@ Signup creates the Firebase Authentication account and immediately creates its `
 - Product overview, help guide, pricing information, and XyroAIDetect explainer
 - Terms, Privacy, and Acceptable Use drafts marked for legal review
 - Metadata, Open Graph artwork, JSON-LD, sitemap, robots, manifest, and offline information page
-- Text chat is available with server-side OpenRouter and Upstash configuration; local browser history only
+- Text chat is available with server-side OpenRouter and Upstash configuration; conversations stay in browser-local history, with search, rename, Markdown export, stop, and regenerate controls
 - File upload, image generation, research tools, payment, detector, and XyroSocial sign-in are not currently available
 
 The legal pages remain drafts. Chat text is stored in browser local storage and sent to OpenRouter and its selected free model provider; this release has no encrypted cloud history or cross-device sync.

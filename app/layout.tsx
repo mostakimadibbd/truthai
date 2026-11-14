@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import { headers } from "next/headers";
 import PwaRegistration from "./pwa-registration";
+import SiteHeader from "@/components/site-header";
 import { siteUrl } from "@/lib/site";
 import "./globals.css";
 
@@ -55,36 +56,7 @@ export default async function RootLayout({
         <a className="skip-link" href="#main">
           Skip to content
         </a>
-        <header className="site-header">
-          <Link className="wordmark" href="/" aria-label="Xyro AI home">
-            <span className="wordmark-icon" aria-hidden="true">x</span>
-            <span>xyro<span className="wordmark-light">ai</span></span>
-          </Link>
-          <nav className="main-nav" aria-label="Main navigation">
-            <Link href="/about">About</Link>
-            <Link href="/help">How it works</Link>
-            <Link href="/pricing">Plans</Link>
-          </nav>
-          <div className="header-actions">
-            <Link className="header-signin" href="/sign-in">Sign in</Link>
-            <Link className="header-cta" href="/sign-up">
-              Get started <span aria-hidden="true">↗</span>
-            </Link>
-          </div>
-          <details className="mobile-menu">
-            <summary aria-label="Open navigation menu">
-              <span aria-hidden="true" />
-              <span aria-hidden="true" />
-            </summary>
-            <nav aria-label="Mobile navigation">
-              <Link href="/about">About</Link>
-              <Link href="/help">How it works</Link>
-              <Link href="/pricing">Plans</Link>
-              <Link href="/sign-in">Sign in</Link>
-              <Link className="mobile-menu-cta" href="/sign-up">Get started</Link>
-            </nav>
-          </details>
-        </header>
+        <SiteHeader />
         <main id="main">{children}</main>
         <footer className="site-footer">
           <div className="footer-top">
