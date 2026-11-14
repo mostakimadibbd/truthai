@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged, signOut, type User } from "firebase/auth";
 import { doc, onSnapshot } from "firebase/firestore";
+import FirebasePresence from "@/components/firebase-presence";
 import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/auth-client";
 import { getFirebaseFirestore } from "@/lib/firebase/firestore-client";
 
@@ -121,6 +122,7 @@ export default function AccountPanel() {
 
   return (
     <div className="account-card">
+      <FirebasePresence />
       {state === "loading" && <p role="status">Loading your saved profile…</p>}
       {state === "not-configured" && (
         <div className="auth-alert" role="alert">

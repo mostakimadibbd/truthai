@@ -2,6 +2,7 @@
 
 import { getApp, getApps, initializeApp, type FirebaseOptions } from "firebase/app";
 import { getAuth, type Auth } from "firebase/auth";
+import { getDatabase, type Database } from "firebase/database";
 import { getFirestore, type Firestore } from "firebase/firestore";
 
 const publicConfigValues = [
@@ -14,6 +15,11 @@ const publicConfigValues = [
 export const isFirebaseConfigured = publicConfigValues.every(
   (value) => typeof value === "string" && value.trim().length > 0,
 );
+
+export const isFirebaseRealtimeDatabaseConfigured =
+  isFirebaseConfigured &&
+  typeof process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL === "string" &&
+  process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL.trim().length > 0;
 
 function requiredValue(name: string, value: string | undefined): string {
   if (!value?.trim()) {
@@ -48,35 +54,48 @@ function readFirebaseConfig(): FirebaseOptions {
 
 let auth: Auth | undefined;
 let db: Firestore | undefined;
+let realtimeDb: Database | undefined;
 
-export function getFirebaseAuth(): Auth {
+function getFirebaseApp() {
   if (!isFirebaseConfigured) {
     throw new Error(
       "Firebase is not configured. Add the NEXT_PUBLIC_FIREBASE_* values from your Firebase web app.",
     );
   }
 
-  if (!auth) {
-    const app = getApps().length > 0 ? getApp() : initializeApp(readFirebaseConfig());
-    auth = getAuth(app);
-  }
+  return getApps().length > 0 ? getApp() : initializeApp(readFirebaseConfig());
+}
+
+export function getFirebaseAuth(): Auth {
+  if (!auth) auth = getAuth(getFirebaseApp());
 
   return auth;
 }
 
 export function getFirebaseFirestore(): Firestore {
-  if (!isFirebaseConfigured) {
+  if (!db) db = getFirestore(getFirebaseApp());
+
+  return db;
+}
+
+export function getFirebaseRealtimeDatabase(): Database {
+  if (!isFirebaseRealtimeDatabaseConfigured) {
     throw new Error(
-      "Firebase is not configured. Add the NEXT_PUBLIC_FIREBASE_* values from your Firebase web app.",
+      "Realtime Database is not configured. Set NEXT_PUBLIC_FIREBASE_DATABASE_URL to the database URL from Firebase Console.",
     );
   }
 
-  if (!db) {
-    const app = getApps().length > 0 ? getApp() : initializeApp(readFirebaseConfig());
-    db = getFirestore(app);
+  if (!realtimeDb) {
+    realtimeDb = getDatabase(
+      getFirebaseApp(),
+      requiredValue(
+        "NEXT_PUBLIC_FIREBASE_DATABASE_URL",
+        process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL,
+      ),
+    );
   }
 
-  return db;
+  return realtimeDb;
 }
 
 export function getFirebaseServices(): { auth: Auth; db: Firestore } {

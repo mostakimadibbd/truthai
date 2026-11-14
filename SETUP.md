@@ -25,13 +25,18 @@ This project is designed for a totally free stack and intentionally avoids paid 
   The Next.js rewrite proxies `/__/auth/*` to `<project-id>.firebaseapp.com`.
 - Confirm the Firebase project allows Google sign-in and email/password sign-in.
 - Create the Cloud Firestore database and deploy the repository's `firestore.rules`.
+- Create a Realtime Database and deploy `database.rules.json`.
 - Set the web app configuration in `.env.local` or Vercel environment variables.
+- Set `NEXT_PUBLIC_FIREBASE_DATABASE_URL` to the exact Realtime Database URL.
 - Keep the project on the free Firebase plan. Do not enable paid Identity Platform features.
 - Signup saves the basic user profile to Firestore immediately after Firebase
   Authentication creates the account. Email verification is required before
   accessing AI features; if Firestore rejects the profile write, the sign-in
   screen offers a retry. Verify that the deployed rules allow each signed-in
   user to read and write only their own `users/{uid}` profile.
+- Firestore is the source of truth for user profiles. Realtime Database stores
+  only per-device presence connections; authentication credentials belong only
+  in Firebase Authentication and are never copied to either database.
 
 ## Required Vercel settings
 
@@ -89,6 +94,8 @@ This project is designed for a totally free stack and intentionally avoids paid 
 - [ ] Firebase Auth authorized domains include local and production hosts
 - [ ] `https://<domain>/__/auth/handler` is set as the Google OAuth redirect URI
 - [ ] Firestore rules are deployed
+- [ ] Realtime Database URL is set in Vercel Production and Preview
+- [ ] Realtime Database rules are deployed
 - [ ] Storage rules are deployed as deny-all
 - [ ] OpenRouter API key is set server-side only
 - [ ] Turnstile keys are configured

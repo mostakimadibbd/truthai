@@ -16,7 +16,7 @@ export function middleware(request: NextRequest) {
     "font-src 'self' data:",
     `style-src 'self' 'nonce-${nonce}'`,
     `script-src 'self' https://apis.google.com 'strict-dynamic' 'nonce-${nonce}'`,
-    "connect-src 'self' https://*.googleapis.com https://*.firebaseapp.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://www.googleapis.com https://firebase.googleapis.com",
+    "connect-src 'self' https://*.googleapis.com https://*.firebaseapp.com https://*.firebasedatabase.app https://*.firebaseio.com wss://*.firebasedatabase.app wss://*.firebaseio.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://www.googleapis.com https://firebase.googleapis.com",
     `frame-src 'self' ${authOrigin} https://accounts.google.com https://apis.google.com`,
     "worker-src 'self' blob:",
     "media-src 'self' blob:",

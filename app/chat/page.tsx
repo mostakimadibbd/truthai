@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import FirebasePresence from "@/components/firebase-presence";
 
 export const metadata: Metadata = {
   title: "Workspace",
@@ -19,6 +20,7 @@ const tools = [
 export default function ChatPage() {
   return (
     <section className="workspace-page page-width">
+      <FirebasePresence />
       <header className="workspace-heading">
         <div>
           <span className="eyebrow">Your workspace</span>

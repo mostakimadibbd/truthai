@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
+import { headers } from "next/headers";
 import PwaRegistration from "./pwa-registration";
 import { siteUrl } from "@/lib/site";
 import "./globals.css";
@@ -41,9 +42,12 @@ export const viewport: Viewport = {
   initialScale: 1,
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  // Request-time rendering lets Next.js attach the middleware CSP nonce to its scripts.
+  await headers();
+
   return (
     <html lang="en">
       <body>
