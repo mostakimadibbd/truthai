@@ -2,14 +2,18 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import Script from "next/script";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
-  createUserWithEmailAndPassword,
+  browserLocalPersistence,
+  browserSessionPersistence,
   getRedirectResult,
   GoogleAuthProvider,
   reload,
   sendEmailVerification,
   sendPasswordResetEmail,
+  setPersistence,
+  signInWithCustomToken,
   signInWithEmailAndPassword,
   signInWithPopup,
   signInWithRedirect,
@@ -18,6 +22,7 @@ import {
 } from "firebase/auth";
 import { FirebaseError } from "firebase/app";
 import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/auth-client";
+import TurnstileField, { notifyTurnstileReady } from "@/components/turnstile-field";
 
 type AuthMode = "sign-in" | "sign-up";
 
@@ -87,48 +92,6 @@ function shouldUseRedirect(): boolean {
   );
 }
 
-async function checkPasswordNotBreached(password: string): Promise<boolean> {
-  const hashBuffer = await crypto.subtle.digest(
-    "SHA-1",
-    new TextEncoder().encode(password),
-  );
-  const hash = Array.from(new Uint8Array(hashBuffer))
-    .map((part) => part.toString(16).padStart(2, "0"))
-    .join("")
-    .toUpperCase();
-  let response: Response;
-  try {
-    response = await fetch("/api/password/check", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prefix: hash.slice(0, 5), suffix: hash.slice(5) }),
-      cache: "no-store",
-    });
-  } catch {
-    throw new Error("password-check-unavailable");
-  }
-
-  if (!response.ok) {
-    throw new Error("password-check-unavailable");
-  }
-
-  let result: unknown;
-  try {
-    result = await response.json();
-  } catch {
-    throw new Error("password-check-unavailable");
-  }
-  if (
-    typeof result !== "object" ||
-    result === null ||
-    !("pwned" in result) ||
-    typeof result.pwned !== "boolean"
-  ) {
-    throw new Error("password-check-unavailable");
-  }
-  return result.pwned;
-}
-
 export default function SignInForm({
   initialMode = "sign-in",
 }: {
@@ -138,6 +101,11 @@ export default function SignInForm({
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [rememberMe, setRememberMe] = useState(true);
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [turnstileToken, setTurnstileToken] = useState("");
+  const [turnstileStatus, setTurnstileStatus] = useState("");
+  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -145,6 +113,7 @@ export default function SignInForm({
   const [profileSaved, setProfileSaved] = useState(false);
   const [emailVerified, setEmailVerified] = useState(false);
   const configured = isFirebaseConfigured;
+  const turnstileSiteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY?.trim() ?? "";
   const mode = initialMode;
 
   const completeSignIn = useCallback(async (user: User) => {
