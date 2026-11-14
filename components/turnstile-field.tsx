@@ -54,23 +54,29 @@ export default function TurnstileField({
 
     function renderWidget() {
       if (disposed || widgetId || !window.turnstile || !containerRef.current) return;
-      widgetId = window.turnstile.render(containerRef.current, {
-        sitekey: siteKey,
-        action: "create_account",
-        theme: "dark",
-        callback: (token) => {
-          onStatusRef.current("");
-          onTokenRef.current(token);
-        },
-        "error-callback": () => {
-          onTokenRef.current("");
-          onStatusRef.current("The security check couldn’t load. Please try again.");
-        },
-        "expired-callback": () => {
-          onTokenRef.current("");
-          onStatusRef.current("The security check expired. Please complete it again.");
-        },
-      });
+      try {
+        widgetId = window.turnstile.render(containerRef.current, {
+          sitekey: siteKey,
+          action: "create_account",
+          theme: "dark",
+          callback: (token) => {
+            onStatusRef.current("");
+            onTokenRef.current(token);
+          },
+          "error-callback": () => {
+            onTokenRef.current("");
+            onStatusRef.current("The security check couldn’t load. Please try again.");
+          },
+          "expired-callback": () => {
+            onTokenRef.current("");
+            onStatusRef.current("The security check expired. Please complete it again.");
+          },
+        });
+      } catch (error) {
+        console.error("Cloudflare Turnstile widget initialization failed.", error);
+        onTokenRef.current("");
+        onStatusRef.current("The security check couldn’t initialize. Please refresh and try again.");
+      }
     }
 
     window.addEventListener(TURNSTILE_READY_EVENT, renderWidget);

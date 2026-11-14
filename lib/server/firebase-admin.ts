@@ -4,7 +4,9 @@ import { getDatabase } from "firebase-admin/database";
 import { getFirestore } from "firebase-admin/firestore";
 
 export function getFirebaseAdminApp() {
-  const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID?.trim();
+  const projectId =
+    process.env.FIREBASE_ADMIN_PROJECT_ID?.trim() ||
+    process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID?.trim();
   const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL?.trim();
   const privateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY?.replace(/\\n/g, "\n").trim();
   const clientProjectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID?.trim();
