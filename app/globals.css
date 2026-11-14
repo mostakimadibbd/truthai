@@ -1367,7 +1367,7 @@ body:has(.chat-app) #main {
   padding-inline: 10px;
 }
 .chat-app-sidebar-collapsed .chat-wordmark > span:last-child,
-.chat-app-sidebar-collapsed .chat-sidebar-top .chat-sidebar-toggle,
+
 .chat-app-sidebar-collapsed .chat-new-button span,
 .chat-app-sidebar-collapsed .chat-new-button kbd,
 .chat-app-sidebar-collapsed .chat-history-heading > span,
