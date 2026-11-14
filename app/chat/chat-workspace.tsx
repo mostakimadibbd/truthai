@@ -137,7 +137,7 @@ export default function ChatWorkspace() {
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState("");
   const [verificationBusy, setVerificationBusy] = useState(false);
-  const [copyMessage, setCopyMessage] = useState("");
+  const [copiedMessageId, setCopiedMessageId] = useState("");
   const controllerRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -493,8 +493,8 @@ export default function ChatWorkspace() {
   async function copyMessage(message: Message) {
     try {
       await navigator.clipboard.writeText(message.content);
-      setCopyMessage(message.id);
-      window.setTimeout(() => setCopyMessage(""), 1500);
+      setCopiedMessageId(message.id);
+      window.setTimeout(() => setCopiedMessageId(""), 1500);
     } catch {
       setNotice("Couldn’t copy this response. Check your browser’s clipboard permissions.");
     }
@@ -737,11 +737,11 @@ export default function ChatWorkspace() {
                         <button
                           type="button"
                           aria-label="Copy response"
-                          title={copyMessage === message.id ? "Copied" : "Copy"}
+                          title={copiedMessageId === message.id ? "Copied" : "Copy"}
                           onClick={() => void copyMessage(message)}
                         >
                           <Icon name="copy" size={15} />
-                          <span>{copyMessage === message.id ? "Copied" : "Copy"}</span>
+                          <span>{copiedMessageId === message.id ? "Copied" : "Copy"}</span>
                         </button>
                         {message.id === activeMessages.at(-1)?.id && (
                           <button
