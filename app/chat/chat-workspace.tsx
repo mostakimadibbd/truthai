@@ -12,6 +12,8 @@ import {
 import { onValue, ref } from "firebase/database";
 import {
   collection,
+  doc,
+  getDoc,
   limit,
   onSnapshot,
   orderBy,
@@ -23,6 +25,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
   type FormEvent,
   type ReactNode,
 } from "react";
@@ -135,7 +138,7 @@ function isUploadSignature(value: unknown): value is UploadSignature {
   );
 }
 
-function isAttachment(value: unknown): value is Attachment {
+function isAttachment(value: unknown): value is Attachment & { accessUrl: string } {
   if (typeof value !== "object" || value === null) return false;
   return (
     "id" in value &&
@@ -279,6 +282,7 @@ export default function ChatWorkspace() {
   const [attachmentUrls, setAttachmentUrls] = useState<Record<string, string>>({});
   const controllerRef = useRef<AbortController | null>(null);
   const attachmentUrlLoadingRef = useRef(new Set<string>());
+  const previousUserIdRef = useRef<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -304,6 +308,11 @@ export default function ChatWorkspace() {
     }
 
     return onAuthStateChanged(getFirebaseAuth(), (currentUser) => {
+      if (previousUserIdRef.current !== (currentUser?.uid ?? null)) {
+        setPendingAttachments([]);
+        setAttachmentUrls({});
+        previousUserIdRef.current = currentUser?.uid ?? null;
+      }
       if (!currentUser) {
         setUser(null);
         setHistoryLoaded(false);
@@ -335,11 +344,17 @@ export default function ChatWorkspace() {
 
     async function loadChats() {
       try {
-        const historyKey = getHistoryKey(user.uid);
+        const historyKey = getHistoryKey(currentUser.uid);
         const saved = localStorage.getItem(historyKey);
         if (saved) {
           const parsed: unknown = JSON.parse(saved);
-          const legacyChats = Array.isArray(parsed) ? parsed.filter(isChat) : [];
+          if (!Array.isArray(parsed)) {
+            throw new Error("Your saved chat history has an unexpected format.");
+          }
+          const legacyChats = parsed.filter(isChat);
+          if (legacyChats.length !== parsed.length) {
+            throw new Error("Some saved chats couldn’t be read, so the browser copy was kept.");
+          }
           if (legacyChats.length) {
             const idToken = await currentUser.getIdToken();
             const response = await fetch("/api/chats/migrate", {
@@ -390,7 +405,13 @@ export default function ChatWorkspace() {
                 persisted: true,
               };
             });
-            setChats(loadedChats);
+            setChats((previous) => {
+              const previousById = new Map(previous.map((chat) => [chat.id, chat]));
+              return loadedChats.map((chat) => ({
+                ...chat,
+                messages: previousById.get(chat.id)?.messages ?? [],
+              }));
+            });
             setActiveChatId((current) =>
               current && loadedChats.some((chat) => chat.id === current)
                 ? current
@@ -479,6 +500,19 @@ export default function ChatWorkspace() {
     }
     return () => unsubscribeMessages?.();
   }, [activeChatId, authState, updateChat, user]);
+
+  useEffect(() => {
+    if (!activeChatId || !pendingAttachments.length) return;
+    const attachedIds = new Set(
+      activeMessages.flatMap((message) =>
+        message.attachments.map((attachment) => attachment.id),
+      ),
+    );
+    if (!attachedIds.size) return;
+    setPendingAttachments((previous) =>
+      previous.filter((attachment) => !attachedIds.has(attachment.id)),
+    );
+  }, [activeChatId, activeMessages, pendingAttachments.length]);
 
   useEffect(() => {
     if (!user) return;
@@ -673,6 +707,10 @@ export default function ChatWorkspace() {
 
   async function deleteChat(chatId: string) {
     if (!user) return;
+    if (activeChatId === chatId && sending) {
+      setNotice("Stop the active response before deleting this chat.");
+      return;
+    }
     if (activeChatId === chatId && (pendingAttachments.length || uploadingFiles)) {
       setNotice("Send or remove the current attachments before deleting this chat.");
       return;
@@ -736,7 +774,7 @@ export default function ChatWorkspace() {
     }
   }
 
-  async function handleFilesSelected(event: React.ChangeEvent<HTMLInputElement>) {
+  async function handleFilesSelected(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.currentTarget.files ?? []);
     event.currentTarget.value = "";
     if (!files.length || !user) return;
@@ -750,32 +788,37 @@ export default function ChatWorkspace() {
 
     const validFiles: File[] = [];
     let totalBytes = pendingAttachments.reduce((total, item) => total + item.size, 0);
+    let validationMessage = "";
     for (const file of files.slice(0, slots)) {
       const extension = file.name.split(".").at(-1)?.toLowerCase();
       const accepted = ACCEPTED_FILE_TYPES.split(",").includes(`.${extension}`);
       if (!accepted || file.size < 1 || file.size > MAX_FILE_SIZE) {
-        setNotice("Use an image, PDF, TXT, Markdown, or CSV file no larger than 10 MB.");
+        validationMessage = "Use an image, PDF, TXT, Markdown, or CSV file no larger than 10 MB.";
         continue;
       }
       if (totalBytes + file.size > MAX_FILE_BYTES_PER_MESSAGE) {
-        setNotice("Files in one message can total no more than 20 MB.");
+        validationMessage = "Files in one message can total no more than 20 MB.";
         continue;
       }
       totalBytes += file.size;
       validFiles.push(file);
     }
     if (files.length > slots) {
-      setNotice(`Attach up to ${MAX_FILES_PER_MESSAGE} files to one message.`);
+      validationMessage = `Attach up to ${MAX_FILES_PER_MESSAGE} files to one message.`;
     }
-    if (!validFiles.length) return;
+    if (!validFiles.length) {
+      if (validationMessage) setNotice(validationMessage);
+      return;
+    }
 
     setUploadingFiles(true);
-    setNotice("");
+    setNotice(validationMessage);
     try {
       let chat = chats.find((item) => item.id === activeChatId);
       if (!chat) {
-        chat = newChat();
-        setChats((previous) => [chat!, ...previous].slice(0, HISTORY_LIMIT));
+        const createdChat = newChat();
+        chat = createdChat;
+        setChats((previous) => [createdChat, ...previous].slice(0, HISTORY_LIMIT));
         setActiveChatId(chat.id);
       }
       await ensurePersistedChat(chat);
@@ -859,7 +902,7 @@ export default function ChatWorkspace() {
           );
           setAttachmentUrls((previous) => ({
             ...previous,
-            [attachmentValue.id]: attachmentValue.accessUrl!,
+            [attachmentValue.id]: attachmentValue.accessUrl,
           }));
         } catch (error) {
           if (assetId) {
@@ -950,8 +993,9 @@ export default function ChatWorkspace() {
 
     let chat = chats.find((item) => item.id === activeChatId);
     if (!chat) {
-      chat = newChat();
-      setChats((previous) => [chat!, ...previous].slice(0, HISTORY_LIMIT));
+      const createdChat = newChat();
+      chat = createdChat;
+      setChats((previous) => [createdChat, ...previous].slice(0, HISTORY_LIMIT));
       setActiveChatId(chat.id);
     }
     const lastUserMessage = [...chat.messages].reverse().find((item) => item.role === "user");
@@ -1014,6 +1058,24 @@ export default function ChatWorkspace() {
       }
       if (!regenerate) setPendingAttachments([]);
     } catch (sendError) {
+      if (!regenerate && attachments.length) {
+        try {
+          const savedUserMessage = await getDoc(
+            doc(
+              getFirebaseFirestore(),
+              "users",
+              user.uid,
+              "chats",
+              chat.id,
+              "messages",
+              userMessageId,
+            ),
+          );
+          if (savedUserMessage.exists()) setPendingAttachments([]);
+        } catch (reconcileError) {
+          console.error("Couldn’t reconcile sent attachments after a failed request.", reconcileError);
+        }
+      }
       if (sendError instanceof Error && sendError.name === "AbortError") {
         setNotice("Response stopped.");
       } else {
@@ -1047,12 +1109,9 @@ export default function ChatWorkspace() {
         return;
       }
       setAuthState("ready");
-      const saved = localStorage.getItem(getHistoryKey(user.uid));
-      const parsed: unknown = saved ? JSON.parse(saved) : [];
-      const history = Array.isArray(parsed) ? parsed.filter(isChat) : [];
-      setChats(history.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, HISTORY_LIMIT));
-      setActiveChatId(history[0]?.id ?? null);
-      setHistoryLoaded(true);
+      setHistoryLoaded(false);
+      setChats([]);
+      setActiveChatId(null);
     } catch {
       setNotice("We couldn’t verify your email status. Please try again.");
     } finally {
@@ -1256,7 +1315,11 @@ export default function ChatWorkspace() {
           ))}
           {visibleChats.length === 0 && (
             <p className="chat-history-empty">
-              {search ? "No chats match your search." : "Your conversations will appear here."}
+              {search
+                ? "No chats match your search."
+                : historyLoaded
+                  ? "Your conversations will appear here."
+                  : "Loading your chats…"}
             </p>
           )}
         </nav>
