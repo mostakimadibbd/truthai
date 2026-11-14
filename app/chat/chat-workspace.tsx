@@ -147,6 +147,7 @@ export default function ChatWorkspace() {
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState("");
   const [editingChatId, setEditingChatId] = useState<string | null>(null);
@@ -624,7 +625,7 @@ export default function ChatWorkspace() {
   }, {});
 
   return (
-    <div className="chat-app">
+    <div className={`chat-app${sidebarCollapsed ? " chat-app-sidebar-collapsed" : ""}`}>
       <FirebasePresence />
       {sidebarOpen && (
         <button
@@ -651,9 +652,9 @@ export default function ChatWorkspace() {
           <button
             className="chat-icon-button chat-sidebar-toggle"
             type="button"
-            aria-label="Collapse sidebar"
-            title="Collapse sidebar"
-            onClick={() => setSidebarOpen(false)}
+            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
           >
             <Icon name="menu" />
           </button>
