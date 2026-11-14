@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { getFirebaseAdminAuth } from "@/lib/server/firebase-admin";
 import { verifyTurnstileToken } from "@/lib/server/turnstile";
@@ -15,6 +15,7 @@ type SignUpBody = {
   password?: unknown;
   displayName?: unknown;
   turnstileToken?: unknown;
+  termsAccepted?: unknown;
 };
 
 function errorResponse(status: number, code: string, message: string) {
@@ -102,6 +103,7 @@ export async function POST(request: NextRequest) {
     typeof body.password !== "string" ||
     body.password.length < 10 ||
     body.password.length > MAX_PASSWORD_LENGTH ||
+    body.termsAccepted !== true ||
     (body.displayName !== undefined &&
       (typeof body.displayName !== "string" || body.displayName.length > 100)) ||
     typeof body.turnstileToken !== "string" ||
@@ -161,9 +163,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const customToken = await adminAuth.createCustomToken(user.uid, {
-      signupRequestId: randomUUID(),
-    });
+    const customToken = await adminAuth.createCustomToken(user.uid);
     return NextResponse.json(
       { customToken },
       { headers: { "Cache-Control": "no-store" } },

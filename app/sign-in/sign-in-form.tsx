@@ -238,6 +238,7 @@ export default function SignInForm({
             password,
             displayName: displayName.trim().slice(0, 100),
             turnstileToken,
+            termsAccepted,
           }),
           cache: "no-store",
         });
@@ -340,7 +341,7 @@ export default function SignInForm({
         const response = await fetch("/api/auth/turnstile", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token: turnstileToken }),
+          body: JSON.stringify({ token: turnstileToken, termsAccepted }),
           cache: "no-store",
         });
         if (!response.ok) {

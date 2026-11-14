@@ -39,6 +39,13 @@ export async function POST(request: NextRequest) {
     typeof body === "object" && body !== null && "token" in body
       ? body.token
       : undefined;
+  const termsAccepted =
+    typeof body === "object" && body !== null && "termsAccepted" in body
+      ? body.termsAccepted
+      : undefined;
+  if (termsAccepted !== true) {
+    return errorResponse(400, "TERMS_REQUIRED", "Accept the Terms and Conditions to create an account.");
+  }
   if (typeof token !== "string" || token.length === 0 || token.length > 2048) {
     return errorResponse(400, "TURNSTILE_REQUIRED", "Complete the security check and try again.");
   }
