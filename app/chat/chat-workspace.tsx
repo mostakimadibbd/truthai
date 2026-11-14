@@ -63,6 +63,18 @@ type Chat = {
 
 type AuthState = "loading" | "not-configured" | "signed-out" | "unverified" | "ready";
 
+type UploadSignature = {
+  assetId: string;
+  cloudName: string;
+  apiKey: string;
+  uploadPreset: string;
+  signature: string;
+  timestamp: number;
+  publicId: string;
+  resourceType: "image" | "raw";
+  deliveryType: "authenticated";
+};
+
 const HISTORY_LIMIT = 20;
 const MESSAGE_LIMIT = 30;
 const MESSAGE_MAX_LENGTH = 12_000;
@@ -96,6 +108,52 @@ async function getApiError(response: Response, fallback: string): Promise<string
     return result.error.message;
   }
   return fallback;
+}
+
+function isUploadSignature(value: unknown): value is UploadSignature {
+  if (typeof value !== "object" || value === null) return false;
+  return (
+    "assetId" in value &&
+    typeof value.assetId === "string" &&
+    "cloudName" in value &&
+    typeof value.cloudName === "string" &&
+    "apiKey" in value &&
+    typeof value.apiKey === "string" &&
+    "uploadPreset" in value &&
+    typeof value.uploadPreset === "string" &&
+    "signature" in value &&
+    typeof value.signature === "string" &&
+    "timestamp" in value &&
+    typeof value.timestamp === "number" &&
+    "publicId" in value &&
+    typeof value.publicId === "string" &&
+    "resourceType" in value &&
+    (value.resourceType === "image" || value.resourceType === "raw") &&
+    "deliveryType" in value &&
+    value.deliveryType === "authenticated"
+  );
+}
+
+function isAttachment(value: unknown): value is Attachment {
+  if (typeof value !== "object" || value === null) return false;
+  return (
+    "id" in value &&
+    typeof value.id === "string" &&
+    "name" in value &&
+    typeof value.name === "string" &&
+    "mimeType" in value &&
+    typeof value.mimeType === "string" &&
+    "size" in value &&
+    typeof value.size === "number" &&
+    "accessUrl" in value &&
+    typeof value.accessUrl === "string"
+  );
+}
+
+function formatFileSize(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(0)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function isChat(value: unknown): value is Chat {
@@ -161,7 +219,8 @@ function Icon({
     | "close"
     | "spark"
     | "edit"
-    | "download";
+    | "download"
+    | "attach";
   size?: number;
 }) {
   const paths: Record<typeof name, ReactNode> = {
@@ -176,6 +235,7 @@ function Icon({
     spark: <><path d="m12 3 1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3ZM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16Z" /></>,
     edit: <><path d="m14 5 5 5M4 20l4.3-.9L19 8.4 15.6 5 4.9 15.7 4 20Z" /></>,
     download: <><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v3h16v-3" /></>,
+    attach: <><path d="m21.4 11.6-8.5 8.5a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5" /></>,
   };
 
   return (
@@ -214,6 +274,7 @@ export default function ChatWorkspace() {
   const [verificationBusy, setVerificationBusy] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
+  const [uploadingFiles, setUploadingFiles] = useState(false);
   const [attachmentUrls, setAttachmentUrls] = useState<Record<string, string>>({});
   const controllerRef = useRef<AbortController | null>(null);
   const attachmentUrlLoadingRef = useRef(new Set<string>());
@@ -267,6 +328,7 @@ export default function ChatWorkspace() {
 
   useEffect(() => {
     if (!user || authState !== "ready") return;
+    const currentUser = user;
     let active = true;
     let unsubscribeChats: (() => void) | undefined;
 
@@ -278,7 +340,7 @@ export default function ChatWorkspace() {
           const parsed: unknown = JSON.parse(saved);
           const legacyChats = Array.isArray(parsed) ? parsed.filter(isChat) : [];
           if (legacyChats.length) {
-            const idToken = await user.getIdToken();
+            const idToken = await currentUser.getIdToken();
             const response = await fetch("/api/chats/migrate", {
               method: "POST",
               headers: {
@@ -307,7 +369,7 @@ export default function ChatWorkspace() {
       if (!active) return;
       try {
         const chatsQuery = query(
-          collection(getFirebaseFirestore(), "users", user.uid, "chats"),
+          collection(getFirebaseFirestore(), "users", currentUser.uid, "chats"),
           orderBy("updatedAt", "desc"),
           limit(HISTORY_LIMIT),
         );
@@ -442,10 +504,11 @@ export default function ChatWorkspace() {
           ) {
             throw new Error("This attachment is temporarily unavailable.");
           }
+          const accessUrl = result.accessUrl;
           if (active) {
             setAttachmentUrls((previous) => ({
               ...previous,
-              [attachment.id]: result.accessUrl,
+              [attachment.id]: accessUrl,
             }));
           }
         } catch (error) {
@@ -538,6 +601,8 @@ export default function ChatWorkspace() {
       (chat) =>
         !query ||
         chat.title.toLowerCase().includes(query) ||
+          chat.searchText?.toLowerCase().includes(query) ||
+          chat.lastMessagePreview?.toLowerCase().includes(query) ||
         chat.messages.some((message) => message.content.toLowerCase().includes(query)),
     );
   }, [chats, search]);
@@ -558,8 +623,33 @@ export default function ChatWorkspace() {
     }
   }, [activeChatId, activeMessages.at(-1)?.content, activeMessages.length]);
 
+  async function ensurePersistedChat(chat: Chat): Promise<Chat> {
+    if (chat.persisted) return chat;
+    if (!user) throw new Error("Sign in again before creating a conversation.");
+    const idToken = await user.getIdToken();
+    const response = await fetch("/api/chats", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ chatId: chat.id }),
+    });
+    if (!response.ok) {
+      throw new Error(await getApiError(response, "The conversation couldn’t be saved."));
+    }
+    const persistedChat = { ...chat, persisted: true };
+    setChats((previous) =>
+      previous.map((item) => item.id === chat.id ? persistedChat : item),
+    );
+    return persistedChat;
+  }
+
   function startNewChat() {
-    if (sending) return;
+    if (sending || uploadingFiles || pendingAttachments.length) {
+      setNotice("Send or remove the current attachments before starting another chat.");
+      return;
+    }
     const chat = newChat();
     setChats((previous) => [chat, ...previous].slice(0, HISTORY_LIMIT));
     setActiveChatId(chat.id);
@@ -570,13 +660,38 @@ export default function ChatWorkspace() {
   }
 
   function selectChat(chatId: string) {
+    if (pendingAttachments.length || uploadingFiles) {
+      setNotice("Send or remove the current attachments before switching chats.");
+      return;
+    }
     if (sending) controllerRef.current?.abort();
     setActiveChatId(chatId);
     setSidebarOpen(false);
     setNotice("");
   }
 
-  function deleteChat(chatId: string) {
+  async function deleteChat(chatId: string) {
+    if (!user) return;
+    if (activeChatId === chatId && (pendingAttachments.length || uploadingFiles)) {
+      setNotice("Send or remove the current attachments before deleting this chat.");
+      return;
+    }
+    try {
+      const chat = chats.find((item) => item.id === chatId);
+      if (chat?.persisted) {
+        const idToken = await user.getIdToken();
+        const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+        if (!response.ok) {
+          throw new Error(await getApiError(response, "This conversation couldn’t be deleted."));
+        }
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "This conversation couldn’t be deleted.");
+      return;
+    }
     setChats((previous) => previous.filter((chat) => chat.id !== chatId));
     if (editingChatId === chatId) setEditingChatId(null);
     if (activeChatId === chatId) {
@@ -590,11 +705,34 @@ export default function ChatWorkspace() {
     setRenameDraft(chat.title);
   }
 
-  function saveChatRename(chatId: string) {
+  async function saveChatRename(chatId: string) {
     const title = renameDraft.trim().slice(0, 60);
-    if (title) updateChat(chatId, (chat) => ({ ...chat, title }));
     setEditingChatId(null);
     setRenameDraft("");
+    if (!title || !user) return;
+    const previousTitle = chats.find((chat) => chat.id === chatId)?.title ?? "New chat";
+    updateChat(chatId, (chat) => ({ ...chat, title }));
+    try {
+      const chat = chats.find((item) => item.id === chatId);
+      if (!chat) return;
+      const persistedChat = await ensurePersistedChat(chat);
+      const idToken = await user.getIdToken();
+      const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ title }),
+      });
+      if (!response.ok) {
+        throw new Error(await getApiError(response, "The conversation name couldn’t be saved."));
+      }
+      updateChat(chatId, (current) => ({ ...current, ...persistedChat, title }));
+    } catch (error) {
+      updateChat(chatId, (chat) => ({ ...chat, title: previousTitle }));
+      setNotice(error instanceof Error ? error.message : "The conversation name couldn’t be saved.");
+    }
   }
 
   function exportChat(chat: Chat) {

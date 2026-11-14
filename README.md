@@ -1,6 +1,6 @@
 # Xyro AI
 
-Xyro AI is an independent product with Firebase-backed sign-in/profile and a text-chat workspace. When configured, chat streams responses through OpenRouter's free-model router. Chat history is stored only in the current browser; it is not synced to Firestore or encrypted by Xyro AI. File upload, image generation, research tools, and other planned product features are not implemented yet.
+Xyro AI is an independent product with Firebase-backed sign-in, durable chat history, and a text-chat workspace. Chat responses use OpenRouter's free-model router, with live updates through Firebase Realtime Database. Images and documents are stored as private authenticated Cloudinary assets.
 
 ## Requirements
 
@@ -32,7 +32,7 @@ Vercel detects Next.js automatically; no custom `vercel.json` is required. Impor
 
 Set the `NEXT_PUBLIC_FIREBASE_*` Web App values in Vercel's project settings for Production and Preview. Set `SITE_URL` to the canonical production origin (for example, `https://your-domain.example`); Preview deployments use Vercel's generated preview URL and are marked `noindex`. Add the stable production hostname (including its `vercel.app` alias, if used) to Firebase Authentication's authorized domains. Environment-variable changes apply to new deployments, so redeploy after updating them.
 
-`OPENROUTER_API_KEY` and the Upstash Redis URL/token are required for text chat. Keep them server-side; never prefix them with `NEXT_PUBLIC_`. The current chat endpoint verifies Firebase ID tokens and email verification, limits each user to 10 requests per minute and 60 per day, and streams only text responses. Account creation requires a Cloudflare Turnstile site key and secret plus server-only Firebase Admin credentials; the browser never receives the service-account key.
+`OPENROUTER_API_KEY`, the Upstash Redis URL/token, Firebase Admin credentials, and Cloudinary credentials are required for chat and uploads. Keep them server-side; never prefix them with `NEXT_PUBLIC_`. The chat endpoint verifies Firebase ID tokens and email verification, limits each user to 10 requests per minute and 60 per day, saves messages to Firestore, and publishes in-progress responses through Realtime Database. Account creation requires a Cloudflare Turnstile site key and secret; the browser never receives the Firebase service-account key or Cloudinary API secret.
 
 ## Firebase setup
 
@@ -59,27 +59,28 @@ Set the `NEXT_PUBLIC_FIREBASE_*` Web App values in Vercel's project settings for
 
 6. Deploy or restart the app after setting environment variables.
 
-Signup creates the Firebase Authentication account and immediately creates its `users/{uid}` profile in Firestore. Email verification gates AI access, not profile persistence. Firestore is the source of truth for profile data; Realtime Database stores only the signed-in user's active presence connections and never duplicates profile data or credentials. `firestore.rules` allows a user to read and update only their own profile, rejects extra profile fields, prevents deletion, and denies all other Firestore access by default. `database.rules.json` restricts each presence connection to its owner. `storage.rules` restricts files to that user's `users/{uid}/` path, a 20 MiB limit, and an explicit MIME allowlist. Storage rules validate declared metadata, not file bytes; a future upload-processing route must validate file signatures itself. No file-upload UI is enabled yet.
+Signup creates the Firebase Authentication account and immediately creates its `users/{uid}` profile in Firestore. Email verification gates AI access, not profile persistence. Firestore stores profile data and durable chat history; clients can read only their own chats and messages, while the server performs writes. Realtime Database stores each signed-in user's presence and owner-readable live response streams; client writes are denied. Cloudinary assets use authenticated delivery and signed uploads. The app allows images, PDF, TXT, Markdown, and CSV files up to 10 MB each, five files (20 MB combined) per message, and 50 uploads per chat. Deploy `firestore.rules` and `database.rules.json` before enabling the workspace.
 
 ## Current site
 
 - Server-rendered landing and information pages (nonce-based CSP requires per-request HTML rendering; static assets remain cacheable)
 - Google and email/password Firebase sign-in, password reset, and private profile persistence (requires Firebase setup)
-- Owner-only Firestore, Realtime Database presence, and Storage rules with default-deny behavior
+- Owner-only Firestore chat reads and Realtime Database presence/response-stream reads with client writes denied
 - Responsive layout, keyboard focus treatment, and reduced-motion support
 - Product overview, help guide, pricing information, and XyroAIDetect explainer
 - Terms, Privacy, and Acceptable Use drafts marked for legal review
 - Metadata, Open Graph artwork, JSON-LD, sitemap, robots, manifest, and offline information page
-- Text chat is available with server-side OpenRouter and Upstash configuration; conversations stay in browser-local history, with search, rename, Markdown export, stop, and regenerate controls
-- File upload, image generation, research tools, payment, detector, and XyroSocial sign-in are not currently available
+- Text chat is available with server-side OpenRouter and Upstash configuration; chats sync to Firestore and in-progress responses stream through Realtime Database
+- Signed Cloudinary uploads support images, PDF, TXT, Markdown, and CSV files, with per-file and per-chat limits
+- Image generation, research tools, payment, detector, and XyroSocial sign-in are not currently available
 
-The legal pages remain drafts. Chat text is stored in browser local storage and sent to OpenRouter and its selected free model provider; this release has no encrypted cloud history or cross-device sync.
+The legal pages remain drafts. Chat messages and uploads are stored in Firestore and Cloudinary. Prompts and relevant attachment content are sent to OpenRouter and its selected free model provider; review provider terms and do not send sensitive information.
 
 ## Configuration and secrets
 
-Firebase web configuration is required for account sign-in and profile storage; `NEXT_PUBLIC_FIREBASE_DATABASE_URL` is also required for Realtime Database presence. Account creation also uses `NEXT_PUBLIC_TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY`, and `FIREBASE_ADMIN_*`. Only the site key is public; configure the Turnstile secret and Firebase Admin credentials only in the server/deployment environment.
+Firebase web configuration is required for account sign-in and profile storage; `NEXT_PUBLIC_FIREBASE_DATABASE_URL` is required for Realtime Database presence and live response streams. Account creation also uses `NEXT_PUBLIC_TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY`, and `FIREBASE_ADMIN_*`. The chat/upload server additionally requires `OPENROUTER_API_KEY`, Upstash Redis credentials, and `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, and `CLOUDINARY_UPLOAD_PRESET`. Only the Turnstile site key is public; keep all other credentials server-side.
 
-The planned integrations will require, at minimum:
+Other planned integrations may require:
 
 - `OPENROUTER_API_KEY` for server-side model requests
 - `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` for the required chat capacity guard
@@ -90,7 +91,7 @@ Do not add real credentials to this repository. Xyro AI is standalone; no shared
 
 ## Security and deployment status
 
-The current Next.js configuration adds browser security headers. Account creation validates Cloudflare Turnstile server-side before Firebase Admin creates the user; Firebase's client SDK then completes email verification and profile setup. Firestore profile rules and owner-only Realtime Database presence rules remain in force. The chat endpoint verifies Firebase ID tokens, requires verified email, streams model responses, and applies per-user limits through Upstash Redis. Upload handlers, audit logs, payment integrations, and operational health checks are not implemented yet.
+The current Next.js configuration adds browser security headers. Account creation validates Cloudflare Turnstile server-side before Firebase Admin creates the user; Firebase's client SDK then completes email verification and profile setup. Firestore rules deny client writes to chats and uploads; Realtime Database permits owners to read live response streams but denies client writes. Chat requests require verified Firebase ID tokens, persist responses in Firestore, publish live text through Realtime Database, and apply per-user limits through Upstash Redis. Upload signatures and metadata checks are server-side; Cloudinary assets use authenticated delivery.
 
 The legal pages are drafts. Governing law, the legal operator, privacy contact, final data retention periods, and provider disclosures remain unspecified and require review before launch. The static site does not set non-essential cookies.
 

@@ -141,7 +141,7 @@ export default function Home() {
           </details>
           <details>
             <summary>Is chat available now?<span aria-hidden="true">＋</span></summary>
-            <p>Text chat is available after you verify your email. It uses OpenRouter’s free model pool when configured, and your chat history is saved in this browser only. Attachments, research, image generation, and cross-device sync are not available yet.</p>
+            <p>Chat is available after you verify your email. Free OpenRouter models process your prompts, while Firestore keeps your history synced across devices. Attach images or documents stored privately in Cloudinary; review the privacy notice and avoid uploading sensitive material.</p>
           </details>
           <details>
             <summary>What does it cost to get started?<span aria-hidden="true">＋</span></summary>

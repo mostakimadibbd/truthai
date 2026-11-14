@@ -62,7 +62,8 @@ This project is designed for a totally free stack and intentionally avoids paid 
 
 ## Required Firebase Admin settings for account creation
 
-- Create a dedicated Firebase service account with only the permissions needed by Firebase Authentication.
+- Create a dedicated Firebase service account with only the permissions needed
+  for Firebase Authentication, Firestore, and Realtime Database server writes.
 - Set `FIREBASE_ADMIN_PROJECT_ID`, `FIREBASE_ADMIN_CLIENT_EMAIL`, and `FIREBASE_ADMIN_PRIVATE_KEY` in `.env.local` and Vercel Production/Preview environments. Keep these server-only; never use a `NEXT_PUBLIC_` prefix or commit the service-account JSON.
 - For `.env.local`, encode newlines in the private key as `\n`. Use a newly issued key if a previous service-account key was ever shared or exposed.
 - The sign-in form's Remember me checkbox selects persistent or browser-session Firebase Auth persistence. Signup requires a separate Terms and Conditions acceptance checkbox.
