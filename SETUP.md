@@ -24,10 +24,14 @@ This project is designed for a totally free stack and intentionally avoids paid 
 - For production, set `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` to the same custom domain.
   The Next.js rewrite proxies `/__/auth/*` to `<project-id>.firebaseapp.com`.
 - Confirm the Firebase project allows Google sign-in and email/password sign-in.
+- Create the Cloud Firestore database and deploy the repository's `firestore.rules`.
 - Set the web app configuration in `.env.local` or Vercel environment variables.
 - Keep the project on the free Firebase plan. Do not enable paid Identity Platform features.
-- Email/password accounts must verify their email before their profile is saved
-  and workspace access is granted.
+- Signup saves the basic user profile to Firestore immediately after Firebase
+  Authentication creates the account. Email verification is required before
+  accessing AI features; if Firestore rejects the profile write, the sign-in
+  screen offers a retry. Verify that the deployed rules allow each signed-in
+  user to read and write only their own `users/{uid}` profile.
 
 ## Required Vercel settings
 

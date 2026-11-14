@@ -8,9 +8,12 @@ export const metadata: Metadata = {
 };
 
 const tools = [
-  { icon: "✦", title: "Chat", description: "Think through a question and shape your next step.", status: "In development" },
-  { icon: "▤", title: "Projects", description: "Keep related conversations and ideas together.", status: "Coming later" },
-  { icon: "⌘", title: "Personalize", description: "Choose the way you want to work with AI.", status: "Coming later" },
+  { icon: "✦", title: "AI chat", description: "Ask questions, brainstorm, draft, and iterate in one focused conversation.", status: "In development" },
+  { icon: "◈", title: "Model selection", description: "Choose from a curated range of AI models when integrations are ready.", status: "Planned" },
+  { icon: "⌕", title: "Research and sources", description: "Explore information with source links so you can verify important claims.", status: "Planned" },
+  { icon: "▤", title: "Files and images", description: "Bring documents or images into a conversation for analysis.", status: "Planned" },
+  { icon: "▧", title: "Projects and context", description: "Keep related conversations and working context organized together.", status: "Planned" },
+  { icon: "⌘", title: "Custom assistants", description: "Create reusable instructions for the kinds of tasks you do often.", status: "Planned" },
 ];
 
 export default function ChatPage() {
@@ -19,10 +22,10 @@ export default function ChatPage() {
       <header className="workspace-heading">
         <div>
           <span className="eyebrow">Your workspace</span>
-          <h1>Good to have you here.</h1>
+          <h1>A thoughtful space for AI work.</h1>
           <p>
-            Your account is ready. The chat experience is still being built, so
-            we&apos;ll make it available here when it&apos;s ready to use.
+            Your account is ready. We&apos;re building the AI experience now;
+            these capabilities are not live yet.
           </p>
         </div>
         <span className="workspace-badge"><i /> Account foundation is live</span>
@@ -43,8 +46,8 @@ export default function ChatPage() {
         <span className="workspace-callout-icon" aria-hidden="true">✦</span>
         <p>
           <strong>We won&apos;t pretend a feature is ready before it is.</strong>{" "}
-          You can manage your account details in settings, or read how the
-          product is being developed.
+          Chat, model connections, research, and file analysis are not available
+          yet. You can manage your account or read how the product is being developed.
         </p>
       </aside>
       <div className="hero-actions workspace-actions">

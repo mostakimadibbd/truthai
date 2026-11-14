@@ -34,15 +34,21 @@ function getAuthErrorMessage(error: unknown): string {
     case "auth/invalid-email":
       return "Enter a valid email address.";
     case "auth/invalid-credential":
+    case "auth/invalid-login-credentials":
     case "auth/wrong-password":
     case "auth/user-not-found":
       return "That email and password don’t match. Check them and try again.";
+    case "auth/user-disabled":
+      return "This account is disabled. Contact the site administrator for help.";
     case "auth/weak-password":
       return "Choose a password with at least 10 characters.";
     case "auth/operation-not-allowed":
       return "Email and password sign-in is turned off for this project. Contact the site administrator.";
     case "auth/unauthorized-domain":
       return "This site isn’t enabled for sign-in yet. Contact the site administrator.";
+    case "auth/invalid-api-key":
+    case "auth/app-not-authorized":
+      return "Firebase is misconfigured for this site. Check the Firebase web app settings and authorized domains.";
     case "auth/popup-blocked":
       return "Your browser blocked the Google sign-in window. Try again or allow pop-ups for this site.";
     case "auth/popup-closed-by-user":
@@ -60,6 +66,18 @@ function getAuthErrorMessage(error: unknown): string {
     default:
       return "We couldn’t complete sign-in. Please try again.";
   }
+}
+
+function getProfileSaveErrorMessage(error: unknown): string {
+  if (error instanceof FirebaseError) {
+    if (error.code === "permission-denied") {
+      return "Your account exists, but Firestore rejected the profile save. Confirm that Cloud Firestore is created and the current firestore.rules are deployed.";
+    }
+    if (error.code === "unavailable" || error.code === "deadline-exceeded") {
+      return "Your account exists, but Firestore is temporarily unreachable. Check your connection and retry the profile save.";
+    }
+  }
+  return "Your account exists, but we couldn’t save its profile in Firestore. Check the Firebase configuration and retry.";
 }
 
 function shouldUseRedirect(): boolean {
@@ -124,20 +142,33 @@ export default function SignInForm({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [verificationUser, setVerificationUser] = useState<User | null>(null);
+  const [profileSaved, setProfileSaved] = useState(false);
+  const [emailVerified, setEmailVerified] = useState(false);
   const configured = isFirebaseConfigured;
   const mode = initialMode;
 
   const completeSignIn = useCallback(async (user: User) => {
     await reload(user);
+    setVerificationUser(user);
+    setEmailVerified(user.emailVerified);
+    setProfileSaved(false);
+
+    try {
+      const { saveUserProfile } = await import("@/lib/firebase/profile");
+      await saveUserProfile(user);
+      setProfileSaved(true);
+    } catch (profileError) {
+      setError(getProfileSaveErrorMessage(profileError));
+      return;
+    }
+
     if (!user.emailVerified) {
-      setVerificationUser(user);
       setNotice("");
       setError("");
       return;
     }
 
-    const { saveUserProfile } = await import("@/lib/firebase/profile");
-    await saveUserProfile(user);
+    setVerificationUser(null);
     router.replace("/chat");
     router.refresh();
   }, [router]);
@@ -175,6 +206,8 @@ export default function SignInForm({
     setError("");
     setNotice("");
     setVerificationUser(null);
+    setProfileSaved(false);
+    setEmailVerified(false);
 
     try {
       const auth = getFirebaseAuth();
@@ -195,20 +228,40 @@ export default function SignInForm({
           password,
         );
         setVerificationUser(credential.user);
+        setProfileSaved(false);
+        setEmailVerified(false);
         setPassword("");
         if (displayName.trim()) {
-          await updateProfile(credential.user, {
-            displayName: displayName.trim().slice(0, 100),
-          });
+          try {
+            await updateProfile(credential.user, {
+              displayName: displayName.trim().slice(0, 100),
+            });
+          } catch {
+            setError("Your account was created, but we couldn’t save the display name. You can update your profile later.");
+          }
         }
+
+        let savedProfile = false;
+        try {
+          const { saveUserProfile } = await import("@/lib/firebase/profile");
+          await saveUserProfile(credential.user);
+          savedProfile = true;
+          setProfileSaved(true);
+        } catch (profileError) {
+          setError(getProfileSaveErrorMessage(profileError));
+        }
+
         try {
           await sendEmailVerification(credential.user);
         } catch {
-          setError("Your account was created, but we couldn’t send the verification email. Use the resend option below.");
+          setError(savedProfile
+            ? "Your profile is saved, but we couldn’t send the verification email. Use the resend option below."
+            : "Your account exists, but we couldn’t save its profile or send the verification email. Retry both below.");
           return;
         }
-        setVerificationUser(credential.user);
-        setNotice("Your account is ready. Verify your email to unlock your workspace.");
+        setNotice(savedProfile
+          ? "Your account and profile are saved. Verify your email to open your workspace."
+          : "We sent a verification email. Save your profile below before continuing.");
         return;
       }
 
@@ -267,6 +320,7 @@ export default function SignInForm({
 
     try {
       await reload(verificationUser);
+      setEmailVerified(verificationUser.emailVerified);
       if (!verificationUser.emailVerified) {
         setError("Your email is not verified yet. Open the link in your inbox, then try again.");
         return;
@@ -274,6 +328,30 @@ export default function SignInForm({
       await completeSignIn(verificationUser);
     } catch (verificationError) {
       setError(getAuthErrorMessage(verificationError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRetryProfileSave() {
+    if (!verificationUser) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+
+    try {
+      const { saveUserProfile } = await import("@/lib/firebase/profile");
+      await saveUserProfile(verificationUser);
+      setProfileSaved(true);
+      if (emailVerified) {
+        setVerificationUser(null);
+        router.replace("/chat");
+        router.refresh();
+      } else {
+        setNotice("Your profile is saved. Verify your email to open your workspace.");
+      }
+    } catch (profileError) {
+      setError(getProfileSaveErrorMessage(profileError));
     } finally {
       setBusy(false);
     }
@@ -376,26 +454,67 @@ export default function SignInForm({
         {verificationUser ? (
           <div className="verification-card">
             <span className="verification-icon" aria-hidden="true">✉</span>
-            <h3>Check your email</h3>
+            <h3>{profileSaved ? "Account details saved" : "Finish setting up your account"}</h3>
             <p>
-              We sent a verification link to <strong>{verificationUser.email}</strong>. Verify it to continue.
+              {profileSaved
+                ? <>Your profile for <strong>{verificationUser.email}</strong> is saved. {emailVerified ? "You can continue to your workspace." : "Verify your email to use AI features."}</>
+                : <>Your Firebase account for <strong>{verificationUser.email}</strong> exists, but its profile has not been saved yet.</>}
             </p>
-            <button
-              className="button button-primary auth-submit"
-              type="button"
-              onClick={handleVerification}
-              disabled={busy}
-            >
-              {busy ? "Checking…" : "I’ve verified my email"}
-            </button>
-            <button
-              className="text-button"
-              type="button"
-              onClick={handleResendVerification}
-              disabled={busy}
-            >
-              Send another verification email
-            </button>
+            {!profileSaved && (
+              <button
+                className="button button-primary auth-submit"
+                type="button"
+                onClick={handleRetryProfileSave}
+                disabled={busy}
+              >
+                {busy ? "Saving…" : "Retry saving my profile"}
+              </button>
+            )}
+            {profileSaved && emailVerified && (
+              <button
+                className="button button-primary auth-submit"
+                type="button"
+                onClick={handleRetryProfileSave}
+                disabled={busy}
+              >
+                {busy ? "Opening…" : "Continue to workspace"}
+              </button>
+            )}
+            {profileSaved && !emailVerified && (
+              <>
+                <button
+                  className="button button-primary auth-submit"
+                  type="button"
+                  onClick={handleVerification}
+                  disabled={busy}
+                >
+                  {busy ? "Checking…" : "I’ve verified my email"}
+                </button>
+                <button
+                  className="text-button"
+                  type="button"
+                  onClick={handleResendVerification}
+                  disabled={busy}
+                >
+                  Send another verification email
+                </button>
+              </>
+            )}
+            {!profileSaved && !emailVerified && (
+              <button
+                className="text-button"
+                type="button"
+                onClick={handleResendVerification}
+                disabled={busy}
+              >
+                Resend verification email
+              </button>
+            )}
+            {profileSaved && !emailVerified && (
+              <Link className="button button-outline auth-submit" href="/settings">
+                Continue to account settings
+              </Link>
+            )}
           </div>
         ) : (
           <>
