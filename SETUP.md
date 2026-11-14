@@ -59,7 +59,15 @@ This project is designed for a totally free stack and intentionally avoids paid 
 - Create a free OpenRouter account and generate an API key.
 - Store the key in `OPENROUTER_API_KEY` only on the server.
 - Verify that no paid model or paid plugin is selected.
-- Note that shared free-tier limits apply to the account as a whole.
+- Chat uses `openrouter/free`, so model selection is routed by OpenRouter and shared free-tier limits apply to the account as a whole.
+- Chat messages and the current conversation context are sent to OpenRouter and its selected model provider. Review their data policies and do not send sensitive information.
+
+## Required chat storage and limits
+
+- The current chat release stores conversations only in the signed-in user's browser local storage. It does not sync history to Firestore or another device and does not encrypt that local history. Clearing browser storage deletes the saved history.
+- Configure `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`; chat fails closed if the capacity guard is unavailable.
+- The chat endpoint allows up to 10 requests per minute and 60 per day for each Firebase user. These are temporary MVP caps, not the planned configurable token budget or global model queue.
+- Text messages are limited to 12,000 characters each and a request carries at most 30 messages. Attachments, web search, deep research, image generation, projects, and model selection are not available yet.
 
 ## Required Cloudinary settings
 
@@ -90,6 +98,7 @@ This project is designed for a totally free stack and intentionally avoids paid 
 ## Deployment checklist
 
 - [ ] Firebase web config values are in place
+- [ ] `OPENROUTER_API_KEY` and Upstash Redis URL/token are set for chat
 - [ ] The stable Vercel production hostname is in Firebase Auth authorized domains
 - [ ] `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` matches the Firebase auth domain configured for the app
 - [ ] `SITE_URL` is set to the canonical HTTPS origin

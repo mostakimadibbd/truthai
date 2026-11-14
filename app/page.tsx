@@ -57,7 +57,7 @@ export default function Home() {
               <span>Start with a question or thought…</span>
               <span className="preview-send" aria-hidden="true">↑</span>
             </div>
-            <span className="preview-disclaimer">Illustrative preview · chat is still in development</span>
+            <span className="preview-disclaimer">Illustrative preview · text chat is now available</span>
           </div>
           <span className="preview-glow preview-glow-one" aria-hidden="true" />
           <span className="preview-glow preview-glow-two" aria-hidden="true" />
@@ -101,9 +101,9 @@ export default function Home() {
             <span className="eyebrow">Made for real work</span>
             <h2>Useful tools.<br />No unnecessary noise.</h2>
             <p>
-              Xyro AI is being built around clear answers, thoughtful creative
-              work, and space to make sense of the material in front of you.
-              Features are released only when they are ready.
+              Start with a text conversation, then build on it with thoughtful
+              creative tools and more ways to work with your material as they
+              become ready.
             </p>
             <Link href="/help" className="text-link">Explore the guide <span aria-hidden="true">→</span></Link>
           </div>
@@ -111,7 +111,7 @@ export default function Home() {
             <article>
               <span className="clarity-icon" aria-hidden="true">01</span>
               <div><h3>Conversation</h3><p>Ask naturally. Refine the direction as you go.</p></div>
-              <span className="clarity-state">In development</span>
+              <span className="clarity-state">Available · text chat</span>
             </article>
             <article>
               <span className="clarity-icon" aria-hidden="true">02</span>
@@ -141,7 +141,7 @@ export default function Home() {
           </details>
           <details>
             <summary>Is chat available now?<span aria-hidden="true">＋</span></summary>
-            <p>Account sign-in is available when Firebase is configured. The AI chat experience is still in development, and this site does not present a non-working chat as a live feature.</p>
+            <p>Text chat is available after you verify your email. It uses OpenRouter’s free model pool when configured, and your chat history is saved in this browser only. Attachments, research, image generation, and cross-device sync are not available yet.</p>
           </details>
           <details>
             <summary>What does it cost to get started?<span aria-hidden="true">＋</span></summary>
@@ -154,7 +154,7 @@ export default function Home() {
         <div className="page-width closing-cta-inner">
           <span className="eyebrow">Your next idea can start small</span>
           <h2>Ready when you are.</h2>
-          <p>Create an account and be ready for the Xyro AI workspace.</p>
+          <p>Create an account, verify your email, and start a text conversation.</p>
           <Link href="/sign-up" className="button button-primary">
             Create your free account <span aria-hidden="true">↗</span>
           </Link>

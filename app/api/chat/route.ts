@@ -11,8 +11,20 @@ type ChatMessage = {
 const MAX_MESSAGES = 30;
 const MAX_MESSAGE_LENGTH = 12_000;
 const MAX_TOTAL_LENGTH = 36_000;
+const RATE_LIMIT_SCRIPT = `
+local minuteCount = redis.call('INCR', KEYS[1])
+if minuteCount == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]) end
+local dayCount = redis.call('INCR', KEYS[2])
+if dayCount == 1 then redis.call('PEXPIRE', KEYS[2], ARGV[2]) end
+return {minuteCount, dayCount, redis.call('PTTL', KEYS[1]), redis.call('PTTL', KEYS[2])}
+`;
 
-function errorResponse(status: number, code: string, message: string, headers?: HeadersInit) {
+function errorResponse(
+  status: number,
+  code: string,
+  message: string,
+  headers?: Record<string, string>,
+) {
   return NextResponse.json(
     { error: { code, message } },
     { status, headers: { "Cache-Control": "no-store", ...headers } },
@@ -46,9 +58,11 @@ function parseMessages(value: unknown): ChatMessage[] | null {
   return messages.at(-1)?.role === "user" ? messages : null;
 }
 
-async function verifyUser(idToken: string): Promise<"valid" | "unverified" | "invalid"> {
+async function verifyUser(
+  idToken: string,
+): Promise<{ state: "valid" | "unverified" | "invalid"; uid?: string }> {
   const firebaseApiKey = process.env.NEXT_PUBLIC_FIREBASE_API_KEY;
-  if (!firebaseApiKey) return "invalid";
+  if (!firebaseApiKey) return { state: "invalid" };
 
   try {
     const response = await fetch(
@@ -60,7 +74,7 @@ async function verifyUser(idToken: string): Promise<"valid" | "unverified" | "in
         cache: "no-store",
       },
     );
-    if (!response.ok) return "invalid";
+    if (!response.ok) return { state: "invalid" };
     const result: unknown = await response.json();
     if (
       typeof result !== "object" ||
@@ -69,13 +83,71 @@ async function verifyUser(idToken: string): Promise<"valid" | "unverified" | "in
       !Array.isArray(result.users) ||
       typeof result.users[0] !== "object" ||
       result.users[0] === null ||
-      !("emailVerified" in result.users[0])
+      !("emailVerified" in result.users[0]) ||
+      !("localId" in result.users[0]) ||
+      typeof result.users[0].localId !== "string"
     ) {
-      return "invalid";
+      return { state: "invalid" };
     }
-    return result.users[0].emailVerified === true ? "valid" : "unverified";
+    return {
+      state: result.users[0].emailVerified === true ? "valid" : "unverified",
+      uid: result.users[0].localId,
+    };
   } catch {
-    return "invalid";
+    return { state: "invalid" };
+  }
+}
+
+async function checkRateLimit(uid: string): Promise<
+  | { state: "allowed" }
+  | { state: "limited"; retryAfter: number }
+  | { state: "unavailable" }
+> {
+  const redisUrl = process.env.UPSTASH_REDIS_REST_URL?.replace(/\/+$/, "");
+  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!redisUrl || !redisToken) return { state: "unavailable" };
+
+  try {
+    const response = await fetch(redisUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${redisToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify([
+        "EVAL",
+        RATE_LIMIT_SCRIPT,
+        "2",
+        `xyro:chat:${uid}:minute`,
+        `xyro:chat:${uid}:day`,
+        "60000",
+        "86400000",
+      ]),
+      cache: "no-store",
+    });
+    if (!response.ok) return { state: "unavailable" };
+    const result: unknown = await response.json();
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("result" in result) ||
+      !Array.isArray(result.result) ||
+      result.result.length !== 4 ||
+      result.result.some((value) => typeof value !== "number")
+    ) {
+      return { state: "unavailable" };
+    }
+
+    const [minuteCount, dayCount, minuteTtl, dayTtl] = result.result;
+    if (dayCount > 60) {
+      return { state: "limited", retryAfter: Math.max(1, Math.ceil(dayTtl / 1000)) };
+    }
+    if (minuteCount > 10) {
+      return { state: "limited", retryAfter: Math.max(1, Math.ceil(minuteTtl / 1000)) };
+    }
+    return { state: "allowed" };
+  } catch {
+    return { state: "unavailable" };
   }
 }
 
@@ -92,10 +164,10 @@ export async function POST(request: NextRequest) {
   }
 
   const verification = await verifyUser(idToken);
-  if (verification === "invalid") {
+  if (verification.state === "invalid" || !verification.uid) {
     return errorResponse(401, "AUTH_INVALID", "Your session has expired. Sign in again.");
   }
-  if (verification === "unverified") {
+  if (verification.state === "unverified") {
     return errorResponse(403, "EMAIL_NOT_VERIFIED", "Verify your email before using chat.");
   }
 
@@ -127,6 +199,23 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const rateLimit = await checkRateLimit(verification.uid);
+  if (rateLimit.state === "unavailable") {
+    return errorResponse(
+      503,
+      "CAPACITY_GUARD_UNAVAILABLE",
+      "Chat is temporarily unavailable because its capacity guard couldn’t be reached.",
+    );
+  }
+  if (rateLimit.state === "limited") {
+    return errorResponse(
+      429,
+      "RATE_LIMITED",
+      "You’ve reached the chat limit. Please wait before sending another message.",
+      { "Retry-After": String(rateLimit.retryAfter) },
+    );
+  }
+
   let upstream: Response;
   try {
     upstream = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -152,7 +241,7 @@ export async function POST(request: NextRequest) {
 
   if (!upstream.ok || !upstream.body) {
     const status = upstream.status === 429 ? 429 : upstream.status >= 500 ? 503 : 502;
-    const headers: HeadersInit = {};
+    const headers: Record<string, string> = {};
     const retryAfter = upstream.headers.get("retry-after");
     if (retryAfter) headers["Retry-After"] = retryAfter;
     return errorResponse(

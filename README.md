@@ -1,6 +1,6 @@
 # Xyro AI
 
-Xyro AI is an independent product. The site includes server-rendered marketing pages and a Firebase-backed sign-in/profile foundation. AI chat, file upload, image generation, and other planned product features are not implemented yet.
+Xyro AI is an independent product with Firebase-backed sign-in/profile and a text-chat workspace. When configured, chat streams responses through OpenRouter's free-model router. Chat history is stored only in the current browser; it is not synced to Firestore or encrypted by Xyro AI. File upload, image generation, research tools, and other planned product features are not implemented yet.
 
 ## Requirements
 
@@ -32,7 +32,7 @@ Vercel detects Next.js automatically; no custom `vercel.json` is required. Impor
 
 Set the `NEXT_PUBLIC_FIREBASE_*` Web App values in Vercel's project settings for Production and Preview. Set `SITE_URL` to the canonical production origin (for example, `https://your-domain.example`); Preview deployments use Vercel's generated preview URL and are marked `noindex`. Add the stable production hostname (including its `vercel.app` alias, if used) to Firebase Authentication's authorized domains. Environment-variable changes apply to new deployments, so redeploy after updating them.
 
-The `OPENROUTER_API_KEY`, `FIREBASE_ADMIN_*`, and watermark variables are reserved for planned server-side integrations and are not used by the current site. Do not prefix them with `NEXT_PUBLIC_`. No Firebase Admin credentials are needed for the current client-auth/profile flow.
+`OPENROUTER_API_KEY` and the Upstash Redis URL/token are required for text chat. Keep them server-side; never prefix them with `NEXT_PUBLIC_`. The current chat endpoint verifies Firebase ID tokens and email verification, limits each user to 10 requests per minute and 60 per day, and streams only text responses. No Firebase Admin credentials are needed for the current profile or chat flow. The `FIREBASE_ADMIN_*` and watermark variables remain reserved for later features.
 
 ## Firebase setup
 
@@ -70,9 +70,10 @@ Signup creates the Firebase Authentication account and immediately creates its `
 - Product overview, help guide, pricing information, and XyroAIDetect explainer
 - Terms, Privacy, and Acceptable Use drafts marked for legal review
 - Metadata, Open Graph artwork, JSON-LD, sitemap, robots, manifest, and offline information page
-- Chat, file upload, image generation, payment, detector, and XyroSocial sign-in are not currently available
+- Text chat is available with server-side OpenRouter and Upstash configuration; local browser history only
+- File upload, image generation, research tools, payment, detector, and XyroSocial sign-in are not currently available
 
-The site copy describes planned product behavior where applicable. It is not evidence that those features or data controls are implemented.
+The legal pages remain drafts. Chat text is stored in browser local storage and sent to OpenRouter and its selected free model provider; this release has no encrypted cloud history or cross-device sync.
 
 ## Configuration and secrets
 
@@ -81,6 +82,7 @@ Firebase web configuration is required for account sign-in and profile storage; 
 The planned integrations will require, at minimum:
 
 - `OPENROUTER_API_KEY` for server-side model requests
+- `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` for the required chat capacity guard
 - Firebase Web App configuration for current sign-in; Firebase Admin credentials are reserved for future server routes
 - `MARK_KEY` and `MARK_SERVICE_SECRET` for server-side watermark operations
 
