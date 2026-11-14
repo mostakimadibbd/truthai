@@ -11,7 +11,12 @@ declare global {
   }
 }
 
-let serviceWorkerPolicy: TrustedTypePolicy | undefined;
+type ServiceWorkerPolicy = Pick<
+  TrustedTypePolicy<{ createScriptURL: (url: string) => string }>,
+  "name" | "createScriptURL"
+>;
+
+let serviceWorkerPolicy: ServiceWorkerPolicy | undefined;
 
 function getServiceWorkerUrl(): string | TrustedScriptURL {
   if (!window.trustedTypes) return "/sw.js";
