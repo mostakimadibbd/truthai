@@ -3,13 +3,10 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import {
-  onAuthStateChanged,
-  signOut,
-  type User,
-} from "firebase/auth";
+import { onAuthStateChanged, signOut, type User } from "firebase/auth";
 import { doc, onSnapshot } from "firebase/firestore";
-import { getFirebaseServices, isFirebaseConfigured } from "@/lib/firebase/client";
+import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/auth-client";
+import { getFirebaseFirestore } from "@/lib/firebase/firestore-client";
 
 type ProfileView = {
   email: string;
@@ -39,7 +36,8 @@ export default function AccountPanel() {
       return;
     }
 
-    const { auth, db } = getFirebaseServices();
+    const auth = getFirebaseAuth();
+    const db = getFirebaseFirestore();
     let stopProfile: (() => void) | undefined;
 
     const stopAuth = onAuthStateChanged(
@@ -88,9 +86,7 @@ export default function AccountPanel() {
           },
           (snapshotError) => {
             setState("error");
-            setError(
-              `Could not read your profile from Firestore: ${snapshotError.message}`,
-            );
+            setError(`Could not read your profile from Firestore: ${snapshotError.message}`);
           },
         );
       },
@@ -110,8 +106,7 @@ export default function AccountPanel() {
     setSigningOut(true);
     setError("");
     try {
-      const { auth } = getFirebaseServices();
-      await signOut(auth);
+      await signOut(getFirebaseAuth());
       router.replace("/sign-in");
     } catch (signOutError) {
       setError(
@@ -129,15 +124,13 @@ export default function AccountPanel() {
       {state === "loading" && <p role="status">Loading your saved profile…</p>}
       {state === "not-configured" && (
         <div className="auth-alert" role="alert">
-          Firebase is not configured. Add the Firebase web settings locally or
-          in Vercel, then redeploy.
+          Firebase is not configured. Add the Firebase web settings locally or in Vercel, then redeploy.
         </div>
       )}
       {state === "signed-out" && <p role="status">Taking you to sign in…</p>}
       {state === "missing-profile" && (
         <div className="auth-alert" role="alert">
-          You are signed in, but your profile document is missing. Sign out and
-          sign in again after deploying the Firestore rules.
+          You are signed in, but your profile document is missing. Sign out and sign in again after deploying the Firestore rules.
         </div>
       )}
       {state === "invalid-profile" && <div className="auth-alert" role="alert">{error}</div>}
@@ -154,27 +147,17 @@ export default function AccountPanel() {
             <p>{profile.email}</p>
           </div>
           <p className="profile-note">
-            The profile is read from <code>users/{user?.uid}</code>. Firestore
-            rules allow only this signed-in account to read it.
+            The profile is read from <code>users/{user?.uid}</code>. Firestore rules allow only this signed-in account to read it.
           </p>
         </div>
       )}
-      {error && state !== "error" && (
-        <div className="auth-alert" role="alert">{error}</div>
-      )}
+      {error && state !== "error" && <div className="auth-alert" role="alert">{error}</div>}
       {user && (
-        <button
-          type="button"
-          className="button button-outline auth-signout"
-          onClick={handleSignOut}
-          disabled={signingOut}
-        >
+        <button type="button" className="button button-outline auth-signout" onClick={handleSignOut} disabled={signingOut}>
           {signingOut ? "Signing out…" : "Sign out"}
         </button>
       )}
-      <Link href="/" className="text-link account-home">
-        Back to Xyro AI <span aria-hidden="true">→</span>
-      </Link>
+      <Link href="/" className="text-link account-home">Back to Xyro AI <span aria-hidden="true">→</span></Link>
     </div>
   );
 }
