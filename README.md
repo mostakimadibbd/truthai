@@ -10,7 +10,7 @@ Xyro AI is an independent product with Firebase-backed sign-in/profile and a tex
 ## Run locally
 
 ```sh
-npm install
+npm ci
 npm run build
 npm run dev
 ```
@@ -90,7 +90,7 @@ Do not add real credentials to this repository. Xyro AI is standalone; no shared
 
 ## Security and deployment status
 
-The current Next.js configuration adds browser security headers. Authentication uses Firebase's client SDK, Firestore profile rules, and owner-only Realtime Database presence rules; no Firebase Admin routes, model routes, upload handlers, rate limits, audit logs, payment integrations, or operational health checks are implemented yet.
+The current Next.js configuration adds browser security headers. Authentication uses Firebase's client SDK, Firestore profile rules, and owner-only Realtime Database presence rules. The chat endpoint verifies Firebase ID tokens, requires verified email, streams model responses, and applies per-user limits through Upstash Redis. Firebase Admin routes, upload handlers, audit logs, payment integrations, and operational health checks are not implemented yet.
 
 The legal pages are drafts. Governing law, the legal operator, privacy contact, final data retention periods, and provider disclosures remain unspecified and require review before launch. The static site does not set non-essential cookies.
 
