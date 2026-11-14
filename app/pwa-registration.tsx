@@ -2,6 +2,15 @@
 
 import { useEffect } from "react";
 
+declare global {
+  interface ServiceWorkerContainer {
+    register(
+      scriptURL: string | TrustedScriptURL,
+      options?: RegistrationOptions,
+    ): Promise<ServiceWorkerRegistration>;
+  }
+}
+
 let serviceWorkerPolicy: TrustedTypePolicy | undefined;
 
 function getServiceWorkerUrl(): string | TrustedScriptURL {
