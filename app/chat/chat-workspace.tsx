@@ -154,13 +154,23 @@ export default function ChatWorkspace() {
   const [renameDraft, setRenameDraft] = useState("");
   const [verificationBusy, setVerificationBusy] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState("");
+  const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
+  const [attachmentUrls, setAttachmentUrls] = useState<Record<string, string>>({});
   const controllerRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const conversationRef = useRef<HTMLDivElement>(null);
   const previousChatIdRef = useRef<string | null>(null);
   const activeChat = chats.find((chat) => chat.id === activeChatId) ?? null;
   const activeMessages = activeChat?.messages ?? [];
+  const updateChat = useCallback((chatId: string, update: (chat: Chat) => Chat) => {
+    setChats((previous) =>
+      previous.map((chat) => (chat.id === chatId ? update(chat) : chat))
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, HISTORY_LIMIT),
+    );
+  }, []);
 
   useEffect(() => {
     if (!isFirebaseConfigured) {
@@ -170,6 +180,7 @@ export default function ChatWorkspace() {
 
     return onAuthStateChanged(getFirebaseAuth(), (currentUser) => {
       if (!currentUser) {
+        setUser(null);
         setHistoryLoaded(false);
         setChats([]);
         setActiveChatId(null);
@@ -188,35 +199,199 @@ export default function ChatWorkspace() {
       }
 
       setAuthState("ready");
-      try {
-        const saved = localStorage.getItem(getHistoryKey(currentUser.uid));
-        const parsed: unknown = saved ? JSON.parse(saved) : [];
-        const history = Array.isArray(parsed) ? parsed.filter(isChat) : [];
-        const orderedHistory = history
-          .sort((a, b) => b.updatedAt - a.updatedAt)
-          .slice(0, HISTORY_LIMIT);
-        setChats(orderedHistory);
-        setActiveChatId(orderedHistory[0]?.id ?? null);
-      } catch {
-        setChats([]);
-        setActiveChatId(null);
-        setNotice("This browser’s saved chat history couldn’t be read.");
-      }
-      setHistoryLoaded(true);
     });
   }, [router]);
 
   useEffect(() => {
-    if (!user || !historyLoaded || authState !== "ready") return;
-    try {
-      localStorage.setItem(
-        getHistoryKey(user.uid),
-        JSON.stringify(chats.slice(0, HISTORY_LIMIT)),
-      );
-    } catch {
-      setNotice("This browser couldn’t save your chat history. Check available storage.");
+    if (!user || authState !== "ready") return;
+    let active = true;
+    let unsubscribeChats: (() => void) | undefined;
+
+    async function loadChats() {
+      try {
+        const historyKey = getHistoryKey(user.uid);
+        const saved = localStorage.getItem(historyKey);
+        if (saved) {
+          const parsed: unknown = JSON.parse(saved);
+          const legacyChats = Array.isArray(parsed) ? parsed.filter(isChat) : [];
+          if (legacyChats.length) {
+            const idToken = await user.getIdToken();
+            const response = await fetch("/api/chats/migrate", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${idToken}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ chats: legacyChats }),
+            });
+            if (!response.ok) {
+              throw new Error(await getApiError(response, "Your saved chat history couldn’t be synced."));
+            }
+          }
+          localStorage.removeItem(historyKey);
+        }
+      } catch (error) {
+        console.error("Couldn’t migrate this browser’s chat history.", error);
+        if (active) {
+          setNotice(
+            error instanceof Error
+              ? `${error.message} Your browser copy is still available.`
+              : "Your chat history couldn’t be synced. Your browser copy is still available.",
+          );
+        }
+      }
+
+      if (!active) return;
+      try {
+        const chatsQuery = query(
+          collection(getFirebaseFirestore(), "users", user.uid, "chats"),
+          orderBy("updatedAt", "desc"),
+          limit(HISTORY_LIMIT),
+        );
+        unsubscribeChats = onSnapshot(
+          chatsQuery,
+          (snapshot) => {
+            const loadedChats = snapshot.docs.map((chatDocument) => {
+              const data = chatDocument.data();
+              return {
+                id: chatDocument.id,
+                title: typeof data.title === "string" ? data.title : "New chat",
+                updatedAt: toMillis(data.updatedAt),
+                messages: [],
+                searchText: typeof data.searchText === "string" ? data.searchText : "",
+                lastMessagePreview:
+                  typeof data.lastMessagePreview === "string" ? data.lastMessagePreview : "",
+              };
+            });
+            setChats(loadedChats);
+            setActiveChatId((current) =>
+              current && loadedChats.some((chat) => chat.id === current)
+                ? current
+                : loadedChats[0]?.id ?? null,
+            );
+            setHistoryLoaded(true);
+          },
+          (error) => {
+            console.error("Firestore chat history listener failed.", error);
+            setNotice("Cloud chat history couldn’t be loaded. Check your connection and try again.");
+            setHistoryLoaded(true);
+          },
+        );
+      } catch (error) {
+        console.error("Couldn’t initialize Firestore chat history.", error);
+        setNotice("Cloud chat history couldn’t be loaded. Check your Firebase setup.");
+        setHistoryLoaded(true);
+      }
     }
-  }, [authState, chats, historyLoaded, user]);
+
+    void loadChats();
+    return () => {
+      active = false;
+      unsubscribeChats?.();
+    };
+  }, [authState, user]);
+
+  useEffect(() => {
+    if (!user || !activeChatId || authState !== "ready") return;
+    let unsubscribeMessages: (() => void) | undefined;
+    try {
+      const messagesQuery = query(
+        collection(getFirebaseFirestore(), "users", user.uid, "chats", activeChatId, "messages"),
+        orderBy("createdAt", "asc"),
+        limit(MESSAGE_LIMIT),
+      );
+      unsubscribeMessages = onSnapshot(
+        messagesQuery,
+        (snapshot) => {
+          const messages = snapshot.docs.map((messageDocument) => {
+            const data = messageDocument.data();
+            return {
+              id: messageDocument.id,
+              role: data.role === "assistant" ? "assistant" as const : "user" as const,
+              content: typeof data.content === "string" ? data.content : "",
+              createdAt: toMillis(data.createdAt),
+              attachments: Array.isArray(data.attachments)
+                ? data.attachments.flatMap((item: unknown) =>
+                    typeof item === "object" &&
+                    item !== null &&
+                    "id" in item &&
+                    typeof item.id === "string" &&
+                    "name" in item &&
+                    typeof item.name === "string" &&
+                    "mimeType" in item &&
+                    typeof item.mimeType === "string" &&
+                    "size" in item &&
+                    typeof item.size === "number"
+                      ? [{
+                          id: item.id,
+                          name: item.name,
+                          mimeType: item.mimeType,
+                          size: item.size,
+                        }]
+                      : [],
+                  )
+                : [],
+              status:
+                data.status === "generating" ||
+                data.status === "failed" ||
+                data.status === "stopped"
+                  ? data.status
+                  : "complete",
+            };
+          });
+          updateChat(activeChatId, (chat) => ({ ...chat, messages }));
+        },
+        (error) => {
+          console.error("Firestore chat message listener failed.", error);
+          setNotice("Messages couldn’t be loaded. Check your connection and try again.");
+        },
+      );
+    } catch (error) {
+      console.error("Couldn’t initialize the Firestore message listener.", error);
+      setNotice("Messages couldn’t be loaded. Check your Firebase setup.");
+    }
+    return () => unsubscribeMessages?.();
+  }, [activeChatId, authState, updateChat, user]);
+
+  useEffect(() => {
+    if (!user || !activeChatId || authState !== "ready") return;
+    try {
+      const streamRef = ref(
+        getFirebaseRealtimeDatabase(),
+        `chatStreams/${user.uid}/${activeChatId}`,
+      );
+      return onValue(
+        streamRef,
+        (snapshot) => {
+          const stream = snapshot.val();
+          if (
+            typeof stream !== "object" ||
+            stream === null ||
+            typeof stream.messageId !== "string" ||
+            typeof stream.text !== "string" ||
+            stream.status !== "generating"
+          ) {
+            return;
+          }
+          updateChat(activeChatId, (chat) => ({
+            ...chat,
+            messages: chat.messages.map((message) =>
+              message.id === stream.messageId
+                ? { ...message, content: stream.text, status: "generating" }
+                : message,
+            ),
+          }));
+        },
+        (error) => {
+          console.error("Realtime Database response listener failed.", error);
+          setNotice("Live response updates are temporarily unavailable.");
+        },
+      );
+    } catch (error) {
+      console.error("Couldn’t initialize the Realtime Database response listener.", error);
+      setNotice("Live response updates are unavailable. Check your Firebase setup.");
+    }
+  }, [activeChatId, authState, updateChat, user]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -256,14 +431,6 @@ export default function ChatWorkspace() {
         chat.messages.some((message) => message.content.toLowerCase().includes(query)),
     );
   }, [chats, search]);
-
-  const updateChat = useCallback((chatId: string, update: (chat: Chat) => Chat) => {
-    setChats((previous) =>
-      previous.map((chat) => (chat.id === chatId ? update(chat) : chat))
-        .sort((a, b) => b.updatedAt - a.updatedAt)
-        .slice(0, HISTORY_LIMIT),
-    );
-  }, []);
 
   useEffect(() => {
     const conversation = conversationRef.current;
