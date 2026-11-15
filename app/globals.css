@@ -3233,3 +3233,14 @@ body:has(.chat-app) #main {
 .chat-model-picker { padding-right: 28px; }
 .chat-model-tier { flex: none; white-space: nowrap; }
 .chat-model-chevron { right: 9px; }
+
+/* Password visibility toggle (auth forms). */
+.password-field { position: relative; }
+.password-field input { padding-right: 64px; }
+.password-toggle {
+  position: absolute; right: 8px; bottom: 6px;
+  padding: 6px 9px; border-radius: 8px;
+  color: var(--muted-3); font-size: 12.5px; font-weight: 600;
+  transition: color 150ms ease, background 150ms ease;
+}
+.password-toggle:hover { color: var(--text); background: color-mix(in srgb, var(--surface-accent) 65%, transparent); }

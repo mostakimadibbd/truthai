@@ -91,12 +91,6 @@ async function getApiErrorMessage(response: Response, fallback: string): Promise
   return fallback;
 }
 
-function shouldUseRedirect(): boolean {
-  if (typeof navigator === "undefined") return false;
-  return /Android|iPhone|iPad|iPod|; wv\)|FBAN|FBAV|Instagram|Line\//i.test(
-    navigator.userAgent,
-  );
-}
 
 /** All /api/auth/* POSTs carry the header the server guard requires. */
 function authFetch(path: string, body: Record<string, unknown>) {
@@ -125,6 +119,9 @@ export default function SignInForm({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [verificationUser, setVerificationUser] = useState<User | null>(null);
+  const [googleTermsUser, setGoogleTermsUser] = useState<User | null>(null);
+  const [googleTermsAccepted, setGoogleTermsAccepted] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [signupStep, setSignupStep] = useState<"idle" | "creating" | "verify">("idle");
   const [showReset, setShowReset] = useState(false);
   const [resetToken, setResetToken] = useState("");
@@ -186,18 +183,47 @@ export default function SignInForm({
   useEffect(() => {
     if (!configured) return;
 
+    // A Google redirect return is only "expected" when this tab
+    // actually started one (the flag below). Errors from
+    // getRedirectResult with no return in flight — stale state from
+    // an old attempt, or a browser that blocks the storage the
+    // redirect flow needs — must NEVER surface as a sign-in error on
+    // a fresh visit. That was the "We couldn't complete sign-in"
+    // banner appearing before the user had tried anything.
+    let expectedReturn = false;
+    try {
+      expectedReturn = sessionStorage.getItem(GOOGLE_REDIRECT_FLAG) !== null;
+    } catch {
+      expectedReturn = false;
+    }
+
     let active = true;
     let redirectResult: ReturnType<typeof getRedirectResult>;
     try {
       redirectResult = getRedirectResult(getFirebaseAuth());
     } catch (redirectError) {
-      setError(getAuthErrorMessage(redirectError));
+      if (expectedReturn) setError(getAuthErrorMessage(redirectError));
       return;
     }
 
     void redirectResult
       .then(async (result) => {
-        if (!result?.user || !active) return;
+        if (!active) return;
+        if (!result?.user) {
+          if (expectedReturn) {
+            // We sent the user to Google and came back with nothing
+            // readable: the browser blocked the return leg's storage.
+            try {
+              sessionStorage.removeItem(GOOGLE_REDIRECT_FLAG);
+            } catch {
+              // Nothing to clean up.
+            }
+            setError(
+              "Google sign-in didn’t complete — your browser blocked the return step. Please try again; if it keeps happening, allow cookies for this site or use email sign-in.",
+            );
+          }
+          return;
+        }
         // Google sign-ins need no Turnstile check (the server reads
         // the provider from the verified ID token), so a redirect
         // return finishes right here: exchange the token for a
@@ -218,20 +244,15 @@ export default function SignInForm({
         setBusy(true);
         setNotice("Finishing sign-in…");
         try {
-          const idToken = await result.user.getIdToken();
-          const deviceId = await getDeviceId();
-          const response = await authFetch("/api/auth/session", {
-            idToken,
-            action: formAction,
-            deviceId: deviceId || undefined,
-            ...(mode === "sign-up" ? { termsAccepted } : {}),
-          });
-          if (!response.ok) {
-            throw new Error(
-              await getApiErrorMessage(response, "We couldn’t finish signing in. Please try again."),
-            );
+          const outcome = await establishGoogleSession(result.user, termsAccepted);
+          if (!active) return;
+          setNotice("");
+          if (outcome === "terms") {
+            setGoogleTermsUser(result.user);
+          } else if (outcome === "ok") {
+            await completeSignIn(result.user);
           }
-          if (active) await completeSignIn(result.user);
+          // "failed": establishGoogleSession already set the error.
         } catch (sessionError) {
           if (active) {
             setNotice("");
@@ -246,7 +267,7 @@ export default function SignInForm({
         }
       })
       .catch((redirectError: unknown) => {
-        if (active) setError(getAuthErrorMessage(redirectError));
+        if (active && expectedReturn) setError(getAuthErrorMessage(redirectError));
       });
 
     return () => {
@@ -271,20 +292,60 @@ export default function SignInForm({
     }
   }
 
-  async function establishGoogleSession(user: User, terms: boolean) {
+  /**
+   * Exchanges a Google ID token for the server session. Returns
+   * "terms" when the server refuses because this is a brand-new
+   * account that hasn't accepted the terms yet — the caller then
+   * shows the one-time consent card and retries with terms=true.
+   * (The sign-in page has no terms checkbox, so without this a
+   * first-time Google user was bounced with a dead-end error and
+   * no account was ever created.)
+   */
+  async function establishGoogleSession(
+    user: User,
+    terms: boolean,
+  ): Promise<"ok" | "terms" | "failed"> {
     const idToken = await user.getIdToken();
     const deviceId = await getDeviceId();
     const response = await authFetch("/api/auth/session", {
       idToken,
       action: formAction,
       deviceId: deviceId || undefined,
-      ...(mode === "sign-up" ? { termsAccepted: terms } : {}),
+      termsAccepted: terms,
     });
-    if (!response.ok) {
-      setError(await getApiErrorMessage(response, "We couldn’t finish signing in. Please try again."));
-      return false;
+    if (response.ok) return "ok";
+    let code = "";
+    let message = "";
+    try {
+      const data = (await response.json()) as {
+        error?: { code?: string; message?: string };
+      };
+      code = data?.error?.code ?? "";
+      message = data?.error?.message ?? "";
+    } catch {
+      // Non-JSON error body: fall through to the generic message.
     }
-    return true;
+    if (code === "TERMS_REQUIRED") return "terms";
+    setError(message || "We couldn’t finish signing in. Please try again.");
+    return "failed";
+  }
+
+  async function handleGoogleTermsContinue() {
+    if (!googleTermsUser || !googleTermsAccepted) return;
+    setBusy(true);
+    setError("");
+    try {
+      const outcome = await establishGoogleSession(googleTermsUser, true);
+      if (outcome === "ok") {
+        const user = googleTermsUser;
+        setGoogleTermsUser(null);
+        await completeSignIn(user);
+      }
+    } catch {
+      setError("We couldn’t finish signing in. Please try again.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -398,15 +459,13 @@ export default function SignInForm({
   }
 
   async function handleGoogleSignIn() {
-    // No Turnstile for Google: the human check is Google's own
-    // sign-in, and the server confirms the provider from the
-    // verified ID token. The widget below the form guards only the
-    // email/password paths.
-    if (mode === "sign-up" && !termsAccepted) {
-      setError("Please agree to the Terms and Conditions and Privacy Policy to create an account.");
-      return;
-    }
-
+    // No Turnstile for Google, and no checkbox gate either: the
+    // human check is Google's own sign-in, and the server confirms
+    // the provider from the verified ID token. A brand-new Google
+    // account collects its one-time terms consent through the
+    // consent card (see establishGoogleSession's "terms" outcome);
+    // if the sign-up page's box is already ticked, that consent is
+    // passed straight through.
     setError("");
     setNotice("");
 
@@ -414,30 +473,16 @@ export default function SignInForm({
     const provider = new GoogleAuthProvider();
     provider.setCustomParameters({ prompt: "select_account" });
 
-    if (shouldUseRedirect()) {
-      // Only the terms flag crosses the redirect; the return effect
-      // exchanges the Google result for a session immediately.
-      try {
-        sessionStorage.setItem(
-          GOOGLE_REDIRECT_FLAG,
-          JSON.stringify({ termsAccepted }),
-        );
-      } catch {
-        // Storage unavailable: a brand-new sign-up may be asked for
-        // terms by the server; signing in is unaffected.
-      }
-      setBusy(true);
-      try {
-        await signInWithRedirect(auth, provider, browserPopupRedirectResolver);
-      } catch (redirectError) {
-        setError(getAuthErrorMessage(redirectError));
-        setBusy(false);
-      }
-      return;
-    }
-
-    // The popup must open synchronously on the click — no awaits before
-    // this call, or browsers block it.
+    // Popup first on EVERY device. The redirect flow's return leg
+    // depends on cross-site storage that privacy-focused browsers
+    // (Brave, strict Safari) often block — users picked their
+    // account, landed back on this form, and no account or session
+    // was ever created. The popup completes in-page, so the session
+    // exchange happens immediately. Redirect stays only as a
+    // fallback for environments where a popup genuinely can't run.
+    //
+    // The popup must open synchronously on the click — no awaits
+    // before this call, or browsers block it.
     let popupPromise: ReturnType<typeof signInWithPopup>;
     try {
       popupPromise = signInWithPopup(auth, provider, browserPopupRedirectResolver);
@@ -449,13 +494,23 @@ export default function SignInForm({
     setBusy(true);
     try {
       const credential = await popupPromise;
-      const ok = await establishGoogleSession(credential.user, termsAccepted);
-      if (!ok) return;
+      const outcome = await establishGoogleSession(credential.user, termsAccepted);
+      if (outcome === "terms") {
+        // Brand-new Google account via the sign-in page: collect
+        // the one-time terms consent, then finish.
+        setGoogleTermsUser(credential.user);
+        return;
+      }
+      if (outcome !== "ok") return;
       await completeSignIn(credential.user);
     } catch (popupError) {
+      const code = popupError instanceof FirebaseError ? popupError.code : "";
       if (
-        popupError instanceof FirebaseError &&
-        popupError.code === "auth/popup-blocked"
+        code === "auth/popup-blocked" ||
+        code === "auth/operation-not-supported-in-this-environment" ||
+        code === "auth/web-storage-unsupported" ||
+        code === "auth/internal-error" ||
+        code === "auth/cancelled-popup-request"
       ) {
         try {
           sessionStorage.setItem(
@@ -632,7 +687,51 @@ export default function SignInForm({
           </ol>
         )}
 
-        {verificationUser ? (
+        {googleTermsUser ? (
+          <div className="verification-card">
+            <span className="verification-icon" aria-hidden="true">✓</span>
+            <h3>One quick step</h3>
+            <p>
+              Your Google account <strong>{googleTermsUser.email}</strong> is
+              new to Xyro AI. Agree to the terms to finish creating your
+              account — you’ll only see this once.
+            </p>
+            <label className="auth-checkbox-row auth-consent-row">
+              <input
+                type="checkbox"
+                checked={googleTermsAccepted}
+                onChange={(event) => {
+                  setGoogleTermsAccepted(event.target.checked);
+                  setError("");
+                }}
+                disabled={busy}
+              />
+              <span>
+                I agree to the <Link href="/terms">Terms and Conditions</Link> and have read the{" "}
+                <Link href="/privacy">Privacy Policy</Link>.
+              </span>
+            </label>
+            <button
+              className="button button-primary auth-submit"
+              type="button"
+              onClick={handleGoogleTermsContinue}
+              disabled={busy || !googleTermsAccepted}
+            >
+              {busy ? "Please wait…" : "Create my account"}
+            </button>
+            <button
+              className="text-button"
+              type="button"
+              onClick={() => {
+                setGoogleTermsUser(null);
+                setGoogleTermsAccepted(false);
+              }}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+          </div>
+        ) : verificationUser ? (
           <div className="verification-card">
             <span className="verification-icon" aria-hidden="true">✉</span>
             <h3>Verify your email</h3>
@@ -713,35 +812,22 @@ export default function SignInForm({
           </form>
         ) : (
           <>
-            {mode === "sign-up" && (
-              <div className="auth-signup-security">
-                <label className="auth-checkbox-row auth-consent-row">
-                  <input
-                    type="checkbox"
-                    checked={termsAccepted}
-                    onChange={(event) => {
-                      setTermsAccepted(event.target.checked);
-                      setError("");
-                    }}
-                    disabled={!configured || busy}
-                  />
-                  <span>
-                    I agree to the <Link href="/terms">Terms and Conditions</Link> and have read the{" "}
-                    <Link href="/privacy">Privacy Policy</Link>.
-                  </span>
-                </label>
-              </div>
-            )}
-
             <button
               className="button button-google"
               type="button"
               onClick={handleGoogleSignIn}
-              disabled={formBlocked}
+              disabled={!configured || busy}
             >
               <span className="google-mark" aria-hidden="true">G</span>
               <span>Continue with Google</span>
             </button>
+            {mode === "sign-up" && (
+              <p className="auth-legal">
+                By continuing with Google, you agree to our{" "}
+                <Link href="/terms">Terms</Link> and{" "}
+                <Link href="/privacy">Privacy Policy</Link>.
+              </p>
+            )}
 
             <div className="auth-separator"><span>or continue with email</span></div>
 
@@ -777,10 +863,10 @@ export default function SignInForm({
                 />
               </label>
 
-              <label className="form-field">
+              <label className="form-field password-field">
                 <span>Password</span>
                 <input
-                  type="password"
+                  type={showPassword ? "text" : "password"}
                   name="password"
                   autoComplete={mode === "sign-in" ? "current-password" : "new-password"}
                   minLength={mode === "sign-up" ? 10 : 1}
@@ -791,6 +877,15 @@ export default function SignInForm({
                   placeholder={mode === "sign-up" ? "At least 10 characters" : "Enter your password"}
                   required
                 />
+                <button
+                  type="button"
+                  className="password-toggle"
+                  onClick={() => setShowPassword((value) => !value)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  tabIndex={-1}
+                >
+                  {showPassword ? "Hide" : "Show"}
+                </button>
               </label>
 
               {mode === "sign-up" && (
@@ -811,6 +906,24 @@ export default function SignInForm({
                 >
                   Forgot password?
                 </button>
+              )}
+
+              {mode === "sign-up" && (
+                <label className="auth-checkbox-row auth-consent-row">
+                  <input
+                    type="checkbox"
+                    checked={termsAccepted}
+                    onChange={(event) => {
+                      setTermsAccepted(event.target.checked);
+                      setError("");
+                    }}
+                    disabled={!configured || busy}
+                  />
+                  <span>
+                    I agree to the <Link href="/terms">Terms and Conditions</Link> and have read the{" "}
+                    <Link href="/privacy">Privacy Policy</Link>.
+                  </span>
+                </label>
               )}
 
               <div className="auth-signup-security" ref={turnstileAnchorRef}>

@@ -146,25 +146,31 @@ export async function POST(request: NextRequest) {
     return authErrorResponse(403, "ACCOUNT_DISABLED", "This account is disabled. Contact the site administrator for help.");
   }
 
-  // A brand-new account (created within the last 10 minutes) must have
-  // accepted the terms on the sign-up form before a session is issued.
-  const creationTime = Date.parse(user.metadata.creationTime);
-  const isNewAccount =
-    Number.isFinite(creationTime) && Date.now() - creationTime < 10 * 60 * 1000;
-  if (isNewAccount && action !== "session_refresh" && termsAccepted !== true) {
-    return authErrorResponse(
-      400,
-      "TERMS_REQUIRED",
-      "Accept the Terms and Conditions to create an account.",
-    );
-  }
-
   // Upsert the profile server-side (clients no longer need write access
   // for sign-in bookkeeping). lastSignInAt moves at most once per 24 h.
   try {
     const db = getFirebaseAdminFirestore();
     const profileRef = db.collection("users").doc(decoded.uid);
     const existing = await profileRef.get();
+
+    // Terms gate: a brand-new account (created within the last 10
+    // minutes) that has no profile yet must have accepted the terms
+    // before its first session is issued — on every action, including
+    // session_refresh, so the gate can't be sidestepped by a silent
+    // renewal. An account that already has a profile accepted the
+    // terms when the profile was created. The client answers
+    // TERMS_REQUIRED with a one-time consent card (Google sign-in).
+    const creationTime = Date.parse(user.metadata.creationTime);
+    const isNewAccount =
+      Number.isFinite(creationTime) && Date.now() - creationTime < 10 * 60 * 1000;
+    if (isNewAccount && !existing.exists && termsAccepted !== true) {
+      return authErrorResponse(
+        400,
+        "TERMS_REQUIRED",
+        "Accept the Terms and Conditions to create an account.",
+      );
+    }
+
     const existingData = existing.data();
     const lastSignInAt =
       existingData?.lastSignInAt &&
