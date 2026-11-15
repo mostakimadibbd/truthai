@@ -42,6 +42,7 @@ const ChatMarkdown = dynamic(() => import("@/components/chat-markdown"), {
 import FirebasePresence from "@/components/firebase-presence";
 import SignOutDialog, { type SignOutVariant } from "@/components/sign-out-dialog";
 import { performSignOut } from "@/lib/firebase/sign-out";
+import { sortByConversationOrder } from "@/lib/message-order";
 import { usePreferences } from "@/lib/preferences-client";
 import { useTypewriter } from "@/lib/typewriter";
 import { isFirebaseConfigured, tryGetFirebaseAuth } from "@/lib/firebase/auth-client";
@@ -585,7 +586,17 @@ export default function ChatWorkspace() {
                   : "complete",
             };
           });
-          updateChat(activeChatId, (chat) => ({ ...chat, messages }));
+          updateChat(activeChatId, (chat) => ({
+            ...chat,
+            // Firestore breaks createdAt ties by document id, which
+            // scrambled question/answer pairs on screen; re-apply
+            // the deterministic conversation order.
+            messages: sortByConversationOrder(
+              messages,
+              (message) => message.createdAt,
+              (message) => message.role,
+            ),
+          }));
         },
         (error) => {
           console.error("Firestore chat message listener failed.", error);

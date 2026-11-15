@@ -1,5 +1,6 @@
 import { Timestamp } from "firebase-admin/firestore";
 import { NextRequest, NextResponse } from "next/server";
+import { sortByConversationOrder } from "@/lib/message-order";
 import {
   buildOpenRouterMessages,
   type StoredChatMessage,
@@ -340,7 +341,16 @@ export async function POST(request: NextRequest) {
       .orderBy("createdAt", "asc")
       .limitToLast(regenerate ? MAX_MESSAGES : MAX_MESSAGES - 1)
       .get();
-    let history = historySnapshot.docs.flatMap((snapshot) => {
+    // Stored pairs can share a createdAt millisecond (they are
+    // written in one batch); Firestore breaks the tie by document
+    // id, scrambling question/answer order in the model context.
+    // Re-apply the deterministic conversation order.
+    const orderedHistoryDocs = sortByConversationOrder(
+      historySnapshot.docs,
+      (doc) => doc.data().createdAt?.toMillis?.() ?? 0,
+      (doc) => (doc.data().role === "assistant" ? "assistant" : "user"),
+    );
+    let history = orderedHistoryDocs.flatMap((snapshot) => {
       const message = parseStoredMessage(snapshot.id, snapshot.data());
       return message ? [message] : [];
     });
@@ -354,7 +364,7 @@ export async function POST(request: NextRequest) {
       }
       const last = history.at(-1);
       if (last?.role === "assistant") {
-        const lastSnapshot = historySnapshot.docs.at(-1);
+        const lastSnapshot = orderedHistoryDocs.at(-1);
         const replyTo = lastSnapshot?.data().inReplyTo;
         if (typeof replyTo === "string" && replyTo !== userMessageId) {
           throw new ChatRouteError(400, "REGENERATE_NOT_ALLOWED", "Only the latest response can be regenerated.");
@@ -435,6 +445,11 @@ export async function POST(request: NextRequest) {
     }
     locked = true;
 
+    // One timestamp for the pair, with the reply stamped 1 ms later
+    // (the convention image generation already used), so createdAt
+    // ordering can never place a reply before its message.
+    const pairCreatedAt = Timestamp.now();
+    const replyCreatedAt = Timestamp.fromMillis(pairCreatedAt.toMillis() + 1);
     const batch = db.batch();
     if (oldAssistantId) batch.delete(messagesRef.doc(oldAssistantId));
     if (!regenerate) {
@@ -445,7 +460,7 @@ export async function POST(request: NextRequest) {
         attachmentIds: newUserMessage.attachmentIds,
         attachments: newUserMessage.attachments,
         status: "complete",
-        createdAt: Timestamp.now(),
+        createdAt: pairCreatedAt,
       });
     }
     batch.create(assistantRef, {
@@ -455,7 +470,7 @@ export async function POST(request: NextRequest) {
       attachments: [],
       status: "generating",
       inReplyTo: userMessageId,
-      createdAt: Timestamp.now(),
+      createdAt: replyCreatedAt,
     });
 
     const existingTitle = typeof chatData.title === "string" ? chatData.title : "New chat";

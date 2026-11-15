@@ -6,6 +6,7 @@ import {
   rateLimitedResponse,
 } from "@/lib/server/auth-rate-limit";
 import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
+import { sortByConversationOrder } from "@/lib/message-order";
 import { sanitizePreferences } from "@/lib/preferences";
 
 export const runtime = "nodejs";
@@ -179,12 +180,17 @@ export async function POST(request: NextRequest) {
         .limit(500)
         .get();
       take(messagesSnap.size);
+      const orderedMessageDocs = sortByConversationOrder(
+        messagesSnap.docs,
+        (doc) => doc.data().createdAt?.toMillis?.() ?? 0,
+        (doc) => (doc.data().role === "assistant" ? "assistant" : "user"),
+      );
       chats.push({
         id: chatDoc.id,
         title: typeof chatData.title === "string" ? chatData.title : "Untitled chat",
         createdAt: toIso(chatData.createdAt),
         updatedAt: toIso(chatData.updatedAt),
-        messages: messagesSnap.docs.map((messageDoc) => {
+        messages: orderedMessageDocs.map((messageDoc) => {
           const message = messageDoc.data();
           return {
             id: messageDoc.id,
