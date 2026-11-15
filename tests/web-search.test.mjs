@@ -111,3 +111,10 @@ test("parseHnResults prefers story fields and falls back to the HN item page", (
 test("simplifyQuery strips question scaffolding", () => {
   assert.equal(simplifyQuery("What is the latest iPhone price?"), "latest iPhone price");
 });
+
+test("hasSearchIntent catches verb + web-noun phrasing (owner's own words)", () => {
+  assert.equal(hasSearchIntent("Now analysis on web and find"), true);
+  assert.equal(hasSearchIntent("Check the internet for flight prices"), true);
+  assert.equal(hasSearchIntent("Analyze this poem and tell me its theme"), false);
+  assert.equal(hasSearchIntent("Write a summary of my attached notes"), false);
+});

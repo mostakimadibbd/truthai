@@ -276,3 +276,18 @@ export function modelAttemptOrder(requested: string): string[] {
   const order = [requested, AUTO_MODEL_ID, ...curated.slice(0, 2)];
   return [...new Set(order)];
 }
+
+/**
+ * Attempt order for turns that carry live web results. The Auto
+ * router can land on a small model that ignores retrieved context
+ * and falls back on its trained "I can't browse" refusal — a
+ * refusal is a successful HTTP response, so the fallback chain
+ * never gets a chance to correct it. For web turns the strong
+ * curated instruction-followers go first and the router last.
+ */
+export function webModelAttemptOrder(requested: string): string[] {
+  const strong = FALLBACK_MODELS.map((model) => model.id).filter(
+    (id) => id !== requested,
+  );
+  return [...new Set([...strong.slice(0, 3), requested, AUTO_MODEL_ID])];
+}

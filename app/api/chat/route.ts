@@ -18,6 +18,7 @@ import {
   getFreeModels,
   isAllowedFreeModel,
   modelAttemptOrder,
+  webModelAttemptOrder,
   modelHasVision,
   pickFreeVisionModel,
 } from "@/lib/server/models";
@@ -629,17 +630,42 @@ export async function POST(request: NextRequest) {
           })
           .catch(() => undefined);
         messagesBeforeWeb = [...prepared.messages];
-        // The web block rides with the system prompts at the top:
-        // some free-model providers reject a system message in the
-        // middle of the conversation, and the top placement is the
-        // one verified working in production. The block's own
-        // TOOL RESULT framing carries the anti-refusal weight.
-        const insertAt = instructions ? 2 : 1;
+        // Deliver the web material INSIDE the final user message
+        // rather than as a separate system block: weak free models
+        // ignore distant system context (and a conversation history
+        // containing the model's own earlier refusals out-argues a
+        // system note), but no model ignores the user's current
+        // message — the results are part of this turn's ask. The
+        // pre-web snapshot above keeps the retry-without-web path
+        // intact, and a top-level splice remains as the fallback
+        // if the last message is somehow not the user's.
+        const attachToUserTurn = (block: string): boolean => {
+          const lastIndex = prepared.messages.length - 1;
+          const last = prepared.messages[lastIndex];
+          if (!last || last.role !== "user") return false;
+          if (typeof last.content === "string") {
+            prepared.messages[lastIndex] = {
+              ...last,
+              content: `${last.content}\n\n${block}`,
+            };
+            return true;
+          }
+          if (Array.isArray(last.content)) {
+            prepared.messages[lastIndex] = {
+              ...last,
+              content: [...last.content, { type: "text" as const, text: block }],
+            };
+            return true;
+          }
+          return false;
+        };
         if (web.context) {
-          prepared.messages.splice(insertAt, 0, {
-            role: "system",
-            content: web.context,
-          });
+          if (!attachToUserTurn(web.context)) {
+            prepared.messages.splice(instructions ? 2 : 1, 0, {
+              role: "system",
+              content: web.context,
+            });
+          }
           webSources = web.sources;
           webContextInjected = true;
         } else if (searchTrigger !== "link") {
@@ -648,11 +674,14 @@ export async function POST(request: NextRequest) {
           // issue), never as a missing capability — the previous
           // wording was being paraphrased into "I don't have a
           // browsing tool".
-          prepared.messages.splice(insertAt, 0, {
-            role: "system",
-            content:
-              "LIVE SEARCH NOTE: the platform just attempted a live web search for this message and it returned no results this time (a temporary search-service problem — you DO have browsing in this conversation; this attempt simply came back empty). If the user needs current information, tell them you just tried searching and it came back empty, then answer from your own knowledge and note it may be out of date. Do not claim to have found results, and do not say you lack browsing capability.",
-          });
+          const note =
+            "[Platform note: a live web search was just attempted for this message and returned no results this time — a temporary search-service problem. You DO have browsing in this conversation; this attempt simply came back empty. If the user needs current information, tell them you just tried searching and it came back empty, then answer from your own knowledge and note it may be out of date. Do not claim to have found results, and do not say you lack browsing capability.]";
+          if (!attachToUserTurn(note)) {
+            prepared.messages.splice(instructions ? 2 : 1, 0, {
+              role: "system",
+              content: note,
+            });
+          }
           webContextInjected = true;
         }
       } catch (error) {
@@ -760,7 +789,13 @@ export async function POST(request: NextRequest) {
     // rate-limit and drop out constantly, and a single retry was
     // not enough. Each attempt has a connect timeout only, so a
     // long streamed reply is never killed mid-generation.
-    const attempts = modelAttemptOrder(effectiveModel);
+    // Web turns go to the strong curated models first (see
+    // webModelAttemptOrder): the Auto router can pick a model that
+    // ignores retrieved results and refuses, and a refusal is a
+    // successful response the chain cannot correct.
+    const attempts = webContextInjected
+      ? webModelAttemptOrder(effectiveModel)
+      : modelAttemptOrder(effectiveModel);
     const acquireUpstream = async (messages: typeof prepared.messages) => {
       const result = await fetchChatCompletionWithFallback({
         apiKey,

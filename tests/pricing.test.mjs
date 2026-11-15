@@ -4,6 +4,7 @@ import {
   estimateCostUsd,
   modelAttemptOrder,
   perTokenToPerMillion,
+  webModelAttemptOrder,
 } from "../lib/server/models.ts";
 
 test("per-token prices convert to per-million", () => {
@@ -27,4 +28,11 @@ test("model attempt order starts with the requested model and widens", () => {
   assert.ok(order.length >= 3);
   // No duplicates.
   assert.equal(new Set(order).size, order.length);
+});
+
+test("webModelAttemptOrder puts curated models before the Auto router", () => {
+  const order = webModelAttemptOrder("openrouter/free");
+  assert.notEqual(order[0], "openrouter/free");
+  assert.ok(order.includes("openrouter/free"));
+  assert.equal(order[0], "meta-llama/llama-3.3-70b-instruct:free");
 });

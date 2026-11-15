@@ -73,7 +73,10 @@ function decodeXml(text: string): string {
 /* ------------------------------ intent ------------------------------ */
 
 const EXPLICIT_SEARCH =
-  /\b(search|google|look ?up|browse|research|find online|check online|verify online|search the web|on the web|online)\b/i;
+  /\b(search|google|look ?up|browse|research|find online|check online|verify online|search the web|search the internet|web search|internet search|on the web|on web|from the web|the internet|online)\b/i;
+const ANALYSIS_VERB =
+  /\b(analyse|analyze|analysis|find|check|look|get|fetch|tell|scan|summari[sz]e)\b/i;
+const WEB_NOUN = /\b(web|internet|online|latest|news|today|current)\b/i;
 const RECENCY =
   /\b(latest|recent|breaking|today|tonight|yesterday|tomorrow|news|headlines?|live score|weather|forecast|price of|stock price|exchange rate|who won|winner|results? of|schedule|when is|when does|release date|launched|announced|trending|happening|this week|this month|this year)\b/i;
 const RESEARCH =
@@ -89,6 +92,10 @@ export function hasSearchIntent(text: string): boolean {
   const trimmed = text.trim();
   if (trimmed.length < 8) return false;
   if (EXPLICIT_SEARCH.test(trimmed)) return true;
+  // "Now analysis on web and find", "check the internet for…" —
+  // an action verb aimed at a web-ish noun is a search ask even
+  // without the word "search" (owner's own phrasing, 2026-11-16).
+  if (ANALYSIS_VERB.test(trimmed) && WEB_NOUN.test(trimmed)) return true;
   if (RECENCY.test(trimmed)) return true;
   // A question naming the current or last year is almost always
   // asking about current state.
