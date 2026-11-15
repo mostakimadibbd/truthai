@@ -15,7 +15,41 @@ export type FreeModel = {
   name: string;
   contextLength: number | null;
   capabilities: string[];
+  /** USD per 1M tokens, parsed from the catalogue's per-token prices. */
+  pricing: { promptPerMillion: number; completionPerMillion: number };
 };
+
+/** OpenRouter prices are USD-per-token strings ("0", "0.0000002"). */
+export function perTokenToPerMillion(value: unknown): number {
+  const parsed = typeof value === "string" ? Number.parseFloat(value) : NaN;
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return Math.round(parsed * 1_000_000 * 1e6) / 1e6;
+}
+
+export function pricingPerMillion(model: Record<string, unknown>): {
+  promptPerMillion: number;
+  completionPerMillion: number;
+} {
+  const pricing = model.pricing as
+    | { prompt?: unknown; completion?: unknown }
+    | undefined;
+  return {
+    promptPerMillion: perTokenToPerMillion(pricing?.prompt),
+    completionPerMillion: perTokenToPerMillion(pricing?.completion),
+  };
+}
+
+/** Estimated USD cost of a call at a model's catalogue prices. */
+export function estimateCostUsd(
+  pricing: { promptPerMillion: number; completionPerMillion: number },
+  promptTokens: number,
+  completionTokens: number,
+): number {
+  const cost =
+    (promptTokens / 1_000_000) * pricing.promptPerMillion +
+    (completionTokens / 1_000_000) * pricing.completionPerMillion;
+  return Math.round(cost * 1e6) / 1e6;
+}
 
 export type FreeImageModel = {
   id: string;
@@ -24,12 +58,14 @@ export type FreeImageModel = {
 
 export const AUTO_MODEL_ID = "openrouter/free";
 
+const FREE_PRICING = { promptPerMillion: 0, completionPerMillion: 0 };
+
 const FALLBACK_MODELS: FreeModel[] = [
-  { id: "meta-llama/llama-3.3-70b-instruct:free", name: "Llama 3.3 70B (free)", contextLength: 131072, capabilities: ["text"] },
-  { id: "google/gemma-3-27b-it:free", name: "Gemma 3 27B (free)", contextLength: 131072, capabilities: ["text", "vision"] },
-  { id: "deepseek/deepseek-chat-v3-0324:free", name: "DeepSeek V3 (free)", contextLength: 163840, capabilities: ["text"] },
-  { id: "qwen/qwen3-235b-a22b:free", name: "Qwen3 235B (free)", contextLength: 131072, capabilities: ["text"] },
-  { id: "mistralai/mistral-small-3.1-24b-instruct:free", name: "Mistral Small 3.1 (free)", contextLength: 128000, capabilities: ["text", "vision"] },
+  { id: "meta-llama/llama-3.3-70b-instruct:free", name: "Llama 3.3 70B (free)", contextLength: 131072, capabilities: ["text"], pricing: FREE_PRICING },
+  { id: "google/gemma-3-27b-it:free", name: "Gemma 3 27B (free)", contextLength: 131072, capabilities: ["text", "vision"], pricing: FREE_PRICING },
+  { id: "deepseek/deepseek-chat-v3-0324:free", name: "DeepSeek V3 (free)", contextLength: 163840, capabilities: ["text"], pricing: FREE_PRICING },
+  { id: "qwen/qwen3-235b-a22b:free", name: "Qwen3 235B (free)", contextLength: 131072, capabilities: ["text"], pricing: FREE_PRICING },
+  { id: "mistralai/mistral-small-3.1-24b-instruct:free", name: "Mistral Small 3.1 (free)", contextLength: 128000, capabilities: ["text", "vision"], pricing: FREE_PRICING },
 ];
 
 const CACHE_MS = 10 * 60 * 1000;
@@ -115,6 +151,7 @@ export async function getFreeModels(): Promise<{
               ? model.context_length
               : null,
           capabilities: capabilitiesFor(model),
+          pricing: pricingPerMillion(model),
         },
       ];
     });
@@ -153,6 +190,16 @@ export async function getFreeModels(): Promise<{
  * production (VERCEL_ENV=production), mirroring the
  * XYRO_TEST_BUDGET_FS_WRITES pattern in lib/server/budget.ts.
  */
+/** Catalogue pricing for one model id; zeros when unknown. */
+export async function getModelPricing(modelId: string): Promise<{
+  promptPerMillion: number;
+  completionPerMillion: number;
+}> {
+  const { models } = await getFreeModels();
+  const hit = models.find((model) => model.id === modelId);
+  return hit?.pricing ?? { promptPerMillion: 0, completionPerMillion: 0 };
+}
+
 export async function getFreeImageModels(): Promise<FreeImageModel[]> {
   if (
     process.env.VERCEL_ENV !== "production" &&

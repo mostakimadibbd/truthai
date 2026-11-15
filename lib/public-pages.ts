@@ -414,7 +414,7 @@ Object.assign(articles, {
           "- Files: Cloudinary holds your uploads as private, authenticated assets",
           "- Sessions: Firestore holds a record per signed-in session (device label, approximate city/country from request headers, last active time); Upstash Redis holds rate-limit counters and session-revocation keys",
           "- Device security: at sign-in your browser computes a device fingerprint (from browser and screen characteristics) and sends only its SHA-256 hash; Firestore stores that hash with your sessions, a per-account device list (first/last seen, sign-in count) and a security activity feed, and your IP address is stored only as a keyed hash — never in plain text. This powers the device list and new-device badges in Settings → Security and helps detect abusive sign-ups; it is never used for advertising or cross-site tracking",
-          "- Developer API (only if you activate it): Firestore stores your activation answers (project name, use case, builder type, language, optional website), your API keys as SHA-256 hashes (the full key is shown once and never stored), daily token-usage totals, and a per-request log with the model used, token counts and a request fingerprint (browser/device label and keyed IP hash) — visible to you in Settings → Developer",
+          "- Developer API (only if you activate it): Firestore stores your activation answers (project name, use case, builder type, language, optional website), your API keys as SHA-256 hashes (the full key is shown once and never stored), daily token-usage totals, per-model usage totals, a per-request log with the model used, token counts, the request input and response output, and a request fingerprint (browser/device label and keyed IP hash), plus an access-point record for each distinct calling client with its detected coarse location (city/country) — all visible to you in Settings → Developer",
         ],
       },
       {
@@ -763,7 +763,7 @@ Object.assign(articles, {
     title: "API Terms",
     updated: "Last updated · November 15, 2026",
     intro:
-      "Xyro AI does not offer a public API. These terms govern the product's own endpoints and any automated access to the service.",
+      "These terms govern the public developer API under /api/v1, the product's own endpoints, and any automated access to the service.",
     sections: [
       {
         title: "The public API",
@@ -781,6 +781,12 @@ Object.assign(articles, {
         title: "Automated access",
         body: [
           "Bots, scrapers and automated clients may not create accounts, sign in, send chat messages, upload files or otherwise drive the web app, except for ordinary search-engine indexing of public pages as allowed by robots.txt. Automated calls to the public API under /api/v1 with your own API key are the supported exception. Rate limits are enforced per account, per key and per IP, and web-app mutation endpoints require same-origin browser headers by design.",
+        ],
+      },
+      {
+        title: "Logging and metering",
+        body: [
+          "Every API call is logged for metering, security and abuse prevention: the model used, token counts, the estimated cost, the request input and the response output, and a request fingerprint (client/device label, browser signals and a keyed hash of the IP address — never the raw IP). Each distinct calling client is also recorded as an access point with its detected coarse location (city/country). These records are stored on the account and visible to the account holder in [Settings → Developer](/settings/developer); the [privacy center](/privacy-center) describes the data in full. Do not send personal data of third parties through the API unless you have the right to do so.",
         ],
       },
       {

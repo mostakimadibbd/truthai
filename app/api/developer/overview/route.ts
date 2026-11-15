@@ -7,10 +7,13 @@ import {
   getDailyUsage,
   getDeveloperProfile,
   getUsageRange,
+  listApiAccessPoints,
   listApiEvents,
   listApiKeys,
+  listApiModelUsage,
 } from "@/lib/server/developer";
 import { getFirebaseAdminAuth } from "@/lib/server/firebase-admin";
+import { getFreeModels } from "@/lib/server/models";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -36,12 +39,16 @@ export async function GET(request: NextRequest) {
     if (!profile) {
       return json({ activated: false, emailVerified: user.emailVerified });
     }
-    const [keys, today, last7Days, recentEvents] = await Promise.all([
-      listApiKeys(auth.uid),
-      getDailyUsage(auth.uid, apiDateKey()),
-      getUsageRange(auth.uid, 7),
-      listApiEvents(auth.uid, 10),
-    ]);
+    const [keys, today, last7Days, recentEvents, modelUsage, accessPoints, catalogue] =
+      await Promise.all([
+        listApiKeys(auth.uid),
+        getDailyUsage(auth.uid, apiDateKey()),
+        getUsageRange(auth.uid, 7),
+        listApiEvents(auth.uid, 10),
+        listApiModelUsage(auth.uid, 7),
+        listApiAccessPoints(auth.uid),
+        getFreeModels(),
+      ]);
     return json({
       activated: true,
       emailVerified: user.emailVerified,
@@ -50,6 +57,15 @@ export async function GET(request: NextRequest) {
       limit: FREE_PLAN_DAILY_TOKEN_LIMIT,
       usage: { today, last7Days },
       recentEvents,
+      modelUsage,
+      accessPoints,
+      models: catalogue.models.map((model) => ({
+        id: model.id,
+        name: model.name,
+        contextLength: model.contextLength,
+        capabilities: model.capabilities,
+        pricing: model.pricing,
+      })),
     });
   } catch (error) {
     console.error("Couldn’t load developer overview.", error);

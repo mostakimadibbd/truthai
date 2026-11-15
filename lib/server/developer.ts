@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { FieldValue } from "firebase-admin/firestore";
 import type { DeviceContext } from "@/lib/server/device";
 import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
+import { estimateCostUsd, getModelPricing } from "@/lib/server/models";
 
 /**
  * Developer platform data: activation profile, API keys, daily
@@ -13,6 +14,8 @@ import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
  *   apiKeys/{keyHash}                   top-level auth lookup
  *   users/{uid}/apiUsage/{yyyy-mm-dd}   daily token/request rollup
  *   users/{uid}/apiEvents/{eventId}     per-request fingerprint log
+ *   users/{uid}/apiModelUsage/{id}      per-model daily totals
+ *   users/{uid}/apiAccessPoints/{id}    fingerprinted API origins
  *
  * Keys are shown in full exactly once (at creation). Only their
  * SHA-256 hash is stored, so a database leak does not leak usable
@@ -47,11 +50,37 @@ export const API_BUILDER_TYPES = [
 
 export const API_LANGUAGES = ["javascript", "python", "curl", "other"] as const;
 
+export const API_CALL_ENVIRONMENTS = [
+  "server-backend",
+  "serverless",
+  "mobile-backend",
+  "script",
+  "other",
+] as const;
+
+export const API_EXPECTED_USAGE = [
+  "testing",
+  "under-1k",
+  "1k-10k",
+  "over-10k",
+] as const;
+
+export const API_HEARD_FROM = [
+  "search",
+  "social",
+  "friend",
+  "blog",
+  "other",
+] as const;
+
 export type DeveloperProfile = {
   projectName: string;
   useCase: string;
   builderType: string;
   language: string;
+  callEnvironment: string;
+  expectedUsage: string;
+  heardFrom: string | null;
   website: string | null;
   plan: "free";
   createdAt: number;
@@ -72,6 +101,7 @@ export type DailyUsage = {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  costUsd: number;
 };
 
 export type ApiEventRecord = {
@@ -83,7 +113,34 @@ export type ApiEventRecord = {
   status: string;
   httpStatus: number;
   totalTokens: number;
+  costUsd: number;
   deviceLabel: string | null;
+  promptPreview: string | null;
+  inputLog: string | null;
+  outputLog: string | null;
+};
+
+export type ModelUsage = {
+  model: string;
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  costUsd: number;
+};
+
+export type ApiAccessPoint = {
+  id: string;
+  deviceLabel: string | null;
+  browser: string | null;
+  os: string | null;
+  deviceType: string | null;
+  city: string | null;
+  country: string | null;
+  keyPrefix: string | null;
+  requests: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
 };
 
 /* ------------------------------ keys ------------------------------ */
@@ -149,8 +206,42 @@ export type ActivationInput = {
   useCase: string;
   builderType: string;
   language: string;
+  callEnvironment: string;
+  expectedUsage: string;
+  heardFrom: string | null;
   website: string | null;
 };
+
+/**
+ * Resolves one selectable answer: either one of the preset ids, or
+ * "other" together with a written answer in `<field>Custom`
+ * (2–80 chars), which is then stored as the answer itself.
+ */
+function selectable(
+  body: Record<string, unknown>,
+  field: string,
+  presets: readonly string[],
+  question: string,
+):
+  | { ok: true; value: string }
+  | { ok: false; message: string } {
+  const raw = body[field];
+  if (typeof raw === "string" && presets.includes(raw) && raw !== "other") {
+    return { ok: true, value: raw };
+  }
+  if (raw === "other") {
+    const custom = body[`${field}Custom`];
+    const text = typeof custom === "string" ? custom.trim() : "";
+    if (text.length < 2 || text.length > 80) {
+      return {
+        ok: false,
+        message: `Choose “Other” answers need a short written answer (2–80 characters) for: ${question}`,
+      };
+    }
+    return { ok: true, value: text };
+  }
+  return { ok: false, message: `Answer the question: ${question}` };
+}
 
 export function validateActivationInput(body: Record<string, unknown>):
   | { ok: true; value: ActivationInput }
@@ -160,23 +251,31 @@ export function validateActivationInput(body: Record<string, unknown>):
   if (projectName.length < 2 || projectName.length > 60) {
     return { ok: false, message: "Give your project a name (2–60 characters)." };
   }
+  const useCase = selectable(body, "useCase", API_USE_CASES, "What are you building?");
+  if (!useCase.ok) return useCase;
+  const builderType = selectable(body, "builderType", API_BUILDER_TYPES, "What best describes you?");
+  if (!builderType.ok) return builderType;
+  const language = selectable(body, "language", API_LANGUAGES, "Primary language");
+  if (!language.ok) return language;
+  const callEnvironment = selectable(
+    body,
+    "callEnvironment",
+    API_CALL_ENVIRONMENTS,
+    "Where will you call the API from?",
+  );
+  if (!callEnvironment.ok) return callEnvironment;
   if (
-    typeof body.useCase !== "string" ||
-    !(API_USE_CASES as readonly string[]).includes(body.useCase)
+    typeof body.expectedUsage !== "string" ||
+    !(API_EXPECTED_USAGE as readonly string[]).includes(body.expectedUsage)
   ) {
-    return { ok: false, message: "Choose what you are building." };
+    return { ok: false, message: "Choose your expected daily usage." };
   }
-  if (
-    typeof body.builderType !== "string" ||
-    !(API_BUILDER_TYPES as readonly string[]).includes(body.builderType)
-  ) {
-    return { ok: false, message: "Choose what best describes you." };
-  }
-  if (
-    typeof body.language !== "string" ||
-    !(API_LANGUAGES as readonly string[]).includes(body.language)
-  ) {
-    return { ok: false, message: "Choose your primary language." };
+  // Optional question: absent/empty is fine; "other" needs the text.
+  let heardFrom: string | null = null;
+  if (typeof body.heardFrom === "string" && body.heardFrom.length > 0) {
+    const resolved = selectable(body, "heardFrom", API_HEARD_FROM, "Where did you hear about Xyro AI?");
+    if (!resolved.ok) return resolved;
+    heardFrom = resolved.value;
   }
   let website: string | null = null;
   if (typeof body.website === "string" && body.website.trim().length > 0) {
@@ -204,9 +303,12 @@ export function validateActivationInput(body: Record<string, unknown>):
     ok: true,
     value: {
       projectName,
-      useCase: body.useCase,
-      builderType: body.builderType,
-      language: body.language,
+      useCase: useCase.value,
+      builderType: builderType.value,
+      language: language.value,
+      callEnvironment: callEnvironment.value,
+      expectedUsage: body.expectedUsage,
+      heardFrom,
       website,
     },
   };
@@ -225,6 +327,11 @@ export async function getDeveloperProfile(
     builderType:
       typeof data.builderType === "string" ? data.builderType : "individual",
     language: typeof data.language === "string" ? data.language : "javascript",
+    callEnvironment:
+      typeof data.callEnvironment === "string" ? data.callEnvironment : "server-backend",
+    expectedUsage:
+      typeof data.expectedUsage === "string" ? data.expectedUsage : "testing",
+    heardFrom: typeof data.heardFrom === "string" ? data.heardFrom : null,
     website: typeof data.website === "string" ? data.website : null,
     plan: "free",
     createdAt: toMillis(data.createdAt),
@@ -369,7 +476,14 @@ export function apiDateKey(date = new Date()): string {
 }
 
 function emptyUsage(date: string): DailyUsage {
-  return { date, requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  return {
+    date,
+    requests: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    costUsd: 0,
+  };
 }
 
 function usageFromDoc(date: string, data: FirebaseFirestore.DocumentData | undefined): DailyUsage {
@@ -381,6 +495,7 @@ function usageFromDoc(date: string, data: FirebaseFirestore.DocumentData | undef
     completionTokens:
       typeof data.completionTokens === "number" ? data.completionTokens : 0,
     totalTokens: typeof data.totalTokens === "number" ? data.totalTokens : 0,
+    costUsd: typeof data.costUsd === "number" ? data.costUsd : 0,
   };
 }
 
@@ -428,16 +543,102 @@ export async function listApiEvents(
       status: typeof data.status === "string" ? data.status : "success",
       httpStatus: typeof data.httpStatus === "number" ? data.httpStatus : 200,
       totalTokens: typeof data.totalTokens === "number" ? data.totalTokens : 0,
+      costUsd: typeof data.costUsd === "number" ? data.costUsd : 0,
       deviceLabel: typeof data.deviceLabel === "string" ? data.deviceLabel : null,
+      promptPreview: typeof data.promptPreview === "string" ? data.promptPreview : null,
+      inputLog: typeof data.inputLog === "string" ? data.inputLog : null,
+      outputLog: typeof data.outputLog === "string" ? data.outputLog : null,
     };
   });
 }
 
+function modelUsageCollection(uid: string) {
+  return db().collection("users").doc(uid).collection("apiModelUsage");
+}
+
+function accessPointsCollection(uid: string) {
+  return db().collection("users").doc(uid).collection("apiAccessPoints");
+}
+
+/** Per-model totals across the last `days` days, busiest first. */
+export async function listApiModelUsage(
+  uid: string,
+  days: number,
+): Promise<ModelUsage[]> {
+  const start = apiDateKey(new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000));
+  const snapshot = await modelUsageCollection(uid)
+    .where("date", ">=", start)
+    .get();
+  const byModel = new Map<string, ModelUsage>();
+  for (const doc of snapshot.docs) {
+    const data = doc.data();
+    const model = typeof data.model === "string" ? data.model : "unknown";
+    const entry = byModel.get(model) ?? {
+      model,
+      requests: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      costUsd: 0,
+    };
+    entry.requests += typeof data.requests === "number" ? data.requests : 0;
+    entry.promptTokens += typeof data.promptTokens === "number" ? data.promptTokens : 0;
+    entry.completionTokens +=
+      typeof data.completionTokens === "number" ? data.completionTokens : 0;
+    entry.totalTokens += typeof data.totalTokens === "number" ? data.totalTokens : 0;
+    entry.costUsd += typeof data.costUsd === "number" ? data.costUsd : 0;
+    byModel.set(model, entry);
+  }
+  return [...byModel.values()].sort((a, b) => b.totalTokens - a.totalTokens);
+}
+
+/** Where and how the API is being called from, busiest access last-seen first. */
+export async function listApiAccessPoints(
+  uid: string,
+  limit = 20,
+): Promise<ApiAccessPoint[]> {
+  const snapshot = await accessPointsCollection(uid)
+    .orderBy("lastSeenAt", "desc")
+    .limit(limit)
+    .get();
+  return snapshot.docs.map((doc) => {
+    const data = doc.data();
+    return {
+      id: doc.id,
+      deviceLabel: typeof data.deviceLabel === "string" ? data.deviceLabel : null,
+      browser: typeof data.browser === "string" ? data.browser : null,
+      os: typeof data.os === "string" ? data.os : null,
+      deviceType: typeof data.deviceType === "string" ? data.deviceType : null,
+      city: typeof data.city === "string" ? data.city : null,
+      country: typeof data.country === "string" ? data.country : null,
+      keyPrefix: typeof data.keyPrefix === "string" ? data.keyPrefix : null,
+      requests: typeof data.requests === "number" ? data.requests : 0,
+      firstSeenAt: toMillis(data.firstSeenAt),
+      lastSeenAt: toMillis(data.lastSeenAt),
+    };
+  });
+}
+
+const LOG_CAP_CHARS = 8_000;
+
+function capLog(text: string | null): string | null {
+  if (text === null) return null;
+  return text.length > LOG_CAP_CHARS
+    ? `${text.slice(0, LOG_CAP_CHARS)}…[truncated]`
+    : text;
+}
+
 /**
- * Records one API call: increments the daily rollup and appends the
- * fingerprinted request event (device label, parsed UA, IP hash,
- * coarse geo — never a raw IP). Best-effort by contract: metering
- * must never fail a completed model call.
+ * Records one API call, all server-side:
+ *  - the daily rollup (requests / tokens / estimated cost),
+ *  - the fingerprinted request event, including the request input
+ *    and response output logs (capped) — disclosed in the API terms
+ *    and visible to the account owner in the dashboard,
+ *  - the per-model daily totals,
+ *  - the access point: a fingerprint of the calling client
+ *    (IP hash + user agent) with its detected coarse location.
+ * Raw IPs are never stored. Best-effort by contract: metering must
+ * never fail a completed model call.
  */
 export async function recordApiCall(
   uid: string,
@@ -455,10 +656,40 @@ export async function recordApiCall(
     context: DeviceContext;
     city: string | null;
     country: string | null;
+    input: { role: string; content: string }[] | null;
+    output: string | null;
   },
 ): Promise<void> {
   try {
     const date = apiDateKey();
+    const costUsd = info.model
+      ? estimateCostUsd(
+          await getModelPricing(info.model),
+          info.promptTokens,
+          info.completionTokens,
+        )
+      : 0;
+
+    let inputLog: string | null = null;
+    let promptPreview: string | null = null;
+    if (info.input) {
+      inputLog = capLog(JSON.stringify(info.input));
+      const lastUser = [...info.input]
+        .reverse()
+        .find((message) => message.role === "user");
+      if (lastUser) promptPreview = lastUser.content.slice(0, 240);
+    }
+    const outputLog = capLog(info.output);
+
+    // The access point is keyed by the client fingerprint; read it
+    // first so firstSeenAt is only written on the first sighting.
+    const accessPointId = createHash("sha256")
+      .update(`${info.context.ipHash ?? "no-ip"}|${info.context.userAgent}`)
+      .digest("hex")
+      .slice(0, 40);
+    const accessPointRef = accessPointsCollection(uid).doc(accessPointId);
+    const accessPointSnap = await accessPointRef.get().catch(() => null);
+
     const batch = db().batch();
     batch.set(
       usageRef(uid, date),
@@ -468,6 +699,7 @@ export async function recordApiCall(
         promptTokens: FieldValue.increment(info.promptTokens),
         completionTokens: FieldValue.increment(info.completionTokens),
         totalTokens: FieldValue.increment(info.totalTokens),
+        costUsd: FieldValue.increment(costUsd),
         updatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true },
@@ -483,6 +715,10 @@ export async function recordApiCall(
       completionTokens: info.completionTokens,
       totalTokens: info.totalTokens,
       tokensEstimated: info.tokensEstimated,
+      costUsd,
+      promptPreview,
+      inputLog,
+      outputLog,
       deviceId: info.context.deviceId,
       deviceLabel: info.context.label,
       browser: info.context.browser,
@@ -494,6 +730,44 @@ export async function recordApiCall(
       country: info.country,
       createdAt: FieldValue.serverTimestamp(),
     });
+    if (info.model) {
+      const modelDocId = `${date}__${info.model.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+      batch.set(
+        modelUsageCollection(uid).doc(modelDocId),
+        {
+          date,
+          model: info.model,
+          requests: FieldValue.increment(1),
+          promptTokens: FieldValue.increment(info.promptTokens),
+          completionTokens: FieldValue.increment(info.completionTokens),
+          totalTokens: FieldValue.increment(info.totalTokens),
+          costUsd: FieldValue.increment(costUsd),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+    }
+    batch.set(
+      accessPointRef,
+      {
+        deviceLabel: info.context.label,
+        browser: info.context.browser,
+        os: info.context.os,
+        deviceType: info.context.deviceType,
+        userAgent: info.context.userAgent,
+        ipHash: info.context.ipHash,
+        city: info.city,
+        country: info.country,
+        keyId: info.keyId,
+        keyPrefix: info.keyPrefix,
+        requests: FieldValue.increment(1),
+        lastSeenAt: FieldValue.serverTimestamp(),
+        ...(accessPointSnap && !accessPointSnap.exists
+          ? { firstSeenAt: FieldValue.serverTimestamp() }
+          : {}),
+      },
+      { merge: true },
+    );
     await batch.commit();
   } catch (error) {
     console.error("Couldn’t record API usage.", error);

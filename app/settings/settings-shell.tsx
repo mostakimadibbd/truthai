@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
+  Fragment,
   useCallback,
   useEffect,
   useRef,
@@ -1333,6 +1334,9 @@ type DeveloperProfileInfo = {
   useCase: string;
   builderType: string;
   language: string;
+  callEnvironment: string;
+  expectedUsage: string;
+  heardFrom: string | null;
   website: string | null;
   plan: string;
   createdAt: number;
@@ -1353,6 +1357,7 @@ type DailyUsageInfo = {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  costUsd?: number;
 };
 
 type DeveloperEventInfo = {
@@ -1364,7 +1369,42 @@ type DeveloperEventInfo = {
   status: string;
   httpStatus: number;
   totalTokens: number;
+  costUsd?: number;
   deviceLabel: string | null;
+  promptPreview?: string | null;
+  inputLog?: string | null;
+  outputLog?: string | null;
+};
+
+type ModelInfo = {
+  id: string;
+  name: string;
+  contextLength: number | null;
+  capabilities: string[];
+  pricing: { promptPerMillion: number; completionPerMillion: number };
+};
+
+type ModelUsageInfo = {
+  model: string;
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  costUsd: number;
+};
+
+type AccessPointInfo = {
+  id: string;
+  deviceLabel: string | null;
+  browser: string | null;
+  os: string | null;
+  deviceType: string | null;
+  city: string | null;
+  country: string | null;
+  keyPrefix: string | null;
+  requests: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
 };
 
 type DeveloperOverview = {
@@ -1375,7 +1415,42 @@ type DeveloperOverview = {
   limit?: number;
   usage?: { today: DailyUsageInfo; last7Days: DailyUsageInfo[] };
   recentEvents?: DeveloperEventInfo[];
+  models?: ModelInfo[];
+  modelUsage?: ModelUsageInfo[];
+  accessPoints?: AccessPointInfo[];
 };
+
+function formatUsd(amount: number): string {
+  if (amount === 0) return "$0.00";
+  if (amount < 0.01) return `$${amount.toFixed(4)}`;
+  return `$${amount.toFixed(2)}`;
+}
+
+function formatContextLength(tokens: number | null): string {
+  if (!tokens) return "—";
+  if (tokens >= 1000) return `${Math.round(tokens / 1000)}K tokens`;
+  return `${tokens} tokens`;
+}
+
+function formatPricePerMillion(price: number): string {
+  if (price === 0) return "$0";
+  return `$${price.toFixed(2)}`;
+}
+
+/** Renders the stored input log (JSON messages) as readable lines. */
+function renderInputLog(inputLog: string): string {
+  try {
+    const parsed = JSON.parse(inputLog) as { role?: string; content?: string }[];
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((message) => `${message.role ?? "user"}: ${message.content ?? ""}`)
+        .join("\n\n");
+    }
+  } catch {
+    // Fall through to the raw log.
+  }
+  return inputLog;
+}
 
 const API_USE_CASE_OPTIONS: [string, string][] = [
   ["chatbot", "Chatbot"],
@@ -1396,6 +1471,7 @@ const API_BUILDER_OPTIONS: [string, string][] = [
   ["startup", "Startup"],
   ["company", "Company / team"],
   ["agency", "Agency / client work"],
+  ["other", "Something else"],
 ];
 
 const API_LANGUAGE_OPTIONS: [string, string][] = [
@@ -1405,8 +1481,149 @@ const API_LANGUAGE_OPTIONS: [string, string][] = [
   ["other", "Another language"],
 ];
 
-function optionLabel(options: [string, string][], value: string): string {
-  return options.find(([id]) => id === value)?.[1] ?? value;
+const API_CALL_ENV_OPTIONS: [string, string][] = [
+  ["server-backend", "My server / backend"],
+  ["serverless", "Serverless / edge functions"],
+  ["mobile-backend", "A backend for my mobile app"],
+  ["script", "Scripts on my own machine"],
+  ["other", "Somewhere else"],
+];
+
+const API_EXPECTED_USAGE_OPTIONS: [string, string][] = [
+  ["testing", "Just testing / learning"],
+  ["under-1k", "Under 1,000 requests a day"],
+  ["1k-10k", "1,000 – 10,000 requests a day"],
+  ["over-10k", "More than 10,000 requests a day"],
+];
+
+const API_HEARD_FROM_OPTIONS: [string, string][] = [
+  ["search", "Search engine"],
+  ["social", "Social media"],
+  ["friend", "Friend or colleague"],
+  ["blog", "Blog, article or video"],
+  ["other", "Somewhere else"],
+];
+
+const ALL_OPTION_LISTS = [
+  API_USE_CASE_OPTIONS,
+  API_BUILDER_OPTIONS,
+  API_LANGUAGE_OPTIONS,
+  API_CALL_ENV_OPTIONS,
+  API_EXPECTED_USAGE_OPTIONS,
+  API_HEARD_FROM_OPTIONS,
+];
+
+function optionLabel(value: string): string {
+  for (const list of ALL_OPTION_LISTS) {
+    const hit = list.find(([id]) => id === value);
+    if (hit) return hit[1];
+  }
+  return value;
+}
+
+const compactNumber = new Intl.NumberFormat("en", { notation: "compact" });
+
+/**
+ * Clipboard copy that also works where the async Clipboard API is
+ * missing or refuses (older browsers, unfocused frames): falls back
+ * to a temporary textarea + execCommand("copy").
+ */
+async function copyTextRobust(text: string): Promise<boolean> {
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+    throw new Error("clipboard api unavailable");
+  } catch {
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      textarea.setSelectionRange(0, text.length);
+      const ok = document.execCommand("copy");
+      document.body.removeChild(textarea);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function CopyButton({
+  text,
+  label = "Copy",
+  onToast,
+}: {
+  text: string;
+  label?: string;
+  onToast: (message: string) => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="button button-outline dev-copy-btn"
+      onClick={async () => {
+        const ok = await copyTextRobust(text);
+        if (ok) {
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1800);
+        } else {
+          onToast("Copy didn’t work here — select the text and copy it manually.");
+        }
+      }}
+    >
+      {copied ? "Copied ✓" : label}
+    </button>
+  );
+}
+
+/** A settings select that reveals a write-your-own field on "other". */
+function SelectWithOther({
+  id,
+  label,
+  value,
+  onChange,
+  custom,
+  onCustomChange,
+  options,
+  customPlaceholder,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  custom: string;
+  onCustomChange: (value: string) => void;
+  options: [string, string][];
+  customPlaceholder: string;
+}) {
+  return (
+    <>
+      <label className="settings-label" htmlFor={id}>{label}</label>
+      <select id={id} value={value} onChange={(event) => onChange(event.target.value)}>
+        {options.map(([optionId, optionLabelText]) => (
+          <option key={optionId} value={optionId}>{optionLabelText}</option>
+        ))}
+      </select>
+      {value === "other" && (
+        <input
+          type="text"
+          value={custom}
+          onChange={(event) => onCustomChange(event.target.value)}
+          placeholder={customPlaceholder}
+          maxLength={80}
+          aria-label={`${label} — your own answer`}
+        />
+      )}
+    </>
+  );
 }
 
 function DeveloperTab({
@@ -1424,8 +1641,16 @@ function DeveloperTab({
   const [activateOpen, setActivateOpen] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [useCase, setUseCase] = useState("chatbot");
+  const [useCaseCustom, setUseCaseCustom] = useState("");
   const [builderType, setBuilderType] = useState("individual");
+  const [builderTypeCustom, setBuilderTypeCustom] = useState("");
   const [language, setLanguage] = useState("javascript");
+  const [languageCustom, setLanguageCustom] = useState("");
+  const [callEnvironment, setCallEnvironment] = useState("server-backend");
+  const [callEnvironmentCustom, setCallEnvironmentCustom] = useState("");
+  const [expectedUsage, setExpectedUsage] = useState("testing");
+  const [heardFrom, setHeardFrom] = useState("");
+  const [heardFromCustom, setHeardFromCustom] = useState("");
   const [website, setWebsite] = useState("");
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [activating, setActivating] = useState(false);
@@ -1442,6 +1667,9 @@ function DeveloperTab({
   // Quickstart language tab (defaults to the activation answer).
   const [sampleTab, setSampleTab] = useState("javascript");
 
+  // Which activity row has its input/output log expanded.
+  const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
+
   useEffect(() => {
     if (typeof window !== "undefined") {
       setBaseUrl(`${window.location.origin}/api/v1`);
@@ -1456,7 +1684,10 @@ function DeveloperTab({
       }
       const data = (await response.json()) as DeveloperOverview;
       setOverview(data);
-      if (data.profile?.language) setSampleTab(data.profile.language);
+      const known = ["javascript", "python", "curl", "other"];
+      if (data.profile?.language) {
+        setSampleTab(known.includes(data.profile.language) ? data.profile.language : "other");
+      }
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Developer details couldn’t be loaded.");
     }
@@ -1466,14 +1697,12 @@ function DeveloperTab({
     void loadOverview();
   }, [loadOverview]);
 
-  async function copyText(text: string, message: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-      onToast(message);
-    } catch {
-      onToast("Copy failed — select the text and copy it manually.");
-    }
-  }
+  const customAnswersValid =
+    (useCase !== "other" || useCaseCustom.trim().length >= 2) &&
+    (builderType !== "other" || builderTypeCustom.trim().length >= 2) &&
+    (language !== "other" || languageCustom.trim().length >= 2) &&
+    (callEnvironment !== "other" || callEnvironmentCustom.trim().length >= 2) &&
+    (heardFrom !== "other" || heardFromCustom.trim().length >= 2);
 
   async function activate() {
     setActivating(true);
@@ -1484,8 +1713,16 @@ function DeveloperTab({
         body: {
           projectName: projectName.trim(),
           useCase,
+          useCaseCustom: useCaseCustom.trim(),
           builderType,
+          builderTypeCustom: builderTypeCustom.trim(),
           language,
+          languageCustom: languageCustom.trim(),
+          callEnvironment,
+          callEnvironmentCustom: callEnvironmentCustom.trim(),
+          expectedUsage,
+          heardFrom,
+          heardFromCustom: heardFromCustom.trim(),
           website: website.trim(),
           termsAccepted,
         },
@@ -1596,17 +1833,26 @@ Content-Type: application/json
 
   const limit = overview?.limit ?? 100_000;
   const today = overview?.usage?.today;
+  const last7Days = overview?.usage?.last7Days ?? [];
   const usedPercent = today ? Math.min(100, (today.totalTokens / limit) * 100) : 0;
   const activeKeys = (overview?.keys ?? []).filter((key) => !key.revoked);
+  const lastEvent = (overview?.recentEvents ?? [])[0];
+  const maxDayTokens = Math.max(1, ...last7Days.map((day) => day.totalTokens));
 
   return (
     <section className="settings-panel" aria-labelledby="settings-developer-heading">
-      <h2 id="settings-developer-heading">Developer</h2>
-      <p>
-        Build on Xyro AI with an OpenAI-compatible API, powered by the same free models
-        as the app. Keys, usage and request logs are stored on your account and metered
-        against the free plan.
-      </p>
+      <div className="dev-head">
+        <div>
+          <h2 id="settings-developer-heading">Developer</h2>
+          <p>
+            Build on Xyro AI with an OpenAI-compatible API, powered by the same free
+            models as the app.
+          </p>
+        </div>
+        {overview?.activated && (
+          <span className="settings-badge settings-badge-ok">Free plan</span>
+        )}
+      </div>
 
       {overview === null && !loadError && (
         <p className="settings-hint" role="status">Loading developer details…</p>
@@ -1614,85 +1860,188 @@ Content-Type: application/json
       {loadError && <div className="auth-alert" role="alert">{loadError}</div>}
 
       {overview !== null && !overview.activated && (
-        <div className="settings-field">
-          <span className="settings-label">API access</span>
-          <p className="settings-hint">
-            The free plan includes <strong>100,000 tokens per day</strong>, access to every
-            free model, and a usage dashboard with per-request logs. Answer a few questions
-            to activate — your first API key is issued right away.
-          </p>
-          <div className="settings-inline">
-            <button type="button" className="button button-primary" onClick={() => setActivateOpen(true)}>
-              Activate developer access
-            </button>
-          </div>
-          {!overview.emailVerified && (
+        <>
+          <div className="dev-card dev-hero">
+            <h3>Build with the Xyro AI API</h3>
             <p className="settings-hint">
-              Note: finishing activation needs a verified email address — the same rule as
-              sending messages. If yours isn’t verified yet, use the verification banner in
-              your workspace first; the activation will tell you if it isn’t.
+              One key, every free model, and an OpenAI-compatible endpoint you can drop
+              into existing code. Your usage, keys and request logs live on this dashboard.
             </p>
-          )}
-        </div>
+            <ol className="dev-steps">
+              <li><strong>Activate</strong><span>Answer a few questions about your project</span></li>
+              <li><strong>Copy your key</strong><span>Issued instantly, shown once</span></li>
+              <li><strong>Make a call</strong><span>Follow the quickstart in your language</span></li>
+            </ol>
+            <div className="settings-inline">
+              <button type="button" className="button button-primary" onClick={() => setActivateOpen(true)}>
+                Activate developer access
+              </button>
+            </div>
+            {!overview.emailVerified && (
+              <p className="settings-hint">
+                Finishing activation needs a verified email address — the same rule as
+                sending messages. If yours isn’t verified yet, use the verification banner
+                in your workspace first; the activation will tell you if it isn’t.
+              </p>
+            )}
+          </div>
+
+          <div className="dev-card">
+            <span className="settings-label">What the free plan includes</span>
+            <div className="dev-defs">
+              <div><span>Tokens</span><strong>100,000 per day, resets midnight UTC</strong></div>
+              <div><span>Models</span><strong>Every free model, via GET /models</strong></div>
+              <div><span>Requests</span><strong>20 per minute per key · up to 5 keys</strong></div>
+              <div><span>Endpoint</span><strong><code>{baseUrl}</code></strong></div>
+            </div>
+          </div>
+        </>
       )}
 
       {overview !== null && overview.activated && overview.profile && (
         <>
-          <div className="settings-field">
-            <span className="settings-label">
-              Plan <span className="settings-badge settings-badge-ok">Free plan</span>
-            </span>
+          <div className="dev-stat-grid">
+            <div className="dev-stat">
+              <span className="dev-stat-label">Tokens today</span>
+              <span className="dev-stat-value">{(today?.totalTokens ?? 0).toLocaleString("en-US")}</span>
+              <span className="dev-stat-sub">of {limit.toLocaleString("en-US")} daily limit</span>
+            </div>
+            <div className="dev-stat">
+              <span className="dev-stat-label">Requests today</span>
+              <span className="dev-stat-value">{(today?.requests ?? 0).toLocaleString("en-US")}</span>
+              <span className="dev-stat-sub">
+                {(today?.promptTokens ?? 0).toLocaleString("en-US")} in ·{" "}
+                {(today?.completionTokens ?? 0).toLocaleString("en-US")} out
+              </span>
+            </div>
+            <div className="dev-stat">
+              <span className="dev-stat-label">Active keys</span>
+              <span className="dev-stat-value">{activeKeys.length}</span>
+              <span className="dev-stat-sub">of 5 maximum</span>
+            </div>
+            <div className="dev-stat">
+              <span className="dev-stat-label">Last API call</span>
+              <span className="dev-stat-value dev-stat-value-sm">
+                {lastEvent ? formatDate(lastEvent.createdAt) : "No calls yet"}
+              </span>
+              <span className="dev-stat-sub">{lastEvent?.model ?? "Make your first request below"}</span>
+            </div>
+          </div>
+
+          <div className="dev-card">
+            <span className="settings-label">Usage — {overview.profile.projectName}</span>
             <p className="settings-hint">
-              {overview.profile.projectName} · {optionLabel(API_USE_CASE_OPTIONS, overview.profile.useCase)}
-              {" · "}Active since {formatDate(overview.profile.createdAt)}
+              {optionLabel(overview.profile.useCase)} · {optionLabel(overview.profile.builderType)}
+              {" · "}calling from {optionLabel(overview.profile.callEnvironment)}
+              {" · "}active since {formatDate(overview.profile.createdAt)}
             </p>
-            {today && (
-              <>
-                <p className="dev-usage-total">
-                  {today.totalTokens.toLocaleString("en-US")}
-                  <span className="settings-hint"> of {limit.toLocaleString("en-US")} tokens used today</span>
-                </p>
-                <div
-                  className="dev-progress"
-                  role="progressbar"
-                  aria-valuenow={Math.round(usedPercent)}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-label="Daily token usage"
-                >
-                  <span style={{ width: `${usedPercent}%` }} />
-                </div>
-                <p className="settings-hint">
-                  {today.requests.toLocaleString("en-US")} requests ·{" "}
-                  {today.promptTokens.toLocaleString("en-US")} prompt tokens ·{" "}
-                  {today.completionTokens.toLocaleString("en-US")} completion tokens ·
-                  resets at midnight UTC
-                </p>
-              </>
-            )}
-            {overview.usage && overview.usage.last7Days.length > 0 && (
-              <ul className="settings-session-list">
-                {[...overview.usage.last7Days].reverse().map((day) => (
-                  <li key={day.date}>
-                    <span className="settings-session-device">{day.date}</span>
-                    <span className="settings-file-meta">
-                      {day.totalTokens.toLocaleString("en-US")} tokens ·{" "}
-                      {day.requests.toLocaleString("en-US")} requests
+            <div
+              className="dev-progress"
+              role="progressbar"
+              aria-valuenow={Math.round(usedPercent)}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label="Daily token usage"
+            >
+              <span style={{ width: `${usedPercent}%` }} />
+            </div>
+            <p className="settings-hint">
+              {usedPercent.toFixed(1)}% of today’s free-plan allowance used · resets at midnight UTC
+              {" · "}estimated cost today {formatUsd(today?.costUsd ?? 0)} — every model on the
+              free plan is priced $0, so API usage costs you nothing.
+            </p>
+            {last7Days.length > 0 && (
+              <div className="dev-chart" role="img" aria-label="Token usage over the last 7 days">
+                {last7Days.map((day) => (
+                  <div
+                    className="dev-chart-col"
+                    key={day.date}
+                    title={`${day.date}: ${day.totalTokens.toLocaleString("en-US")} tokens, ${day.requests} requests`}
+                  >
+                    <span className="dev-chart-value">
+                      {day.totalTokens > 0 ? compactNumber.format(day.totalTokens) : ""}
                     </span>
-                    <span className="dev-day-bar" aria-hidden="true">
-                      <span style={{ width: `${Math.min(100, (day.totalTokens / limit) * 100)}%` }} />
-                    </span>
-                  </li>
+                    <div className="dev-chart-track">
+                      <span style={{ height: `${Math.max(3, (day.totalTokens / maxDayTokens) * 100)}%` }} />
+                    </div>
+                    <span className="dev-chart-date">{day.date.slice(5)}</span>
+                  </div>
                 ))}
-              </ul>
+              </div>
             )}
           </div>
 
-          <div className="settings-field">
+          {(overview.modelUsage ?? []).length > 0 && (
+            <div className="dev-card">
+              <span className="settings-label">Usage by model — last 7 days</span>
+              <div className="dev-model-bars">
+                {(overview.modelUsage ?? []).map((entry) => {
+                  const maxModelTokens = Math.max(
+                    1,
+                    ...(overview.modelUsage ?? []).map((item) => item.totalTokens),
+                  );
+                  return (
+                    <div className="dev-model-bar" key={entry.model}>
+                      <div className="dev-model-bar-head">
+                        <code>{entry.model}</code>
+                        <span>
+                          {entry.totalTokens.toLocaleString("en-US")} tokens ·{" "}
+                          {entry.requests} requests · {formatUsd(entry.costUsd)}
+                        </span>
+                      </div>
+                      <div className="dev-model-bar-track">
+                        <span style={{ width: `${Math.max(2, (entry.totalTokens / maxModelTokens) * 100)}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <div className="dev-card">
+            <span className="settings-label">Models your key can use</span>
+            <p className="settings-hint">
+              The exact models behind the API right now, with their catalogue prices.
+              Every one is a free OpenRouter model — $0 per token on the free plan.
+              Pass a model id in your request, or omit it and the Auto router picks a
+              free model for you.
+            </p>
+            <ul className="settings-session-list">
+              <li>
+                <span className="settings-session-device">
+                  Auto (recommended)
+                  <span className="settings-badge settings-badge-ok">Free</span>
+                </span>
+                <span className="settings-file-meta">
+                  <code>openrouter/free</code> · routes to an available free model ·
+                  $0 / 1M tokens in · $0 / 1M tokens out
+                </span>
+              </li>
+              {(overview.models ?? []).map((model) => (
+                <li key={model.id}>
+                  <span className="settings-session-device">
+                    {model.name}
+                    <span className="settings-badge settings-badge-ok">Free</span>
+                    {model.capabilities.includes("vision") && (
+                      <span className="settings-badge">Vision</span>
+                    )}
+                  </span>
+                  <span className="settings-file-meta">
+                    <code>{model.id}</code> · context {formatContextLength(model.contextLength)}
+                    {" · "}{formatPricePerMillion(model.pricing.promptPerMillion)} / 1M in
+                    {" · "}{formatPricePerMillion(model.pricing.completionPerMillion)} / 1M out
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="dev-card">
             <span className="settings-label">API keys</span>
             <p className="settings-hint">
-              Keys are shown in full only once, when they are created. Only a hash of each
-              key is stored, so a lost key can’t be recovered — revoke it and create a new one.
+              Keys are shown in full only once, when created. Only a hash of each key is
+              stored, so a lost key can’t be recovered — revoke it and create a new one.
             </p>
             <ul className="settings-session-list">
               {(overview.keys ?? []).map((key) => (
@@ -1745,19 +2094,17 @@ Content-Type: application/json
             )}
           </div>
 
-          <div className="settings-field">
+          <div className="dev-card">
             <span className="settings-label">Quickstart</span>
             <p className="settings-hint">
-              The API is OpenAI-compatible: send your key as a Bearer token and post
-              messages. Replace <code>YOUR_API_KEY</code> with a key from above, and keep
-              keys on your server — never ship them in browser or mobile code.
+              Send your key as a Bearer token and post messages. Replace{" "}
+              <code>YOUR_API_KEY</code> with a key from above — and keep keys on your
+              server, never in browser or mobile code.
             </p>
-            <p className="settings-hint">
-              Base URL{" "}
-              <button type="button" className="dev-copy-link" onClick={() => void copyText(baseUrl, "Base URL copied.")}>
-                <code>{baseUrl}</code> ⧉
-              </button>
-            </p>
+            <div className="dev-base-row">
+              <code>{baseUrl}</code>
+              <CopyButton text={baseUrl} label="Copy base URL" onToast={onToast} />
+            </div>
             <div className="settings-inline" role="tablist" aria-label="Code sample language">
               {API_LANGUAGE_OPTIONS.map(([id, label]) => (
                 <button
@@ -1774,45 +2121,43 @@ Content-Type: application/json
             </div>
             <div className="chat-code-block">
               <div className="chat-code-header">
-                <span>{optionLabel(API_LANGUAGE_OPTIONS, sampleTab)}</span>
-                <button
-                  type="button"
-                  onClick={() => void copyText(samples[sampleTab] ?? "", "Code sample copied.")}
-                >
-                  Copy
-                </button>
+                <span>{optionLabel(sampleTab)}</span>
+                <CopyButton text={samples[sampleTab] ?? ""} onToast={onToast} />
               </div>
               <pre><code>{samples[sampleTab]}</code></pre>
             </div>
           </div>
 
-          <div className="settings-field">
+          <div className="dev-card">
             <span className="settings-label">Endpoints and limits</span>
-            <ul className="settings-session-list">
-              <li>
-                <span className="settings-session-device"><code>POST /chat/completions</code></span>
-                <span className="settings-file-meta">
-                  Body: model (optional, defaults to Auto free), messages (1–50 of role
-                  system/user/assistant), max_tokens (1–4096). Returns an OpenAI-shaped
-                  chat.completion with usage. Streaming is not supported yet.
-                </span>
-              </li>
-              <li>
-                <span className="settings-session-device"><code>GET /models</code></span>
-                <span className="settings-file-meta">
-                  Lists the free models your key can use right now.
-                </span>
-              </li>
-              <li>
-                <span className="settings-session-device">Free plan limits</span>
-                <span className="settings-file-meta">
-                  {limit.toLocaleString("en-US")} tokens per day (prompt + completion,
-                  resets midnight UTC) · 20 requests per minute per key · up to 5 active
-                  keys. Errors use the OpenAI shape: an error object with message, type
-                  and code — daily_token_limit_exceeded means the daily cap is reached.
-                </span>
-              </li>
-            </ul>
+            <div className="dev-defs">
+              <div>
+                <span><code>POST /chat/completions</code></span>
+                <strong>
+                  model (optional, defaults to Auto free), messages (1–50, role +
+                  content only), max_tokens (integer, 1–4096), temperature (0–2).
+                  Unknown parameters are rejected by name. Streaming is not supported yet.
+                </strong>
+              </div>
+              <div>
+                <span><code>GET /models</code></span>
+                <strong>The free models your key can use right now, OpenAI list shape.</strong>
+              </div>
+              <div>
+                <span>Free plan limits</span>
+                <strong>
+                  {limit.toLocaleString("en-US")} tokens/day · 20 requests/minute per key ·
+                  5 active keys · failed key attempts are throttled per network
+                </strong>
+              </div>
+              <div>
+                <span>Errors</span>
+                <strong>
+                  OpenAI shape — error.message / type / code. Watch for
+                  daily_token_limit_exceeded (daily cap) and invalid_api_key.
+                </strong>
+              </div>
+            </div>
             <p className="settings-hint">
               Full terms: <a href="/api-terms" target="_blank" rel="noreferrer">API terms</a>
               {" · "}
@@ -1822,11 +2167,13 @@ Content-Type: application/json
             </p>
           </div>
 
-          <div className="settings-field">
+          <div className="dev-card">
             <span className="settings-label">Recent API activity</span>
             <p className="settings-hint">
               Every API call is logged with its request fingerprint — device, browser and
-              a hashed IP — so you can spot keys being used from unexpected places.
+              a hashed IP — so you can spot keys being used from unexpected places. The
+              request input and response output of each call are saved with the log
+              (as disclosed in the API terms) — open one to inspect it.
             </p>
             {(overview.recentEvents ?? []).length === 0 && (
               <p className="settings-hint">No API calls yet. Make your first request with the quickstart above.</p>
@@ -1834,17 +2181,82 @@ Content-Type: application/json
             {(overview.recentEvents ?? []).length > 0 && (
               <ul className="settings-session-list">
                 {(overview.recentEvents ?? []).map((event) => (
-                  <li key={event.id}>
+                  <Fragment key={event.id}>
+                    <li>
+                      <span className="settings-session-device">
+                        {event.model ?? event.endpoint}
+                        {event.status === "success" && <span className="settings-badge settings-badge-ok">Success</span>}
+                        {event.status === "error" && <span className="settings-badge settings-badge-warn">Error {event.httpStatus}</span>}
+                        {event.status === "rejected" && <span className="settings-badge settings-badge-warn">Limit reached</span>}
+                      </span>
+                      <span className="settings-file-meta">
+                        {event.totalTokens.toLocaleString("en-US")} tokens
+                        {" · "}{formatUsd(event.costUsd ?? 0)}
+                        {" · "}{event.deviceLabel ?? "Unknown device"}
+                        {" · "}{formatDate(event.createdAt)}
+                      </span>
+                      {(event.inputLog || event.outputLog) && (
+                        <button
+                          type="button"
+                          className="button button-outline"
+                          aria-expanded={expandedEventId === event.id}
+                          onClick={() =>
+                            setExpandedEventId(expandedEventId === event.id ? null : event.id)
+                          }
+                        >
+                          {expandedEventId === event.id ? "Hide log" : "View log"}
+                        </button>
+                      )}
+                    </li>
+                    {expandedEventId === event.id && (event.inputLog || event.outputLog) && (
+                      <li className="dev-log-row">
+                        {event.promptPreview && (
+                          <p className="settings-hint">Prompt: “{event.promptPreview}”</p>
+                        )}
+                        {event.inputLog && (
+                          <>
+                            <span className="settings-label">Input</span>
+                            <pre className="dev-log-pre">{renderInputLog(event.inputLog)}</pre>
+                          </>
+                        )}
+                        {event.outputLog && (
+                          <>
+                            <span className="settings-label">Output</span>
+                            <pre className="dev-log-pre">{event.outputLog}</pre>
+                          </>
+                        )}
+                      </li>
+                    )}
+                  </Fragment>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="dev-card">
+            <span className="settings-label">API access points</span>
+            <p className="settings-hint">
+              Every distinct client that has called the API with your keys — fingerprinted
+              from its network and user agent, with the detected location. If you see a
+              place or device you don’t recognise, revoke the key it used.
+            </p>
+            {(overview.accessPoints ?? []).length === 0 && (
+              <p className="settings-hint">No access points yet — they appear after your first API call.</p>
+            )}
+            {(overview.accessPoints ?? []).length > 0 && (
+              <ul className="settings-session-list">
+                {(overview.accessPoints ?? []).map((point) => (
+                  <li key={point.id}>
                     <span className="settings-session-device">
-                      {event.model ?? event.endpoint}
-                      {event.status === "success" && <span className="settings-badge settings-badge-ok">Success</span>}
-                      {event.status === "error" && <span className="settings-badge settings-badge-warn">Error {event.httpStatus}</span>}
-                      {event.status === "rejected" && <span className="settings-badge settings-badge-warn">Limit reached</span>}
+                      {point.deviceLabel ?? "API client"}
+                      <span className="settings-badge">API client</span>
                     </span>
                     <span className="settings-file-meta">
-                      {event.totalTokens.toLocaleString("en-US")} tokens
-                      {" · "}{event.deviceLabel ?? "Unknown device"}
-                      {" · "}{formatDate(event.createdAt)}
+                      {[point.city, point.country].filter(Boolean).join(", ") || "Location unknown"}
+                      {" · "}{point.requests.toLocaleString("en-US")} requests
+                      {point.keyPrefix ? ` · key ${point.keyPrefix}` : ""}
+                      {" · "}first seen {formatDate(point.firstSeenAt)}
+                      {" · "}last seen {formatDate(point.lastSeenAt)}
                     </span>
                   </li>
                 ))}
@@ -1856,21 +2268,26 @@ Content-Type: application/json
 
       {activateOpen && (
         <div className="signout-overlay">
-          <div className="signout-dialog" role="dialog" aria-modal="true" aria-labelledby="dev-activate-heading">
+          <div className="signout-dialog dev-dialog" role="dialog" aria-modal="true" aria-labelledby="dev-activate-heading">
             {freshKey ? (
               <>
                 <h3 id="dev-activate-heading">Developer access is active</h3>
                 <p>
                   Here is your first API key. Copy it now and store it somewhere safe —
-                  it is shown only once and can’t be recovered later.
+                  it is shown only once and can’t be recovered later. Tap the field to
+                  select the whole key.
                 </p>
-                <div className="chat-code-block">
-                  <pre><code>{freshKey}</code></pre>
-                </div>
+                <input
+                  className="dev-key-input"
+                  type="text"
+                  readOnly
+                  value={freshKey}
+                  aria-label="Your API key"
+                  onFocus={(event) => event.target.select()}
+                  onClick={(event) => event.currentTarget.select()}
+                />
                 <div className="signout-dialog-actions">
-                  <button type="button" className="button button-outline" onClick={() => void copyText(freshKey, "API key copied.")}>
-                    Copy key
-                  </button>
+                  <CopyButton text={freshKey} label="Copy key" onToast={onToast} />
                   <button
                     type="button"
                     className="button button-primary"
@@ -1886,7 +2303,7 @@ Content-Type: application/json
             ) : (
               <>
                 <h3 id="dev-activate-heading">Activate developer access</h3>
-                <p>Tell us a little about your project. Your answers are saved to your account and help us keep the free API sustainable.</p>
+                <p>Tell us about your project — pick an answer, or choose “Something else” and write your own. Your answers are saved to your account and help us keep the free API sustainable.</p>
                 <div className="dev-form">
                   <label className="settings-label" htmlFor="dev-project-name">Project name</label>
                   <input
@@ -1897,24 +2314,69 @@ Content-Type: application/json
                     placeholder="e.g. My support chatbot"
                     maxLength={60}
                   />
-                  <label className="settings-label" htmlFor="dev-use-case">What are you building?</label>
-                  <select id="dev-use-case" value={useCase} onChange={(event) => setUseCase(event.target.value)}>
-                    {API_USE_CASE_OPTIONS.map(([id, label]) => (
+                  <SelectWithOther
+                    id="dev-use-case"
+                    label="What are you building?"
+                    value={useCase}
+                    onChange={setUseCase}
+                    custom={useCaseCustom}
+                    onCustomChange={setUseCaseCustom}
+                    options={API_USE_CASE_OPTIONS}
+                    customPlaceholder="Describe it in your own words…"
+                  />
+                  <SelectWithOther
+                    id="dev-builder-type"
+                    label="What best describes you?"
+                    value={builderType}
+                    onChange={setBuilderType}
+                    custom={builderTypeCustom}
+                    onCustomChange={setBuilderTypeCustom}
+                    options={API_BUILDER_OPTIONS}
+                    customPlaceholder="Describe yourself in your own words…"
+                  />
+                  <SelectWithOther
+                    id="dev-language"
+                    label="Primary language"
+                    value={language}
+                    onChange={setLanguage}
+                    custom={languageCustom}
+                    onCustomChange={setLanguageCustom}
+                    options={API_LANGUAGE_OPTIONS}
+                    customPlaceholder="e.g. Go, Rust, PHP…"
+                  />
+                  <SelectWithOther
+                    id="dev-call-env"
+                    label="Where will you call the API from?"
+                    value={callEnvironment}
+                    onChange={setCallEnvironment}
+                    custom={callEnvironmentCustom}
+                    onCustomChange={setCallEnvironmentCustom}
+                    options={API_CALL_ENV_OPTIONS}
+                    customPlaceholder="Describe where your code runs…"
+                  />
+                  <label className="settings-label" htmlFor="dev-expected-usage">Expected daily usage</label>
+                  <select id="dev-expected-usage" value={expectedUsage} onChange={(event) => setExpectedUsage(event.target.value)}>
+                    {API_EXPECTED_USAGE_OPTIONS.map(([id, label]) => (
                       <option key={id} value={id}>{label}</option>
                     ))}
                   </select>
-                  <label className="settings-label" htmlFor="dev-builder-type">What best describes you?</label>
-                  <select id="dev-builder-type" value={builderType} onChange={(event) => setBuilderType(event.target.value)}>
-                    {API_BUILDER_OPTIONS.map(([id, label]) => (
+                  <label className="settings-label" htmlFor="dev-heard-from">Where did you hear about Xyro AI? (optional)</label>
+                  <select id="dev-heard-from" value={heardFrom} onChange={(event) => setHeardFrom(event.target.value)}>
+                    <option value="">Prefer not to say</option>
+                    {API_HEARD_FROM_OPTIONS.map(([id, label]) => (
                       <option key={id} value={id}>{label}</option>
                     ))}
                   </select>
-                  <label className="settings-label" htmlFor="dev-language">Primary language</label>
-                  <select id="dev-language" value={language} onChange={(event) => setLanguage(event.target.value)}>
-                    {API_LANGUAGE_OPTIONS.map(([id, label]) => (
-                      <option key={id} value={id}>{label}</option>
-                    ))}
-                  </select>
+                  {heardFrom === "other" && (
+                    <input
+                      type="text"
+                      value={heardFromCustom}
+                      onChange={(event) => setHeardFromCustom(event.target.value)}
+                      placeholder="Tell us where…"
+                      maxLength={80}
+                      aria-label="Where did you hear about Xyro AI — your own answer"
+                    />
+                  )}
                   <label className="settings-label" htmlFor="dev-website">Website or repository (optional)</label>
                   <input
                     id="dev-website"
@@ -1952,7 +2414,7 @@ Content-Type: application/json
                     type="button"
                     className="button button-primary"
                     onClick={() => void activate()}
-                    disabled={activating || projectName.trim().length < 2 || !termsAccepted}
+                    disabled={activating || projectName.trim().length < 2 || !termsAccepted || !customAnswersValid}
                   >
                     {activating ? "Activating…" : "Activate and get my key"}
                   </button>
@@ -1965,16 +2427,20 @@ Content-Type: application/json
 
       {freshKey && !activateOpen && (
         <div className="signout-overlay">
-          <div className="signout-dialog" role="dialog" aria-modal="true" aria-labelledby="dev-key-heading">
+          <div className="signout-dialog dev-dialog" role="dialog" aria-modal="true" aria-labelledby="dev-key-heading">
             <h3 id="dev-key-heading">Your new API key</h3>
-            <p>Copy it now and store it somewhere safe — it is shown only once.</p>
-            <div className="chat-code-block">
-              <pre><code>{freshKey}</code></pre>
-            </div>
+            <p>Copy it now and store it somewhere safe — it is shown only once. Tap the field to select the whole key.</p>
+            <input
+              className="dev-key-input"
+              type="text"
+              readOnly
+              value={freshKey}
+              aria-label="Your API key"
+              onFocus={(event) => event.target.select()}
+              onClick={(event) => event.currentTarget.select()}
+            />
             <div className="signout-dialog-actions">
-              <button type="button" className="button button-outline" onClick={() => void copyText(freshKey, "API key copied.")}>
-                Copy key
-              </button>
+              <CopyButton text={freshKey} label="Copy key" onToast={onToast} />
               <button type="button" className="button button-primary" onClick={() => setFreshKey(null)}>
                 Done
               </button>

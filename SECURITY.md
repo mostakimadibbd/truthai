@@ -450,3 +450,28 @@ saved to `users/{uid}/developerProfile/main`).
 - Token counts come from the upstream usage block when present;
   otherwise they are estimated at ~4 characters/token and the
   event is flagged `tokensEstimated`.
+- **Strict request surface**: requests must be
+  `Content-Type: application/json`; unknown top-level parameters
+  are rejected by name (`unknown_parameter`); messages must be
+  objects with only `role` + non-empty `content`; `max_tokens`
+  must be an integer; `temperature` is the only sampling knob
+  (0–2). Failed key attempts are throttled per IP (30/min) so
+  keys cannot be scanned against the auth lookup, and a key
+  whose developer profile is gone stops working (orphan check).
+- **Cost metering**: each event and the daily/per-model rollups
+  (`users/{uid}/apiModelUsage`) carry an estimated USD cost from
+  the model's OpenRouter catalogue prices (per-token strings
+  converted to per-1M). All current models are free, so the
+  estimate is $0 — the plumbing exists so a future paid model is
+  metered correctly from day one.
+- **Access points**: each distinct API client (IP hash + user
+  agent fingerprint) is upserted into
+  `users/{uid}/apiAccessPoints` with its detected coarse
+  location, request count and first/last seen, and shown in the
+  dashboard next to the key it used.
+- **Input/output logs**: the request messages and the response
+  text are stored (capped at 8,000 chars each) on the event,
+  disclosed in the API terms and the privacy center, and visible
+  to the account owner in the dashboard's activity log. This is
+  the industry-standard abuse/debugging log — it is not shared
+  with third parties.

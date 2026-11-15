@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { checkWindowLimit } from "@/lib/server/auth-rate-limit";
+import {
+  checkWindowLimit,
+  hashRateLimitKeyPart,
+} from "@/lib/server/auth-rate-limit";
 import { recordBudget } from "@/lib/server/budget";
 import { getDeviceContext } from "@/lib/server/device";
 import {
@@ -8,8 +11,10 @@ import {
   apiDateKey,
   authenticateApiKey,
   getDailyUsage,
+  getDeveloperProfile,
   recordApiCall,
 } from "@/lib/server/developer";
+import { getRemoteIp } from "@/lib/server/turnstile";
 import { getFirebaseAdminAuth } from "@/lib/server/firebase-admin";
 import {
   AUTO_MODEL_ID,
@@ -73,15 +78,54 @@ function geo(request: NextRequest): { city: string | null; country: string | nul
   };
 }
 
+const ALLOWED_PARAMETERS = new Set([
+  "model",
+  "messages",
+  "max_tokens",
+  "temperature",
+  "stream",
+]);
+
 export async function POST(request: NextRequest) {
   const identity = await authenticateApiKey(
     request.headers.get("authorization"),
   ).catch(() => null);
   if (!identity) {
+    // Failed key attempts are throttled per IP so keys can't be
+    // brute-force scanned against the auth lookup.
+    try {
+      const failures = await checkWindowLimit(
+        `xyro:api:authfail:ip:${hashRateLimitKeyPart(getRemoteIp(request) ?? "unknown")}`,
+        60 * 1000,
+        30,
+      );
+      if (failures.state === "limited") {
+        return apiError(
+          429,
+          "rate_limit_exceeded",
+          "Too many failed API key attempts from this network. Wait a minute and try again.",
+          "rate_limit_error",
+          { "Retry-After": String(failures.retryAfter) },
+        );
+      }
+    } catch {
+      // Limiter trouble never changes the 401 below.
+    }
     return apiError(
       401,
       "invalid_api_key",
       "Invalid or missing API key. Send your key as 'Authorization: Bearer xyro_sk_live_…'.",
+      "authentication_error",
+    );
+  }
+
+  // An orphaned key (developer access removed) stops working.
+  const profile = await getDeveloperProfile(identity.uid).catch(() => null);
+  if (!profile) {
+    return apiError(
+      401,
+      "invalid_api_key",
+      "This API key is no longer active.",
       "authentication_error",
     );
   }
@@ -128,6 +172,15 @@ export async function POST(request: NextRequest) {
     // Limiter trouble never blocks a call on its own.
   }
 
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    return apiError(
+      415,
+      "unsupported_media_type",
+      "Send the request with Content-Type: application/json.",
+    );
+  }
+
   let rawBody: string;
   try {
     rawBody = await request.text();
@@ -143,6 +196,21 @@ export async function POST(request: NextRequest) {
   } catch {
     return apiError(400, "invalid_json", "The request body must be valid JSON.");
   }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return apiError(400, "invalid_json", "The request body must be a JSON object.");
+  }
+
+  // Strict parameter surface: anything outside the documented set
+  // is rejected by name instead of being silently ignored.
+  for (const key of Object.keys(body)) {
+    if (!ALLOWED_PARAMETERS.has(key)) {
+      return apiError(
+        400,
+        "unknown_parameter",
+        `Unknown parameter '${key}'. Supported parameters: model, messages, max_tokens, temperature, stream.`,
+      );
+    }
+  }
 
   if (body.stream === true) {
     return apiError(
@@ -150,6 +218,22 @@ export async function POST(request: NextRequest) {
       "streaming_not_supported",
       "Streaming responses are not supported yet. Send the request without stream: true.",
     );
+  }
+  if (body.stream !== undefined && typeof body.stream !== "boolean") {
+    return apiError(400, "invalid_parameter", "'stream' must be a boolean.");
+  }
+
+  let temperature: number | undefined;
+  if (body.temperature !== undefined) {
+    if (
+      typeof body.temperature !== "number" ||
+      !Number.isFinite(body.temperature) ||
+      body.temperature < 0 ||
+      body.temperature > 2
+    ) {
+      return apiError(400, "invalid_parameter", "'temperature' must be a number between 0 and 2.");
+    }
+    temperature = body.temperature;
   }
 
   const rawMessages = body.messages;
@@ -161,21 +245,27 @@ export async function POST(request: NextRequest) {
     if (
       typeof item !== "object" ||
       item === null ||
+      Array.isArray(item) ||
+      Object.keys(item).some((key) => key !== "role" && key !== "content") ||
       !("role" in item) ||
       !("content" in item) ||
       (item.role !== "system" && item.role !== "user" && item.role !== "assistant") ||
       typeof item.content !== "string" ||
+      item.content.length === 0 ||
       item.content.length > MAX_CONTENT_CHARS
     ) {
       return apiError(
         400,
         "invalid_messages",
-        "Each message needs a role (system, user or assistant) and string content.",
+        "Each message must be an object with only a role (system, user or assistant) and non-empty string content.",
       );
     }
     messages.push({ role: item.role, content: item.content });
   }
 
+  if (body.model !== undefined && typeof body.model !== "string") {
+    return apiError(400, "invalid_parameter", "'model' must be a string.");
+  }
   const requestedModel =
     typeof body.model === "string" && body.model.length > 0 ? body.model : AUTO_MODEL_ID;
   if (requestedModel !== AUTO_MODEL_ID && !(await isAllowedFreeModel(requestedModel))) {
@@ -185,9 +275,12 @@ export async function POST(request: NextRequest) {
       `Model '${requestedModel}' is not available on the free plan. Call GET /api/v1/models for the current list.`,
     );
   }
+  if (body.max_tokens !== undefined && !Number.isInteger(body.max_tokens)) {
+    return apiError(400, "invalid_parameter", "'max_tokens' must be an integer.");
+  }
   const maxTokens =
-    typeof body.max_tokens === "number" && Number.isFinite(body.max_tokens)
-      ? Math.min(4096, Math.max(1, Math.floor(body.max_tokens)))
+    typeof body.max_tokens === "number"
+      ? Math.min(4096, Math.max(1, body.max_tokens))
       : 1024;
 
   // Free-plan daily token limit, enforced from the Firestore rollup.
@@ -209,6 +302,8 @@ export async function POST(request: NextRequest) {
       context,
       city,
       country,
+      input: messages,
+      output: null,
     });
     return apiError(
       429,
@@ -241,6 +336,7 @@ export async function POST(request: NextRequest) {
           messages,
           stream: false,
           max_tokens: maxTokens,
+          ...(temperature !== undefined ? { temperature } : {}),
         }),
         signal: AbortSignal.any([request.signal, AbortSignal.timeout(45_000)]),
         cache: "no-store",
@@ -270,6 +366,8 @@ export async function POST(request: NextRequest) {
       context,
       city,
       country,
+      input: messages,
+      output: null,
     });
     return apiError(
       status,
@@ -328,8 +426,10 @@ export async function POST(request: NextRequest) {
     context,
     city,
     country,
+    input: messages,
+    output: content,
   });
-  void recordBudget({ firestoreWrites: 3, firestoreReads: 3 }).catch(
+  void recordBudget({ firestoreWrites: 5, firestoreReads: 4 }).catch(
     () => undefined,
   );
 

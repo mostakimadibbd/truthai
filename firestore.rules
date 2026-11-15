@@ -128,6 +128,14 @@ service cloud.firestore {
       allow read: if ownsUser(userId);
       allow write: if false;
     }
+    match /users/{userId}/apiModelUsage/{document} {
+      allow read: if ownsUser(userId);
+      allow write: if false;
+    }
+    match /users/{userId}/apiAccessPoints/{document} {
+      allow read: if ownsUser(userId);
+      allow write: if false;
+    }
 
     // API key auth lookup (key hash -> owner): server-only, never
     // readable or writable by clients.
