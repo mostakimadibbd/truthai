@@ -1,4 +1,6 @@
+import { createPrivateKey } from "node:crypto";
 import { NextResponse } from "next/server";
+import { normalizeAdminPrivateKey } from "@/lib/server/private-key";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,8 +44,37 @@ export async function GET() {
     ),
     session: (process.env.SESSION_SECRET?.trim().length ?? 0) >= 32,
   };
+  // Finer-grained Firebase Admin diagnostics (booleans only, never key
+  // material): which of the checks in getFirebaseAdminApp would fail.
+  // Added after a production incident where "firebaseAdmin: true"
+  // (presence) hid an unparseable private key.
+  let adminKeyParses = false;
+  try {
+    const normalized = normalizeAdminPrivateKey(
+      process.env.FIREBASE_ADMIN_PRIVATE_KEY,
+    );
+    if (normalized) {
+      createPrivateKey(normalized);
+      adminKeyParses = true;
+    }
+  } catch {
+    adminKeyParses = false;
+  }
+  const adminProjectId =
+    process.env.FIREBASE_ADMIN_PROJECT_ID?.trim() ||
+    process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID?.trim();
+  const adminChecks = {
+    keyParses: adminKeyParses,
+    projectMatches:
+      !!adminProjectId &&
+      adminProjectId === process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID?.trim(),
+    emailIsServiceAccount:
+      process.env.FIREBASE_ADMIN_CLIENT_EMAIL?.trim().endsWith(
+        ".iam.gserviceaccount.com",
+      ) ?? false,
+  };
   return NextResponse.json(
-    { ok: true, integrations },
+    { ok: true, integrations, adminChecks },
     { headers: { "Cache-Control": "no-store" } },
   );
 }
