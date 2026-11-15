@@ -34,6 +34,11 @@ import {
   fetchChatCompletionWithFallback,
 } from "@/lib/server/openrouter";
 import { recordUsageEvent } from "@/lib/server/analytics";
+import {
+  buildWebContext,
+  extractUrls,
+  type WebSource,
+} from "@/lib/server/web-search";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -54,6 +59,7 @@ type RequestBody = {
   attachmentIds?: unknown;
   regenerate?: unknown;
   model?: unknown;
+  webSearch?: unknown;
 };
 
 class ChatRouteError extends Error {
@@ -358,6 +364,7 @@ export async function POST(request: NextRequest) {
   const streamRef = realtimeDb.ref(`chatStreams/${auth.uid}/${chatId}`);
   const assistantRef = messagesRef.doc(assistantMessageId);
   let responseText = "";
+  let webSources: WebSource[] = [];
   let locked = false;
   let assistantCreated = false;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -554,6 +561,34 @@ export async function POST(request: NextRequest) {
     const instructions = await getCustomInstructionsSystemText(auth.uid);
     if (instructions) {
       prepared.messages.splice(1, 0, { role: "system", content: instructions });
+    }
+
+    // Web search + link reading (2026-11-16): when the composer’s web
+    // toggle is on, search the live web for the message; any links in
+    // the message are fetched and read either way. Results ride as a
+    // system block after the instructions, and the sources are stored
+    // on the assistant message so the UI can show them. Search is
+    // best-effort — any failure just means no web context this turn.
+    const webSearchEnabled = body.webSearch === true;
+    const effectiveUserText = regenerate
+      ? ([...history].reverse().find((message) => message.role === "user")?.content ?? "")
+      : content;
+    if (webSearchEnabled || extractUrls(effectiveUserText).length > 0) {
+      try {
+        const web = await buildWebContext({
+          searchEnabled: webSearchEnabled,
+          message: effectiveUserText,
+        });
+        if (web.context) {
+          prepared.messages.splice(instructions ? 2 : 1, 0, {
+            role: "system",
+            content: web.context,
+          });
+          webSources = web.sources;
+        }
+      } catch (error) {
+        console.error("Web context failed; continuing without it.", error);
+      }
     }
 
     let effectiveModel = requestedModel ?? AUTO_MODEL_ID;
@@ -774,6 +809,7 @@ export async function POST(request: NextRequest) {
         content: responseText,
         status: "complete",
         updatedAt: completedAt,
+        ...(webSources.length ? { sources: webSources } : {}),
       }),
       chatRef.update({
         searchText: finalSearchText,

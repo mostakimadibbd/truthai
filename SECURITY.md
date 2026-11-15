@@ -539,3 +539,24 @@ cannot be claimed by a password token — the provider claim is
 inside the server-verified token — and the route's per-IP rate
 limit, token-freshness window, revocation check and terms gate
 apply to Google sign-ins unchanged.
+
+## Web search and link reading (2026-11-16)
+
+- When the composer's web toggle is on, the chat route sends the
+  user's message text as a query to Bing's public results page (no
+  API key) and injects the top results as context; links pasted into
+  a message are fetched and read on any turn. Retrieved sources are
+  stored on the assistant message and shown to the user.
+- Link fetching is SSRF-guarded (lib/server/web-search.ts): only
+  http/https, hostnames resolving to private/reserved IPs are
+  refused, every redirect hop is re-validated, responses are capped
+  at 1.5 MB and 9 s, and only HTML/plain-text is read.
+- Residual risk: DNS rebinding between the resolve-check and the
+  fetch (TOCTOU) is not fully preventable without connection-level
+  IP pinning; the impact is bounded by the response caps and by the
+  fact that fetched content is only ever shown back as text context
+  to the requesting user.
+- Terms-gate note (from the Google sign-in round): the new-account
+  terms check in /api/auth/session applies only when the account is
+  new AND has no profile yet, on every action including
+  session_refresh — closing the earlier silent-renewal bypass.

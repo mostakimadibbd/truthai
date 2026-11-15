@@ -67,6 +67,8 @@ type Message = {
   createdAt: number;
   attachments: Attachment[];
   status?: "generating" | "complete" | "failed" | "stopped";
+  /** Web sources the reply drew on (set server-side on web turns). */
+  sources?: { title: string; url: string }[];
 };
 
 type Chat = {
@@ -253,6 +255,8 @@ function Icon({
     | "attach"
     | "dots"
     | "image"
+    | "globe"
+    | "mic"
     | "file";
   size?: number;
 }) {
@@ -271,6 +275,8 @@ function Icon({
     attach: <><path d="m21.4 11.6-8.5 8.5a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5" /></>,
     dots: <><circle cx="5" cy="12" r="1.4" /><circle cx="12" cy="12" r="1.4" /><circle cx="19" cy="12" r="1.4" /></>,
     image: <><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="9" cy="10" r="1.8" /><path d="m4 17 5-4 4 3 3-2 4 3" /></>,
+    globe: <><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3Z" /></>,
+    mic: <><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></>,
     file: <><path d="M6 2.8h8L19 8v13.2H6z" /><path d="M13.5 3v5.5H19" /></>,
   };
 
@@ -332,6 +338,16 @@ export default function ChatWorkspace() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sending, setSending] = useState(false);
+  const [webSearchOn, setWebSearchOn] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("xyro:websearch") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef<{ stop: () => void } | null>(null);
   const [notice, setNotice] = useState("");
   const [editingChatId, setEditingChatId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -592,6 +608,19 @@ export default function ChatWorkspace() {
                 data.status === "stopped"
                   ? data.status
                   : "complete",
+              sources: Array.isArray(data.sources)
+                ? data.sources.flatMap((item: unknown) =>
+                    typeof item === "object" &&
+                    item !== null &&
+                    "title" in item &&
+                    typeof item.title === "string" &&
+                    "url" in item &&
+                    typeof item.url === "string" &&
+                    /^https?:\/\//.test(item.url)
+                      ? [{ title: item.title, url: item.url }]
+                      : [],
+                  )
+                : undefined,
             };
           });
           updateChat(activeChatId, (chat) => ({
@@ -1395,6 +1424,7 @@ export default function ChatWorkspace() {
             attachmentIds: attachments.map((attachment) => attachment.id),
             regenerate,
             model: selectedModel ?? preferences.defaultModel,
+            webSearch: webSearchOn,
           }),
           signal: controller.signal,
         });
@@ -1648,6 +1678,88 @@ export default function ChatWorkspace() {
     if (!activeChat || sending) return;
     const lastUserMessage = [...activeChat.messages].reverse().find((item) => item.role === "user");
     if (lastUserMessage) void sendMessage(lastUserMessage.content, true);
+  }
+
+  function toggleWebSearch() {
+    setWebSearchOn((value) => {
+      const next = !value;
+      try {
+        localStorage.setItem("xyro:websearch", next ? "1" : "0");
+      } catch {
+        // Private mode: the toggle just won't persist.
+      }
+      return next;
+    });
+  }
+
+  /** Read a reply aloud with the browser's built-in voice (free, on-device). */
+  function speakMessage(message: Message) {
+    if (!("speechSynthesis" in window)) {
+      setNotice("Read aloud isn’t supported in this browser.");
+      return;
+    }
+    if (speakingId === message.id) {
+      window.speechSynthesis.cancel();
+      setSpeakingId(null);
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const plain = message.content
+      .replace(/```[\s\S]*?```/g, " code block ")
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+      .replace(/[#>*_`~|-]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 1800);
+    if (!plain) return;
+    const utterance = new SpeechSynthesisUtterance(plain);
+    utterance.onend = () => setSpeakingId(null);
+    utterance.onerror = () => setSpeakingId(null);
+    setSpeakingId(message.id);
+    window.speechSynthesis.speak(utterance);
+  }
+
+  /** Voice input via the browser's speech recognition, when available. */
+  function toggleListening() {
+    if (listening) {
+      recognitionRef.current?.stop();
+      setListening(false);
+      return;
+    }
+    const SpeechRecognitionCtor =
+      (window as unknown as { SpeechRecognition?: new () => unknown }).SpeechRecognition ??
+      (window as unknown as { webkitSpeechRecognition?: new () => unknown })
+        .webkitSpeechRecognition;
+    if (!SpeechRecognitionCtor) {
+      setNotice("Voice input isn’t supported in this browser.");
+      return;
+    }
+    const recognition = new SpeechRecognitionCtor() as {
+      lang: string;
+      interimResults: boolean;
+      onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+      onend: (() => void) | null;
+      onerror: (() => void) | null;
+      start: () => void;
+      stop: () => void;
+    };
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.onresult = (event) => {
+      const transcript = event.results[0]?.[0]?.transcript ?? "";
+      if (transcript) {
+        setDraft((value) => (value ? `${value} ${transcript}` : transcript));
+      }
+    };
+    recognition.onend = () => setListening(false);
+    recognition.onerror = () => setListening(false);
+    recognitionRef.current = recognition;
+    try {
+      recognition.start();
+      setListening(true);
+    } catch {
+      setListening(false);
+    }
   }
 
   // Unverified users are NOT gated out: they enter the workspace,
@@ -2081,6 +2193,30 @@ export default function ChatWorkspace() {
                         ) : null}
                       </div>
                     )}
+                    {message.role === "assistant" && message.sources && message.sources.length > 0 && (
+                      <div className="chat-sources">
+                        <span className="chat-sources-label">Sources</span>
+                        {message.sources.map((source, index) => (
+                          <a
+                            key={`${source.url}-${index}`}
+                            className="chat-source-chip"
+                            href={source.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title={source.url}
+                          >
+                            <span className="chat-source-index">{index + 1}</span>
+                            {(() => {
+                              try {
+                                return new URL(source.url).hostname.replace(/^www\./, "");
+                              } catch {
+                                return source.title.slice(0, 40);
+                              }
+                            })()}
+                          </a>
+                        ))}
+                      </div>
+                    )}
                     {message.role === "assistant" && message.content && (
                       <div className="chat-message-actions">
                         <button
@@ -2091,6 +2227,14 @@ export default function ChatWorkspace() {
                         >
                           <Icon name="copy" size={15} />
                           <span>{copiedMessageId === message.id ? "Copied" : "Copy"}</span>
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={speakingId === message.id ? "Stop reading" : "Read aloud"}
+                          title={speakingId === message.id ? "Stop" : "Read aloud"}
+                          onClick={() => speakMessage(message)}
+                        >
+                          <span>{speakingId === message.id ? "Stop" : "Read aloud"}</span>
                         </button>
                         {message.id === activeMessages.at(-1)?.id && (
                           <button
@@ -2226,6 +2370,32 @@ export default function ChatWorkspace() {
                           ? "Shift + Enter for a new line"
                           : "Cmd/Ctrl + Enter to send"}
               </span>
+              <button
+                className={`chat-tool-button${webSearchOn ? " chat-tool-on" : ""}`}
+                type="button"
+                aria-label="Search the web"
+                aria-pressed={webSearchOn}
+                title={
+                  webSearchOn
+                    ? "Web search is on — replies use live web results with sources"
+                    : "Search the web for recent information"
+                }
+                disabled={authState === "unverified" || createMode}
+                onClick={toggleWebSearch}
+              >
+                <Icon name="globe" size={18} />
+              </button>
+              <button
+                className={`chat-tool-button${listening ? " chat-tool-on" : ""}`}
+                type="button"
+                aria-label={listening ? "Stop voice input" : "Voice input"}
+                aria-pressed={listening}
+                title={listening ? "Listening… tap to stop" : "Dictate your message"}
+                disabled={authState === "unverified" || createMode}
+                onClick={toggleListening}
+              >
+                <Icon name="mic" size={18} />
+              </button>
               <div className="chat-attach-wrap">
                 <button
                   className="chat-attach-button"
