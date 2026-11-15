@@ -1,0 +1,169 @@
+/* Landing page additions (2026-11): use cases, conversation steps,
+   developer band, trust & control. All colours come from the design
+   tokens in globals.css — no literal colours here. Classes are
+   prefixed `more-` so nothing collides with the base landing CSS. */
+
+/* ---- Use cases ---- */
+.more-usecases {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 14px;
+  margin-top: 34px;
+}
+.more-usecase-card {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 22px 20px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  color: var(--text);
+  text-decoration: none;
+  box-shadow: var(--shadow-card);
+  transition: transform 160ms ease, border-color 160ms ease;
+}
+.more-usecase-card:hover {
+  transform: translateY(-3px);
+  border-color: var(--accent-line);
+}
+.more-usecase-glyph {
+  font-size: 20px;
+  color: var(--accent-mid);
+}
+.more-usecase-card h3 {
+  margin: 0;
+  font-size: 17px;
+  color: var(--text-strong);
+}
+.more-usecase-card p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--muted-3);
+  flex: 1;
+}
+.more-usecase-arrow {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--accent-mid);
+}
+
+/* ---- How it works (inside a conversation) ---- */
+.more-steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  margin-top: 34px;
+}
+.more-step {
+  padding: 24px 22px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  box-shadow: var(--shadow-card);
+}
+.more-step-number {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--on-accent);
+  background: linear-gradient(120deg, var(--accent-1), var(--accent-2));
+  margin-bottom: 14px;
+}
+.more-step h3 {
+  margin: 0 0 8px;
+  font-size: 16.5px;
+  color: var(--text-strong);
+}
+.more-step p {
+  margin: 0;
+  font-size: 14.5px;
+  line-height: 1.65;
+  color: var(--muted-3);
+}
+
+/* ---- Developer API band ---- */
+.more-band {
+  border-block: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-accent) 45%, transparent);
+  padding: 64px 0;
+}
+.more-dev-grid {
+  display: grid;
+  grid-template-columns: 1.05fr 0.95fr;
+  gap: 40px;
+  align-items: center;
+}
+.more-band-copy h2 {
+  margin: 10px 0 14px;
+  font-size: clamp(26px, 3.4vw, 38px);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  color: var(--text-strong);
+}
+.more-band-copy p {
+  margin: 0 0 16px;
+  font-size: 15.5px;
+  line-height: 1.7;
+  color: var(--muted-3);
+  max-width: 52ch;
+}
+.more-dev-points {
+  margin: 0 0 24px;
+  padding-left: 20px;
+  display: grid;
+  gap: 7px;
+  font-size: 14.5px;
+  line-height: 1.6;
+  color: var(--text);
+}
+.more-code {
+  margin: 0;
+  padding: 20px 22px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--bg-input);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.8px;
+  line-height: 1.7;
+  overflow-x: auto;
+  white-space: pre;
+  box-shadow: var(--shadow-card);
+}
+
+/* ---- Trust & control ---- */
+.more-trust-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+  margin: 34px 0 22px;
+}
+.more-trust-item {
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+}
+.more-trust-item h3 {
+  margin: 0 0 7px;
+  font-size: 15.5px;
+  color: var(--text-strong);
+}
+.more-trust-item p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--muted-3);
+}
+
+@media (max-width: 900px) {
+  .more-steps { grid-template-columns: 1fr; }
+  .more-dev-grid { grid-template-columns: 1fr; gap: 26px; }
+  .more-band { padding: 48px 0; }
+}

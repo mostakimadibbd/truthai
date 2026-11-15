@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import "./landing-more.css";
 
 export const metadata: Metadata = {
   title: { absolute: "Xyro AI — free AI chat with open models" },
@@ -71,6 +72,67 @@ const exampleModels = [
   { name: "Qwen3 235B", maker: "Qwen", note: "Large general-purpose model" },
   { name: "Mistral Small 3.1", maker: "Mistral AI", note: "Text and image understanding" },
 ];
+
+const useCases = [
+  {
+    glyph: "✎",
+    audience: "Students",
+    copy: "Understand difficult material, summarise readings and PDFs, and practise with questions before the exam.",
+    href: "/for-students",
+    cta: "Xyro AI for students",
+  },
+  {
+    glyph: "✒",
+    audience: "Writers",
+    copy: "Outlines, restructuring and line-level polish for articles, essays and books — with your voice in charge.",
+    href: "/for-writers",
+    cta: "Xyro AI for writers",
+  },
+  {
+    glyph: "▶",
+    audience: "Creators",
+    copy: "Hooks, scripts, captions and created images for the channels you publish on, all from one chat.",
+    href: "/for-creators",
+    cta: "Xyro AI for creators",
+  },
+  {
+    glyph: "</>",
+    audience: "Developers",
+    copy: "An OpenAI-compatible API on the same free models — 100,000 tokens a day, keys you name, a real dashboard.",
+    href: "/developers",
+    cta: "Xyro AI for developers",
+  },
+  {
+    glyph: "◈",
+    audience: "Business & teams",
+    copy: "Drafting, summarising and brainstorming for small teams, with the free-service limits stated plainly.",
+    href: "/for-business",
+    cta: "Xyro AI for business",
+  },
+];
+
+const conversationSteps = [
+  {
+    number: "1",
+    title: "Ask anything",
+    copy: "Type your question, or attach an image, PDF or document when the answer depends on one. Custom instructions mean the model already knows your context.",
+  },
+  {
+    number: "2",
+    title: "Get a streamed answer from a free model",
+    copy: "Replies stream in live from OpenRouter's free pool — Auto routing, or a model you picked. Stop or regenerate whenever a reply drifts.",
+  },
+  {
+    number: "3",
+    title: "Continue, export, or build on it",
+    copy: "Keep iterating in the same chat, export it as Markdown, pin it for later — or take the same models into your own app through the developer API.",
+  },
+];
+
+const apiSnippet = String.raw`curl https://truthai-six.vercel.app/api/v1/chat/completions \
+  -H "Authorization: Bearer xyro_sk_live_…" \
+  -H "Content-Type: application/json" \
+  -d '{ "messages": [{ "role": "user", "content": "Hello!" }] }'`;
 
 const faqTeaser = [
   {
@@ -176,6 +238,29 @@ export default function Home() {
         </div>
       </section>
 
+      <section className="section page-width">
+        <div className="section-heading">
+          <span className="eyebrow">Use cases</span>
+          <h2>However you work,<br /><span className="gradient-text">start with a question.</span></h2>
+          <p>
+            Students, writers, creators, developers and small teams use the
+            same free workspace in different ways. Pick your page — each one
+            is honest about what the free service can and can&apos;t do.
+          </p>
+          <Link href="/use-cases" className="text-link">See all use cases <span aria-hidden="true">→</span></Link>
+        </div>
+        <div className="more-usecases">
+          {useCases.map((item) => (
+            <Link className="more-usecase-card" href={item.href} key={item.audience}>
+              <span className="more-usecase-glyph" aria-hidden="true">{item.glyph}</span>
+              <h3>{item.audience}</h3>
+              <p>{item.copy}</p>
+              <span className="more-usecase-arrow">{item.cta} <span aria-hidden="true">→</span></span>
+            </Link>
+          ))}
+        </div>
+      </section>
+
       <section className="section section-quiet">
         <div className="page-width">
           <div className="section-heading">
@@ -223,6 +308,24 @@ export default function Home() {
           free-model performance varies, and the honest test is trying
           your own prompt.
         </p>
+        <Link href="/models" className="text-link">How models work in Xyro AI <span aria-hidden="true">→</span></Link>
+      </section>
+
+      <section className="section page-width">
+        <div className="section-heading">
+          <span className="eyebrow">How it works</span>
+          <h2>Inside every conversation.</h2>
+          <p>Three steps, the same whether you&apos;re studying, writing or building.</p>
+        </div>
+        <div className="more-steps">
+          {conversationSteps.map((step) => (
+            <article className="more-step" key={step.number}>
+              <span className="more-step-number" aria-hidden="true">{step.number}</span>
+              <h3>{step.title}</h3>
+              <p>{step.copy}</p>
+            </article>
+          ))}
+        </div>
       </section>
 
       <section className="section section-quiet">
@@ -254,6 +357,65 @@ export default function Home() {
               <span className="clarity-state">Your control</span>
             </article>
           </div>
+        </div>
+      </section>
+
+      <section className="more-band" aria-label="Developer API">
+        <div className="page-width more-dev-grid">
+          <div className="more-band-copy">
+            <span className="eyebrow">Developer API</span>
+            <h2>Build on the same<br /><span className="gradient-text">free models.</span></h2>
+            <p>
+              Xyro AI has a public, OpenAI-compatible API. Activate it in
+              Settings, name a key, and call the same free models the app
+              uses — with a usage dashboard, per-model costs and
+              per-request logs included.
+            </p>
+            <ul className="more-dev-points">
+              <li>OpenAI-shaped requests and errors — your existing code mostly just works</li>
+              <li>100,000 tokens a day on the free plan, 20 requests a minute per key</li>
+              <li>Keys you name yourself, so every call is easy to trace</li>
+            </ul>
+            <div className="hero-actions">
+              <Link href="/developers" className="button button-primary">
+                Read the developer guide <span aria-hidden="true">↗</span>
+              </Link>
+              <Link href="/settings/developer" className="button button-quiet">
+                Open the Developer tab <span aria-hidden="true">→</span>
+              </Link>
+            </div>
+          </div>
+          <pre className="more-code" aria-label="Example API request">{apiSnippet}</pre>
+        </div>
+      </section>
+
+      <section className="section page-width">
+        <div className="section-heading">
+          <span className="eyebrow">Trust &amp; control</span>
+          <h2>Your chats belong to you.</h2>
+          <p>
+            Not as a slogan — as settings you can open right now. The{" "}
+            <Link href="/privacy-center" className="text-link">privacy center</Link>{" "}
+            walks through every one of them.
+          </p>
+        </div>
+        <div className="more-trust-grid">
+          <article className="more-trust-item">
+            <h3>Export anytime</h3>
+            <p>Download all your chats and account data as JSON or Markdown from Settings → Data controls — or export a single chat from its sidebar menu.</p>
+          </article>
+          <article className="more-trust-item">
+            <h3>Delete anytime</h3>
+            <p>One chat, every chat, your uploaded files, or your whole account. Self-serve and immediate — no support emails, no waiting periods.</p>
+          </article>
+          <article className="more-trust-item">
+            <h3>No training on your chats</h3>
+            <p>Xyro AI does not train models on your conversations. Your prompts go to OpenRouter and the selected model provider only to generate your reply.</p>
+          </article>
+          <article className="more-trust-item">
+            <h3>Sessions you can see</h3>
+            <p>Settings → Security lists every signed-in device with its recent activity. Revoke any session — or all of them — on the spot.</p>
+          </article>
         </div>
       </section>
 

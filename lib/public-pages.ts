@@ -526,6 +526,36 @@ Object.assign(articles, {
       "A record of meaningful product updates, newest first. Dates are when the change was completed.",
     sections: [
       {
+        title: "November 15, 2026 · Developer platform",
+        body: [
+          "Settings gained a Developer tab: activate access with a short project questionnaire, create API keys (each with a name you choose, so keys are easy to tell apart), and call an OpenAI-compatible API at /api/v1 — the same free models as the app, with 100,000 tokens a day on the free plan. The tab is a real console: usage and cost by model with charts, per-request activity with stored input/output logs, the access points your keys call from, and copy-paste quickstarts. The [developers page](/developers) and [API terms](/api-terms) document it, and the logging is disclosed there and in the [privacy center](/privacy-center).",
+        ],
+      },
+      {
+        title: "November 15, 2026 · Usage analytics",
+        body: [
+          "Every chat turn, API call and image creation is now metered — tokens, model and estimated cost — into a per-request ledger and per-minute and daily rollups. Your own totals power the new token charts in Settings → Usage; the platform-wide view is restricted to Xyro AI administrators and keeps counting even if a chat is later deleted, as disclosed in the [privacy center](/privacy-center). An admin console at /admin shows the live picture.",
+        ],
+      },
+      {
+        title: "November 15, 2026 · Chat experience",
+        body: [
+          "Signing in now lands on a fresh new chat instead of reopening your last conversation. Chats can be pinned to a Pinned group at the top of the sidebar; replies got a calmer reading design (better typography, tables and code blocks, a streaming cursor); the greeting carries your name in a gradient, suggestions are cards, and a scroll-to-bottom button appears in long conversations.",
+        ],
+      },
+      {
+        title: "November 15, 2026 · Google sign-in, simplified",
+        body: [
+          "Continue with Google no longer waits for the human check — that check now guards only email/password sign-in and sign-up, and the server confirms the provider from the verified token. The Google flow is popup-first (the redirect return leg silently failed in some privacy-focused browsers), and a brand-new Google account gets a one-time terms consent step instead of a dead-end error.",
+        ],
+      },
+      {
+        title: "November 15, 2026 · A calmer blue design",
+        body: [
+          "The full palette moved from pink and purple to blue and azure across both themes — every accent, gradient, badge and shadow — and the phone layout was fixed where the redesign had clipped the chat empty state and crowded the model picker. New public pages arrived with it: [models](/models), [use cases](/use-cases) with pages for [students](/for-students), [writers](/for-writers), [creators](/for-creators) and [business](/for-business), plus a [roadmap](/roadmap).",
+        ],
+      },
+      {
         title: "November 15, 2026 · Image creation and deeper file analysis",
         body: [
           "Image creation arrived: the composer's + menu now has 'Create an image', which describes a picture, generates it with a free image model, embeds an invisible Xyro AI watermark before storage, and saves the result as private Cloudinary media in the chat. Creation is limited to 10 per day and follows the free-only rule honestly — when no free image model is in the catalogue, the app says so instead of faking a result. File analysis deepened too: PDF text is now extracted on our own server (no parsing plugins), and chats with image attachments are automatically routed to a vision-capable free model.",
@@ -851,6 +881,12 @@ Object.assign(articles, {
         ],
       },
       {
+        title: "Microsoft Bing (web search)",
+        body: [
+          "Purpose: live web results in chat. When you turn on the web search toggle in the composer, the text of your message is sent as a search query to Bing's public results page, and the top results are used as context for the reply (the sources are shown under the answer). When the toggle is off, no query is sent. Links you paste into a chat are fetched directly by Xyro AI's server, not through Bing.",
+        ],
+      },
+      {
         title: "Changes",
         body: [
           "If a subprocessor is added or replaced, this page will be updated. Questions: see the [contact page](/contact).",
@@ -991,6 +1027,225 @@ Object.assign(articles, {
         body: [
           "Separately from the public API, the web app talks to first-party endpoints under /api (chat, chats, uploads, settings, account, export, models, usage). Those require the signed session cookie plus a Firebase ID token for the same account, same-origin headers on mutations, and per-route rate limits — they are internal, may change without notice, and are not a contract.",
           "Two endpoints are intentionally public and safe to poll: /api/health, which returns configuration booleans only, and this website's public pages.",
+        ],
+      },
+    ],
+  },
+  models: {
+    title: "The models behind Xyro AI",
+    intro:
+      "Xyro AI runs entirely on OpenRouter's free model pool. This page explains how model choice works, what Auto (Free) does, and why the catalogue you see in the app is the only list we treat as current.",
+    sections: [
+      {
+        title: "Free models only — by rule, not by trial",
+        body: [
+          "Every model Xyro AI can call is one OpenRouter lists as free. There is no paid tier hiding behind the picker: when a model costs money, Xyro AI simply doesn't offer it, and the server only ever requests models whose price is zero.",
+          "That pool is genuinely capable — large open models from makers such as Meta, Google, DeepSeek, Qwen and Mistral AI regularly appear in it, covering general chat, reasoning, code, and image understanding. A few examples are listed on the [home page](/), but treat them as examples only.",
+        ],
+      },
+      {
+        title: "Auto (Free): the zero-decision default",
+        body: [
+          "With Auto (Free), OpenRouter routes each prompt to an available free model. It is the default in chat and the recommended starting point: no decisions, and if one model is busy, routing can land on another.",
+          "Prefer a specific model? Pick it in the chat's model picker or set a default in Settings → General. If your pick is busy or fails, chat falls back through other free models — and ultimately to Auto (Free) — instead of erroring out, and tells you when it does.",
+        ],
+      },
+      {
+        title: "Vision and image creation",
+        body: [
+          "Some free models can see: attach an image and the conversation is routed to a vision-capable free model that can describe, read and reason about it. Documents (PDF, TXT, Markdown, CSV) are handled differently — their text is extracted and analysed in the conversation, as [the file guide](/help-files) explains.",
+          "Image creation uses free image sources: a free image-capable model on OpenRouter when one is available, otherwise a free generation service. Every created image carries an invisible Xyro AI watermark and is stored as private Cloudinary media. When no free image source can respond, the app says so honestly instead of faking a result — see [image creation](/help-image-creation).",
+        ],
+      },
+      {
+        title: "The catalogue changes — the app is the source of truth",
+        body: [
+          "Providers adjust their free pools: models arrive, leave, and get busy at peak times. We publish no fixed model list and no benchmark scores, because both would go stale. The live list is always in the chat model picker, in Settings → General, and — for API keys — from `GET /api/v1/models` (see [developers](/developers)).",
+          "Free also means shared: at peak times a model can be slow or temporarily unavailable. Xyro AI's answer to that is the fallback chain above, not a quiet switch to anything paid.",
+        ],
+      },
+    ],
+    faqs: [
+      {
+        q: "Can I use paid models like the big flagship ones?",
+        a: "No. Xyro AI only calls models OpenRouter lists as free. If a flagship model has a free variant in the pool, it appears in the picker while it's free; the paid version is never offered.",
+      },
+      {
+        q: "Which model answers when I choose Auto (Free)?",
+        a: "OpenRouter routes the prompt to an available free model at that moment. The model used is shown with the reply, and API responses report it in the usage data on your Developer dashboard.",
+      },
+      {
+        q: "Why did a model disappear from the picker?",
+        a: "Its provider changed its free offering. The picker is fed by the live catalogue, so it always reflects what is actually free right now.",
+      },
+    ],
+  },
+  "use-cases": {
+    title: "What people do with Xyro AI",
+    intro:
+      "One free workspace, many kinds of work. These pages describe the most common ways people use Xyro AI — with the honest limits of a free service kept in view.",
+    cards: [
+      { title: "For students", href: "/for-students", blurb: "Understand difficult material, summarise readings, and practise — without outsourcing the thinking." },
+      { title: "For writers", href: "/for-writers", blurb: "Draft, restructure and polish long-form work while keeping your own voice." },
+      { title: "For creators", href: "/for-creators", blurb: "Ideas, scripts, captions and created images for the channels you publish on." },
+      { title: "For developers", href: "/developers", blurb: "An OpenAI-compatible API on the same free models, with 100,000 tokens a day." },
+      { title: "For business & teams", href: "/for-business", blurb: "Everyday drafting, summarising and brainstorming for small teams — free, with clear limits." },
+    ],
+    sections: [
+      {
+        title: "One workspace, many jobs",
+        body: [
+          "The pattern is the same whatever the job: ask in plain language, attach a file when the answer depends on one, follow up until it's right, then export or keep the chat for later. Custom instructions (Settings → Personalization) let you teach Xyro AI your context once instead of repeating it in every chat.",
+          "New here? [Getting started](/help-getting-started) takes about a minute, and the [models page](/models) explains how to choose between Auto (Free) and a named free model for a given task.",
+        ],
+      },
+      {
+        title: "Honest limits for every use case",
+        body: [
+          "Xyro AI is a free service on free tiers: fair-use limits apply (see [pricing](/pricing)), free models can be busy, and AI answers can be wrong — sometimes confidently. For study, work or publication, treat the output as a strong first draft of the thinking, and keep your own judgment as the final step.",
+        ],
+      },
+    ],
+  },
+  "for-students": {
+    title: "Xyro AI for students",
+    intro:
+      "A free study partner that explains, summarises and quizzes — built to help you understand your material, not to do your thinking for you.",
+    sections: [
+      {
+        title: "Understand, don't just answer",
+        body: [
+          "Ask for an explanation at your level: 'Explain entropy like I'm a first-year, then give me a harder version.' Follow up until it clicks, ask for worked examples, and ask the model to quiz you — questions first, answers after you try. That loop is where the learning happens.",
+          "Pick a model per task in the chat picker, or stay on Auto (Free). Either way it costs nothing, which matters on a student budget: there is no plan to upgrade to and no card to add.",
+        ],
+      },
+      {
+        title: "Work with your readings",
+        body: [
+          "Attach lecture slides, articles or chapters as PDF, TXT or Markdown (up to 10 MB) and ask for a summary, the key arguments, or the parts most likely to be examined. Images work too — photograph a diagram or a whiteboard and ask what it shows. See [uploading & analysing files](/help-files) for formats and limits.",
+          "Chats are saved and searchable, so a revision session from October is still there in January. Rename chats by subject, and export the useful ones from the sidebar.",
+        ],
+      },
+      {
+        title: "Your work stays yours",
+        body: [
+          "Use Xyro AI the way you'd use a tutor: to understand, practise and get feedback on your drafts. Submitting AI output as your own work can breach your institution's rules — and it skips the learning the qualification is meant to certify. Xyro AI doesn't train models on your chats, and you can export or delete everything from Settings at any time (see the [privacy center](/privacy-center)).",
+          "Always check facts, quotes and citations against your course materials: models can invent references that look real.",
+        ],
+      },
+    ],
+  },
+  "for-writers": {
+    title: "Xyro AI for writers",
+    intro:
+      "A drafting partner for articles, essays, newsletters and books — outlining, restructuring and line-level polish, with your voice kept in charge.",
+    sections: [
+      {
+        title: "From blank page to structure",
+        body: [
+          "Start with the messy version: paste your notes, dictate the argument in rough form, and ask for an outline, three possible openings, or the strongest counter-argument to your own draft. Ask for the structure first and the sentences second — it's a better order, and the chat remembers the thread while you iterate.",
+          "Custom instructions (Settings → Personalization) are a writer's best friend here: note your audience, your tone, and the words you never use, and every chat starts from there.",
+        ],
+      },
+      {
+        title: "Editing at every level",
+        body: [
+          "Attach a draft as TXT or Markdown and work at whichever level you need: structural notes on the whole piece, paragraph-by-paragraph tightening, or a final pass for clarity and consistency. Ask 'what would you cut?' as often as 'what would you add?' — and regenerate or stop a reply whenever it drifts from your intent.",
+          "Long pieces can live in one chat: history syncs across your devices, and you can export a conversation as Markdown when it's time to move the text into your publishing tool.",
+        ],
+      },
+      {
+        title: "Honest notes for writers",
+        body: [
+          "The models are free ones (see [models](/models)), so long, subtle work benefits from a named model chosen in the picker and from breaking big edits into passes. And the usual rule applies with extra force for publication: facts, names, dates and quotes from a model must be verified before they carry your byline.",
+        ],
+      },
+    ],
+  },
+  "for-creators": {
+    title: "Xyro AI for creators",
+    intro:
+      "Ideas, scripts, captions and images for people who publish — a free creative partner for the channels you run.",
+    sections: [
+      {
+        title: "Never start from a blank page",
+        body: [
+          "Brainstorm video angles, hooks, titles and series formats; turn one long idea into a week of posts; draft a script, then ask for a tighter 60-second version and three caption options. Repurposing is where a chat workspace shines: paste the source once, then ask for every format you need.",
+          "Attach a photo and ask what works in it, or describe the thumbnail you're imagining and refine the words before you design it.",
+        ],
+      },
+      {
+        title: "Create images in the chat",
+        body: [
+          "The composer's + menu has 'Create an image': describe the picture and Xyro AI generates it with a free image source, right inside the conversation (10 creations a day). Every created image carries an invisible Xyro AI watermark and is stored as your private media — the watermark is a provenance signal, explained honestly on the [XyroAIDetect page](/xyroaidetect), including its limits.",
+          "When no free image source is available at that moment, the app says so instead of faking a result. See [image creation](/help-image-creation) for the details.",
+        ],
+      },
+      {
+        title: "Keep your voice, check your facts",
+        body: [
+          "Set your tone, your audience and your recurring formats as custom instructions (Settings → Personalization) so drafts start close to your style. Then edit like it matters — because audiences can tell. And verify claims, stats and quotes before publishing: models can be confidently wrong, and it's your name on the post.",
+        ],
+      },
+    ],
+  },
+  "for-business": {
+    title: "Xyro AI for business & teams",
+    intro:
+      "Everyday AI help for small businesses and teams — drafting, summarising and brainstorming on a free service, with the limits stated plainly.",
+    sections: [
+      {
+        title: "Useful from the first morning",
+        body: [
+          "Draft the email, summarise the report, turn meeting notes into actions, brainstorm campaign angles, prepare for the negotiation. Attach the PDF or spreadsheet export (PDF, TXT, Markdown, CSV up to 10 MB) and ask the questions you'd ask a sharp colleague: what are the risks, what's missing, what should we do first?",
+          "Each person uses their own free account; chats sync across their devices, and custom instructions can hold the shared context — your products, your tone, your market — so drafts start on-brief.",
+        ],
+      },
+      {
+        title: "The developer option",
+        body: [
+          "Need the models inside your own tool or workflow? The [developer API](/developers) is OpenAI-compatible: activate it in Settings → Developer, name a key, and call the same free models with 100,000 tokens a day on the free plan, with a usage dashboard and per-request logs.",
+        ],
+      },
+      {
+        title: "Honest limits for business use",
+        body: [
+          "Xyro AI is a free service, and this page won't pretend otherwise:",
+          "- Accounts are individual today — there is no shared team workspace, central billing or admin console for your organisation yet (it's on the [roadmap](/roadmap) as exploring)",
+          "- Fair-use limits apply per account (see [pricing](/pricing)), and free models can be busy at peak times",
+          "- Prompts are processed by OpenRouter and the selected model provider under their policies (see [subprocessors](/subprocessors)) — keep regulated or highly sensitive data out, as you would with any external tool",
+          "What you do get is real control over your own data: export or delete chats, files or the whole account at any time from Settings (see the [privacy center](/privacy-center)).",
+        ],
+      },
+    ],
+  },
+  roadmap: {
+    title: "Where Xyro AI is heading",
+    intro:
+      "Directions, not promises. Everything on this page is labelled planned or exploring, carries no date, and may change as free tiers, models and feedback evolve. What has actually shipped is on the [changelog](/changelog).",
+    sections: [
+      {
+        title: "Planned",
+        body: [
+          "- Streaming responses for the public API (the API is request/response today; chat in the app already streams)",
+          "- More free models in the picker as providers add them to OpenRouter's free pool — this happens continuously and needs no announcement",
+          "- Richer file analysis: more document types and better handling of large PDFs within free-tier limits",
+          "- The XyroAIDetect upload tool, with its behaviour published before launch (see [XyroAIDetect](/xyroaidetect))",
+        ],
+      },
+      {
+        title: "Exploring",
+        body: [
+          "- Shared workspaces for teams, so a group can keep chats and context together (accounts are individual today)",
+          "- An installable-app experience with offline access to your recent chats",
+          "- More languages in the interface, following the languages our users actually write in",
+          "- Deeper usage insights in the Developer dashboard, building on the per-model and per-key data already collected",
+        ],
+      },
+      {
+        title: "What won't change",
+        body: [
+          "The commitments the product was built on stay: free models only, no card, honest limits stated in plain language, and your data exportable and deletable at any time. If a direction ever conflicts with those, the direction loses. Suggest a direction of your own via the [contact page](/contact).",
         ],
       },
     ],

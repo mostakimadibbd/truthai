@@ -89,7 +89,10 @@ export default async function RootLayout({
                 <Link href="/about">About</Link>
                 <Link href="/company">Company</Link>
                 <Link href="/pricing">Pricing</Link>
+                <Link href="/models">Models</Link>
+                <Link href="/use-cases">Use cases</Link>
                 <Link href="/changelog">Changelog</Link>
+                <Link href="/roadmap">Roadmap</Link>
                 <Link href="/xyroaidetect">XyroAIDetect</Link>
               </div>
               <div>
