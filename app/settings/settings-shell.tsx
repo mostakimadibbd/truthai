@@ -1621,17 +1621,16 @@ Content-Type: application/json
             free model, and a usage dashboard with per-request logs. Answer a few questions
             to activate — your first API key is issued right away.
           </p>
-          {overview.emailVerified ? (
-            <div className="settings-inline">
-              <button type="button" className="button button-primary" onClick={() => setActivateOpen(true)}>
-                Activate developer access
-              </button>
-            </div>
-          ) : (
+          <div className="settings-inline">
+            <button type="button" className="button button-primary" onClick={() => setActivateOpen(true)}>
+              Activate developer access
+            </button>
+          </div>
+          {!overview.emailVerified && (
             <p className="settings-hint">
-              Verify your email address first — developer access needs a verified account,
-              the same rule as sending messages. Use the verification banner in your
-              workspace, then come back here.
+              Note: finishing activation needs a verified email address — the same rule as
+              sending messages. If yours isn’t verified yet, use the verification banner in
+              your workspace first; the activation will tell you if it isn’t.
             </p>
           )}
         </div>
