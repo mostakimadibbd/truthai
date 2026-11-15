@@ -12,6 +12,7 @@ import {
 import { getFirebaseAdminAuth } from "@/lib/server/firebase-admin";
 import { signInWithPasswordServer } from "@/lib/server/identity-toolkit";
 import { checkPasswordNotBreached } from "@/lib/server/password";
+import { passwordUnmetMessage } from "@/lib/password-rules";
 import { revokeSession } from "@/lib/server/session";
 import {
   deleteSessionRecord,
@@ -66,6 +67,10 @@ export async function POST(request: NextRequest) {
       "PASSWORD_UNCHANGED",
       "Choose a new password that’s different from your current one.",
     );
+  }
+  const unmetPassword = passwordUnmetMessage(newPassword);
+  if (unmetPassword) {
+    return authErrorResponse(400, "PASSWORD_RULES", unmetPassword);
   }
 
   const auth = await authenticateSessionUser(request);

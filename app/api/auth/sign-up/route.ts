@@ -15,6 +15,7 @@ import {
   getFirebaseAdminFirestore,
 } from "@/lib/server/firebase-admin";
 import { checkPasswordNotBreached } from "@/lib/server/password";
+import { passwordUnmetMessage } from "@/lib/password-rules";
 import { createSession, isSessionConfigured } from "@/lib/server/session";
 import { getDeviceContext } from "@/lib/server/device";
 import {
@@ -63,6 +64,13 @@ export async function POST(request: NextRequest) {
     turnstileToken.length > 2048
   ) {
     return errorResponse(400, "INVALID_SIGN_UP", "Check the name, email, password, and security check.");
+  }
+
+  // Composition rules (shared with the form's live checklist):
+  // length + lowercase + uppercase + symbol are all mandatory.
+  const unmetPassword = passwordUnmetMessage(password);
+  if (unmetPassword) {
+    return errorResponse(400, "PASSWORD_RULES", unmetPassword);
   }
 
   if (!isSessionConfigured()) {

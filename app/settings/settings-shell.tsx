@@ -22,6 +22,7 @@ import SignOutDialog, { type SignOutVariant } from "@/components/sign-out-dialog
 import { isFirebaseConfigured, tryGetFirebaseAuth } from "@/lib/firebase/auth-client";
 import { tryGetFirebaseFirestore } from "@/lib/firebase/firestore-client";
 import { performSignOut } from "@/lib/firebase/sign-out";
+import { passwordMeetsRules, passwordRuleResults } from "@/lib/password-rules";
 import {
   MAX_INSTRUCTIONS_LENGTH,
   THEMES,
@@ -1194,12 +1195,25 @@ function SecurityTab({
               onChange={(event) => setNewPassword(event.target.value)}
               autoComplete="new-password"
             />
-            <p className="settings-hint">At least 10 characters, and not a password that appears in known data breaches.</p>
+            {newPassword.length > 0 && (
+              <ul className="password-rule-list" aria-live="polite">
+                {passwordRuleResults(newPassword).map((rule) => (
+                  <li
+                    key={rule.id}
+                    className={rule.met ? "pw-rule-met" : "pw-rule-unmet"}
+                  >
+                    <span aria-hidden="true">{rule.met ? "✓" : "✕"}</span>
+                    {rule.label}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="settings-hint">All four rules above are required, and the password must not appear in known data breaches.</p>
             <button
               type="button"
               className="button button-primary"
               onClick={() => void changePassword()}
-              disabled={passwordBusy || !currentPassword || newPassword.length < 10}
+              disabled={passwordBusy || !currentPassword || !passwordMeetsRules(newPassword)}
             >
               {passwordBusy ? "Changing…" : "Change password"}
             </button>

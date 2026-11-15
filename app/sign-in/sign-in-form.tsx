@@ -20,6 +20,12 @@ import { nextPathOrDefault } from "@/lib/auth-redirect";
 import TurnstileWidget from "@/components/turnstile-widget";
 import TurnstileBoundary from "@/components/turnstile-boundary";
 import { getDeviceId } from "@/lib/device-fingerprint";
+import {
+  passwordMeetsRules,
+  passwordRuleResults,
+  passwordStrength,
+  passwordUnmetMessage,
+} from "@/lib/password-rules";
 
 type AuthMode = "sign-in" | "sign-up";
 
@@ -122,6 +128,8 @@ export default function SignInForm({
   const [googleTermsUser, setGoogleTermsUser] = useState<User | null>(null);
   const [googleTermsAccepted, setGoogleTermsAccepted] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [signupStep, setSignupStep] = useState<"idle" | "creating" | "verify">("idle");
   const [showReset, setShowReset] = useState(false);
   const [resetToken, setResetToken] = useState("");
@@ -184,15 +192,28 @@ export default function SignInForm({
     if (!configured) return;
 
     // A Google redirect return is only "expected" when this tab
-    // actually started one (the flag below). Errors from
-    // getRedirectResult with no return in flight — stale state from
-    // an old attempt, or a browser that blocks the storage the
-    // redirect flow needs — must NEVER surface as a sign-in error on
-    // a fresh visit. That was the "We couldn't complete sign-in"
-    // banner appearing before the user had tried anything.
+    // started one a moment ago. The flag is consumed (removed) the
+    // moment it's read and only counts as expected when it's fresh
+    // (< 10 minutes old, timestamped when written). Anything else —
+    // a leftover flag from an old failed attempt (sessionStorage
+    // survives tab restores, so one bad attempt used to re-arm the
+    // error on EVERY later visit), a stale redirect result replayed
+    // by the browser, or a browser that blocks the storage the
+    // redirect flow needs — is handled SILENTLY: no error banner,
+    // no consent card, nothing. A successful exchange still signs
+    // the user in; anything else leaves the clean form, and the
+    // popup-first Google button is right there to try again.
     let expectedReturn = false;
+    let flagTermsAccepted = false;
     try {
-      expectedReturn = sessionStorage.getItem(GOOGLE_REDIRECT_FLAG) !== null;
+      const raw = sessionStorage.getItem(GOOGLE_REDIRECT_FLAG);
+      if (raw) {
+        sessionStorage.removeItem(GOOGLE_REDIRECT_FLAG);
+        const flag = JSON.parse(raw) as { termsAccepted?: boolean; ts?: number };
+        flagTermsAccepted = flag.termsAccepted === true;
+        expectedReturn =
+          typeof flag.ts === "number" && Date.now() - flag.ts < 10 * 60 * 1000;
+      }
     } catch {
       expectedReturn = false;
     }
@@ -211,13 +232,9 @@ export default function SignInForm({
         if (!active) return;
         if (!result?.user) {
           if (expectedReturn) {
-            // We sent the user to Google and came back with nothing
-            // readable: the browser blocked the return leg's storage.
-            try {
-              sessionStorage.removeItem(GOOGLE_REDIRECT_FLAG);
-            } catch {
-              // Nothing to clean up.
-            }
+            // We sent the user to Google just now and came back with
+            // nothing readable: the browser blocked the return leg's
+            // storage.
             setError(
               "Google sign-in didn’t complete — your browser blocked the return step. Please try again; if it keeps happening, allow cookies for this site or use email sign-in.",
             );
@@ -229,38 +246,33 @@ export default function SignInForm({
         // return finishes right here: exchange the token for a
         // session and go straight into the app — no form, no second
         // step. The only thing carried across the redirect is the
-        // sign-up terms flag.
-        let termsAccepted = false;
-        try {
-          const raw = sessionStorage.getItem(GOOGLE_REDIRECT_FLAG);
-          if (raw) {
-            const flag = JSON.parse(raw) as { termsAccepted?: boolean };
-            termsAccepted = flag.termsAccepted === true;
-          }
-          sessionStorage.removeItem(GOOGLE_REDIRECT_FLAG);
-        } catch {
-          termsAccepted = false;
-        }
+        // sign-up terms flag, already read (and consumed) above.
         setBusy(true);
-        setNotice("Finishing sign-in…");
+        if (expectedReturn) setNotice("Finishing sign-in…");
         try {
-          const outcome = await establishGoogleSession(result.user, termsAccepted);
+          const outcome = await establishGoogleSession(result.user, flagTermsAccepted);
           if (!active) return;
           setNotice("");
-          if (outcome === "terms") {
-            setGoogleTermsUser(result.user);
-          } else if (outcome === "ok") {
+          if (outcome === "ok") {
             await completeSignIn(result.user);
+          } else if (!expectedReturn) {
+            // Stale result replay: stay completely silent (undo any
+            // error establishGoogleSession set, show no card).
+            setError("");
+          } else if (outcome === "terms") {
+            setGoogleTermsUser(result.user);
           }
-          // "failed": establishGoogleSession already set the error.
+          // Fresh + "failed": establishGoogleSession set the error.
         } catch (sessionError) {
           if (active) {
             setNotice("");
-            setError(
-              sessionError instanceof Error
-                ? sessionError.message
-                : getAuthErrorMessage(sessionError),
-            );
+            if (expectedReturn) {
+              setError(
+                sessionError instanceof Error
+                  ? sessionError.message
+                  : getAuthErrorMessage(sessionError),
+              );
+            }
           }
         } finally {
           if (active) setBusy(false);
@@ -350,6 +362,19 @@ export default function SignInForm({
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (mode === "sign-up") {
+      // Field-level problems first, in plain words, before the
+      // security check — the live checklist shows the same state.
+      const unmet = passwordUnmetMessage(password);
+      if (unmet) {
+        setError(unmet);
+        return;
+      }
+      if (confirmPassword !== password) {
+        setError("Passwords don’t match. Type the same password in both password fields.");
+        return;
+      }
+    }
     if (!turnstileSiteKey) {
       setError("Security verification isn’t configured. Please contact the site administrator.");
       return;
@@ -515,7 +540,7 @@ export default function SignInForm({
         try {
           sessionStorage.setItem(
             GOOGLE_REDIRECT_FLAG,
-            JSON.stringify({ termsAccepted }),
+            JSON.stringify({ termsAccepted, ts: Date.now() }),
           );
           await signInWithRedirect(auth, provider, browserPopupRedirectResolver);
           return;
@@ -613,7 +638,9 @@ export default function SignInForm({
     busy ||
     !turnstileSiteKey ||
     !turnstileToken ||
-    (mode === "sign-up" && !termsAccepted);
+    (mode === "sign-up" && !termsAccepted) ||
+    (mode === "sign-up" &&
+      (!passwordMeetsRules(password) || confirmPassword !== password));
 
   return (
     <div className="auth-layout">
@@ -889,8 +916,72 @@ export default function SignInForm({
               </label>
 
               {mode === "sign-up" && (
-                <p className="password-help">
-                  Use 10 or more characters. We’ll check it securely against known breaches before creating your account.
+                <div className="password-rules" aria-live="polite">
+                  <div className="password-strength">
+                    <div className="password-strength-bar" aria-hidden="true">
+                      {[1, 2, 3, 4].map((segment) => (
+                        <span
+                          key={segment}
+                          className={`pw-seg${passwordStrength(password).score >= segment ? ` pw-seg-on pw-level-${passwordStrength(password).score}` : ""}`}
+                        />
+                      ))}
+                    </div>
+                    <span className="password-strength-label">
+                      {password
+                        ? `Password strength: ${passwordStrength(password).label}`
+                        : "Password strength"}
+                    </span>
+                  </div>
+                  <ul className="password-rule-list">
+                    {passwordRuleResults(password).map((rule) => (
+                      <li
+                        key={rule.id}
+                        className={rule.met ? "pw-rule-met" : "pw-rule-unmet"}
+                      >
+                        <span aria-hidden="true">{rule.met ? "✓" : "✕"}</span>
+                        {rule.label}
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="password-help">
+                    We’ll also check it securely against known data breaches before creating your account.
+                  </p>
+                </div>
+              )}
+
+              {mode === "sign-up" && (
+                <label className="form-field password-field">
+                  <span>Confirm password</span>
+                  <input
+                    type={showConfirmPassword ? "text" : "password"}
+                    name="confirmPassword"
+                    autoComplete="new-password"
+                    value={confirmPassword}
+                    onChange={(event) => setConfirmPassword(event.target.value)}
+                    disabled={!configured || busy}
+                    placeholder="Type the same password again"
+                    required
+                  />
+                  <button
+                    type="button"
+                    className="password-toggle"
+                    onClick={() => setShowConfirmPassword((value) => !value)}
+                    aria-label={showConfirmPassword ? "Hide confirm password" : "Show confirm password"}
+                    tabIndex={-1}
+                  >
+                    {showConfirmPassword ? "Hide" : "Show"}
+                  </button>
+                </label>
+              )}
+
+              {mode === "sign-up" && confirmPassword.length > 0 && (
+                <p
+                  className={`password-match ${confirmPassword === password ? "pw-match-ok" : "pw-match-bad"}`}
+                  role="status"
+                >
+                  {confirmPassword === password
+                    ? "✓ Passwords match"
+                    : "✕ Passwords don’t match yet"}
                 </p>
               )}
 

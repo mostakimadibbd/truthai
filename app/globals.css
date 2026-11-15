@@ -3244,3 +3244,23 @@ body:has(.chat-app) #main {
   transition: color 150ms ease, background 150ms ease;
 }
 .password-toggle:hover { color: var(--text); background: color-mix(in srgb, var(--surface-accent) 65%, transparent); }
+
+/* Live password rules + strength (sign-up). Unmet rules read red so
+   it is obvious why a password is not accepted yet; met rules go
+   green. Status colours are conventional and theme-independent. */
+.password-rules { display: grid; gap: 9px; }
+.password-strength { display: flex; align-items: center; gap: 11px; }
+.password-strength-bar { display: flex; gap: 5px; flex: 1; }
+.pw-seg { height: 5px; flex: 1; border-radius: 999px; background: color-mix(in srgb, var(--line) 80%, transparent); transition: background 200ms ease; }
+.pw-seg-on.pw-level-1 { background: #e5484d; }
+.pw-seg-on.pw-level-2 { background: #f5a524; }
+.pw-seg-on.pw-level-3, .pw-seg-on.pw-level-4 { background: #30a46c; }
+.password-strength-label { font-size: 12.5px; color: var(--muted-3); white-space: nowrap; }
+.password-rule-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.password-rule-list li { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.password-rule-list li span { width: 15px; text-align: center; font-weight: 700; }
+.pw-rule-unmet { color: #e5484d; }
+.pw-rule-met { color: #30a46c; }
+.password-match { margin: 0; font-size: 13px; font-weight: 600; }
+.pw-match-bad { color: #e5484d; }
+.pw-match-ok { color: #30a46c; }
