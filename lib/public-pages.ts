@@ -63,7 +63,7 @@ export const articles: Record<string, Article> = {
       {
         title: "Xyro AI",
         body: [
-          "Xyro AI is a free conversational AI workspace. It provides text conversations using OpenRouter's free model pool, chat history that syncs through Firestore, live-streamed replies through Realtime Database, private file attachments stored in Cloudinary, and image creation from the same free model pool — available whenever a free image model is in the catalogue. See the [changelog](/changelog) for what has shipped.",
+          "Xyro AI is a free conversational AI workspace. It provides text conversations using OpenRouter's free model pool, chat history that syncs through Firestore, live-streamed replies through Realtime Database, private file attachments stored in Cloudinary, and image creation from free image sources. See the [changelog](/changelog) for what has shipped.",
         ],
       },
       {
@@ -97,7 +97,7 @@ export const articles: Record<string, Article> = {
           "- Unlimited accounts: one per person, created with email/password or Google sign-in",
           "- Chat with any model OpenRouter currently offers for free, or Auto (Free) routing",
           "- File uploads and analysis: images, PDF, TXT, Markdown and CSV, up to 10 MB per file and five files per message",
-          "- Image creation from the chat composer, whenever a free image model is available (10 creations per day), with an invisible watermark on every created picture",
+          "- Image creation from the chat composer (10 creations per day), with an invisible watermark on every created picture",
           "- Chat history synced across your devices, with search, rename, export and delete",
           "- Custom instructions, model defaults, and a full settings suite",
           "- Data export (JSON and Markdown) and full account deletion, self-serve from Settings",
@@ -153,7 +153,7 @@ export const articles: Record<string, Article> = {
       },
       {
         q: "Can Xyro AI create images?",
-        a: "Yes — open a chat, use the + menu's 'Create an image', and describe the picture. Creation uses free image-capable OpenRouter models only, applies an invisible watermark before the image is stored in Cloudinary, and is limited to 10 creations per day. Free image models come and go from the catalogue: if none is available at a given moment, the app says so clearly rather than faking a result.",
+        a: "Yes — open a chat, use the + menu's 'Create an image', and describe the picture. Creation uses free image sources only: a free image-capable OpenRouter model when the catalogue has one, and otherwise the free Pollinations generation service. An invisible watermark is applied before the image is stored in Cloudinary, and creation is limited to 10 per day. If both free sources are busy at a given moment, the app says so clearly rather than faking a result.",
       },
       {
         q: "Why do I need to verify my email?",
@@ -286,7 +286,7 @@ Object.assign(articles, {
   "help-image-creation": {
     title: "Image creation",
     intro:
-      "Describe a picture and Xyro AI creates it in your chat — using free image models only, with an invisible watermark applied before the image is stored. This page explains how it works, the limits, and the one situation where creation is honestly unavailable.",
+      "Describe a picture and Xyro AI creates it in your chat — using free image sources only, with an invisible watermark applied before the image is stored. This page explains how it works, the limits, and when creation can be temporarily unavailable.",
     sections: [
       {
         title: "How to create an image",
@@ -296,10 +296,10 @@ Object.assign(articles, {
         ],
       },
       {
-        title: "The free-model rule — and when creation is unavailable",
+        title: "The free-source rule — and when creation is unavailable",
         body: [
-          "Creation uses free image-capable models from OpenRouter only — the same free-only rule as chat, checked against the live catalogue at the moment you ask. Free image models come and go: providers add and remove them, and there are periods when no image model is free at all.",
-          "When that happens, the app says so plainly — 'Image creation isn't available right now because no free image model is currently available — please try again later' — instead of faking a result, silently substituting something else, or ever calling a paid model. Trying again later is genuinely the fix: availability follows the catalogue.",
+          "Creation uses free image sources only — the same free-only rule as chat, and a paid model is never called. The first source is a free image-capable model from OpenRouter, checked against the live catalogue at the moment you ask; free image models come and go, and there are long periods when none is free at all. For those periods, creation falls back to the free Pollinations generation service, which receives only your image description.",
+          "If both free sources are busy or fail at a given moment, the app says so plainly — 'Image creation is temporarily unavailable — please try again in a moment' — instead of faking a result. Trying again shortly after is genuinely the fix: the free services queue under load and usually answer within a few tries.",
         ],
       },
       {
@@ -812,6 +812,12 @@ Object.assign(articles, {
         title: "OpenRouter and model providers",
         body: [
           "Purpose: generating AI replies. OpenRouter routes each request to a free model provider (for example Meta, Google, DeepSeek, Qwen or Mistral AI, depending on the model chosen and availability). The provider receives the prompt, conversation context, custom instructions if enabled, and relevant attached image or file content, and processes it under its own terms. The specific provider varies per request; the model picker always names the model being used.",
+        ],
+      },
+      {
+        title: "Pollinations",
+        body: [
+          "Purpose: fallback image generation. When no free image-capable model is available through OpenRouter, image creation requests are served by the Pollinations free generation service. It receives only the image description you wrote — no account details, no chat history — and returns the generated picture, which is then watermarked and stored in Cloudinary like every created image.",
         ],
       },
       {

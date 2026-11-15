@@ -262,8 +262,17 @@ export async function isAllowedFreeModel(modelId: string): Promise<boolean> {
  * then Auto (Free) as the safety net. /api/chat retries once against
  * the next entry on a 429/5xx from the previous one.
  */
+/**
+ * Ordered fallback chain for one completion: the requested model,
+ * then the Auto router, then up to two curated free models. Free
+ * models rate-limit and drop out constantly, so a single fallback
+ * was not enough — callers walk this chain with backoff (see
+ * lib/server/openrouter.ts) and only fail when every attempt has.
+ */
 export function modelAttemptOrder(requested: string): string[] {
-  return requested === AUTO_MODEL_ID
-    ? [AUTO_MODEL_ID]
-    : [requested, AUTO_MODEL_ID];
+  const curated = FALLBACK_MODELS.map((model) => model.id).filter(
+    (id) => id !== requested,
+  );
+  const order = [requested, AUTO_MODEL_ID, ...curated.slice(0, 2)];
+  return [...new Set(order)];
 }

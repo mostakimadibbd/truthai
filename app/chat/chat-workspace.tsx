@@ -814,14 +814,14 @@ export default function ChatWorkspace() {
 
   // Firestore fallback for a stalled stream (Phase 5): while a
   // response is in flight, if no Realtime Database chunk has arrived
-  // for 12 seconds, read the assistant message document directly from
+  // for 30 seconds, read the assistant message document directly from
   // Firestore and render whatever the server has saved so far instead
   // of leaving the UI hanging. (The Firestore messages listener above
   // is the second safety net and delivers the final state on its own.)
   useEffect(() => {
     if (!user || !streamTarget) return;
     const timer = window.setInterval(() => {
-      if (Date.now() - lastChunkAtRef.current < 12_000) return;
+      if (Date.now() - lastChunkAtRef.current < 30_000) return;
       void (async () => {
         try {
           const snapshot = await getDoc(

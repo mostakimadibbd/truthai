@@ -13,15 +13,19 @@ import { getFreeImageModels } from "@/lib/server/models";
 import { authenticateVerifiedUser } from "@/lib/server/request-auth";
 import { buildWatermarkPayload, embedWatermark } from "@/lib/server/watermark";
 
-// Image creation (Phase 7).
+// Image creation (Phase 7, extended in the robustness round).
 //
 // POST { chatId, prompt, userMessageId, assistantMessageId } creates
 // one image in a chat:
-//  1. The live OpenRouter catalogue is checked for FREE
-//     image-generation models (output modality "image"). If none is
-//     available at that moment the route answers 503
-//     IMAGE_MODEL_UNAVAILABLE and the UI says so plainly — no result
-//     is ever faked and no paid model is ever called.
+//  1. Image sources, in order — both free, no paid model is ever
+//     called: (a) a FREE image-generation model from the live
+//     OpenRouter catalogue (output modality "image"), when one
+//     exists; (b) the Pollinations free generation service, which
+//     needs no key. (As of November 2026 the OpenRouter catalogue
+//     has no free image models at all, so in practice source (b)
+//     serves creation; source (a) takes over automatically if a
+//     free image model appears.) If both sources fail the route
+//     answers 503 and the UI says so plainly — no result is faked.
 //  2. The returned image is downloaded server-side, passed through
 //     the invisible LSB watermark (lib/server/watermark.ts), and the
 //     WATERMARKED PNG is stored in Cloudinary as an authenticated
@@ -36,7 +40,7 @@ import { buildWatermarkPayload, embedWatermark } from "@/lib/server/watermark";
 // uses. Generation also pauses with the daily budget guard.
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_BODY_BYTES = 8192;
@@ -45,7 +49,7 @@ const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 55_000;
 
 const IMAGE_UNAVAILABLE_MESSAGE =
-  "Image creation isn’t available right now because no free image model is currently available — please try again later.";
+  "Image creation is temporarily unavailable — the free image services didn’t return an image. Please try again in a moment.";
 
 function errorResponse(
   status: number,
@@ -197,6 +201,70 @@ async function downloadImage(reference: string): Promise<Buffer> {
   throw new Error("The model returned an image we couldn’t read.");
 }
 
+/**
+ * Fallback image source: the Pollinations free generation service
+ * (no API key). The host is fixed, the prompt travels in the URL
+ * path, and the response must be an image within the size cap; the
+ * bytes are additionally parsed by the watermark step before they
+ * are stored or shown, so a non-image response can never reach a
+ * user.
+ */
+async function fetchPollinationsImage(prompt: string): Promise<Buffer> {
+  // The classic free tier queues and answers 503 "at its limit"
+  // under load, suggesting a ~10s retry — so: three attempts with
+  // real backoff, a fresh seed each time, and the default model
+  // (the named-model queues saturate first).
+  const RETRY_DELAYS_MS = [2_000, 8_000];
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const seed = Math.floor(Math.random() * 1_000_000) + 1;
+      const url =
+        `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
+        `?width=1024&height=1024&seed=${seed}&nologo=true`;
+      const response = await fetch(url, {
+        cache: "no-store",
+        redirect: "follow",
+        signal: AbortSignal.timeout(75_000),
+        headers: { Accept: "image/*" },
+      });
+      if (!response.ok) {
+        throw new Error(`Pollinations answered ${response.status}.`);
+      }
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!contentType.startsWith("image/") || !response.body) {
+        throw new Error("Pollinations did not return an image.");
+      }
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > MAX_IMAGE_BYTES) {
+          await reader.cancel().catch(() => undefined);
+          throw new Error("The generated image was unexpectedly large.");
+        }
+        chunks.push(value);
+      }
+      const bytes = Buffer.concat(chunks);
+      if (bytes.byteLength === 0) {
+        throw new Error("Pollinations returned an empty image.");
+      }
+      return bytes;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Pollinations failed.");
+      if (attempt < RETRY_DELAYS_MS.length) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, RETRY_DELAYS_MS[attempt]),
+        );
+      }
+    }
+  }
+  throw lastError ?? new Error("Pollinations failed.");
+}
+
 export async function POST(request: NextRequest) {
   const guard = guardMutationHeaders(request);
   if (guard) return guard;
@@ -275,20 +343,11 @@ export async function POST(request: NextRequest) {
   }
 
   const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    return errorResponse(
-      503,
-      "IMAGE_NOT_CONFIGURED",
-      "Image creation isn’t configured yet. Add an OpenRouter API key on the server to enable it.",
-    );
-  }
-
-  // The honesty gate: only FREE image-generation models, checked
-  // against the live catalogue at request time.
-  const imageModels = await getFreeImageModels();
-  if (imageModels.length === 0) {
-    return errorResponse(503, "IMAGE_MODEL_UNAVAILABLE", IMAGE_UNAVAILABLE_MESSAGE);
-  }
+  // Free OpenRouter image models, checked against the live
+  // catalogue at request time. The list is usually empty (no free
+  // image models exist), in which case the Pollinations fallback
+  // below serves the creation instead of an error.
+  const imageModels = await getFreeImageModels().catch(() => []);
 
   let db: ReturnType<typeof getFirebaseAdminFirestore>;
   try {
@@ -310,66 +369,78 @@ export async function POST(request: NextRequest) {
       return errorResponse(409, "MESSAGE_ALREADY_EXISTS", "This image has already been created.");
     }
 
-    // Ask the model. Try up to two free image models when the first
-    // is busy/unavailable; a model that answers without an image is
-    // a failure, never a reason to fabricate one.
-    let imageReference: string | null = null;
+    // Produce the original image bytes from the first source that
+    // answers: a free OpenRouter image model when the catalogue has
+    // one, otherwise the Pollinations free service. A source that
+    // answers without an image is a failure of that source, never a
+    // reason to fabricate a result.
+    let originalBytes: Buffer | null = null;
     let usedModel = "";
-    let lastStatus = 0;
-    for (const candidate of imageModels.slice(0, 2)) {
-      let response: Response;
-      try {
-        response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-            "HTTP-Referer": request.nextUrl.origin,
-            "X-Title": "Xyro AI",
-          },
-          body: JSON.stringify({
-            model: candidate.id,
-            messages: [{ role: "user", content: prompt }],
-            modalities: ["image", "text"],
-          }),
-          signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-          cache: "no-store",
-        });
-      } catch {
-        return errorResponse(502, "MODEL_UNAVAILABLE", "The free image model service is temporarily unavailable.");
+
+    if (apiKey && imageModels.length > 0) {
+      let imageReference: string | null = null;
+      for (const candidate of imageModels.slice(0, 2)) {
+        let response: Response;
+        try {
+          response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+              "HTTP-Referer": request.nextUrl.origin,
+              "X-Title": "Xyro AI",
+            },
+            body: JSON.stringify({
+              model: candidate.id,
+              messages: [{ role: "user", content: prompt }],
+              modalities: ["image", "text"],
+            }),
+            signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+            cache: "no-store",
+          });
+        } catch {
+          break; // Network trouble: fall through to the fallback source.
+        }
+        if (!response.ok) {
+          await response.body?.cancel();
+          if (response.status === 429 || response.status >= 500) continue;
+          break;
+        }
+        const payload: unknown = await response.json().catch(() => null);
+        imageReference = findImageReference(payload);
+        if (imageReference) {
+          try {
+            originalBytes = await downloadImage(imageReference);
+            usedModel = candidate.id;
+          } catch {
+            originalBytes = null;
+          }
+          break;
+        }
       }
-      if (!response.ok) {
-        lastStatus = response.status;
-        await response.body?.cancel();
-        if (response.status === 429 || response.status >= 500) continue;
-        break;
-      }
-      const payload: unknown = await response.json().catch(() => null);
-      imageReference = findImageReference(payload);
-      if (imageReference) {
-        usedModel = candidate.id;
-        break;
-      }
-    }
-    if (!imageReference) {
-      if (lastStatus === 429) {
-        return errorResponse(429, "MODEL_BUSY", "Free image models are busy right now. Please wait a moment and try again.");
-      }
-      return errorResponse(
-        502,
-        "IMAGE_GENERATION_FAILED",
-        "The free image model didn’t return an image. Please try again, or rephrase the description.",
-      );
     }
 
-    // Download → watermark → store. The watermark is applied BEFORE
-    // storage and the original bytes are discarded.
+    if (!originalBytes) {
+      try {
+        originalBytes = await fetchPollinationsImage(prompt);
+        usedModel = "pollinations/free";
+      } catch (error) {
+        console.error("Fallback image generation failed.", error);
+        originalBytes = null;
+      }
+    }
+
+    if (!originalBytes) {
+      return errorResponse(503, "IMAGE_MODEL_UNAVAILABLE", IMAGE_UNAVAILABLE_MESSAGE);
+    }
+
+    // Watermark → store. The watermark is applied BEFORE storage
+    // and the original bytes are discarded.
     const generationId = randomUUID();
     let watermarked: Buffer;
     try {
-      const original = await downloadImage(imageReference);
       watermarked = await embedWatermark(
-        original,
+        originalBytes,
         buildWatermarkPayload(generationId, auth.uid),
       );
     } catch (error) {
@@ -377,7 +448,7 @@ export async function POST(request: NextRequest) {
       return errorResponse(
         502,
         "IMAGE_PROCESSING_FAILED",
-        error instanceof Error ? error.message : "The generated image couldn’t be processed.",
+        "The generated image couldn’t be processed.",
       );
     }
 

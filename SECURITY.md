@@ -475,3 +475,35 @@ saved to `users/{uid}/developerProfile/main`).
   to the account owner in the dashboard's activity log. This is
   the industry-standard abuse/debugging log — it is not shared
   with third parties.
+
+## Robustness round (2026-11-15, later)
+
+- **OpenRouter calling discipline** (`lib/server/openrouter.ts`):
+  chat and the public API now share one fallback walker —
+  `modelAttemptOrder` yields up to 4 attempts (requested → Auto
+  router → two curated free models), each with a 25s connect
+  timeout (headers only, so long streamed replies are never
+  killed by it), backoff between attempts honouring Retry-After
+  (capped 5s), and network errors moving to the next model
+  instead of failing the request (the public API previously
+  returned 502 on the first network error).
+- **Long replies**: chat `max_tokens` 2048 → 4096; the stream
+  reader uses a 50s IDLE timeout rather than a 45s total one,
+  and a stream that dies after producing text keeps the partial
+  reply as the answer; the server republishes the RTDB stream
+  node every 8s as a heartbeat so slow first tokens are not
+  mistaken for a stall; the client stall fallback moved 12s →
+  30s; `/api/chat` and `/api/v1/chat/completions` maxDuration
+  raised 60 → 300.
+- **Image creation sources**: OpenRouter's catalogue still has
+  zero free image models, so creation falls back to the
+  Pollinations free generation service (fixed host, prompt-only,
+  3 attempts with backoff, image content-type + size cap +
+  watermark parse before storage; disclosed on the
+  subprocessors page). The watermark → Cloudinary → Firestore
+  pipeline is unchanged.
+- **Cloudinary config decoupling**: only the browser
+  direct-upload signing flow requires `CLOUDINARY_UPLOAD_PRESET`
+  now; generated-image/avatar uploads and signed download URLs
+  need just cloud name + API key/secret. Previously a missing
+  preset broke generated-image storage too.

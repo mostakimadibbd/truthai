@@ -14,6 +14,10 @@ import {
   getDeveloperProfile,
   recordApiCall,
 } from "@/lib/server/developer";
+import {
+  OpenRouterAttemptsExhausted,
+  fetchChatCompletionWithFallback,
+} from "@/lib/server/openrouter";
 import { getRemoteIp } from "@/lib/server/turnstile";
 import { getFirebaseAdminAuth } from "@/lib/server/firebase-admin";
 import {
@@ -23,7 +27,7 @@ import {
 } from "@/lib/server/models";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 // Public developer API — OpenAI-compatible chat completions backed
 // by the same free OpenRouter models as the app. Authenticated with
@@ -319,46 +323,63 @@ export async function POST(request: NextRequest) {
   }
 
   const attempts = modelAttemptOrder(requestedModel);
-  let upstream: Response | null = null;
-  for (let index = 0; index < attempts.length; index += 1) {
-    let candidate: Response;
-    try {
-      candidate = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": request.nextUrl.origin,
-          "X-Title": "Xyro AI API",
-        },
-        body: JSON.stringify({
-          model: attempts[index],
-          messages,
-          stream: false,
-          max_tokens: maxTokens,
-          ...(temperature !== undefined ? { temperature } : {}),
-        }),
-        signal: AbortSignal.any([request.signal, AbortSignal.timeout(45_000)]),
-        cache: "no-store",
+  let upstream: Response;
+  let usedAttemptModel = requestedModel;
+  try {
+    const completion = await fetchChatCompletionWithFallback({
+      apiKey,
+      attempts,
+      messages,
+      stream: false,
+      maxTokens,
+      temperature,
+      signal: request.signal,
+      referer: request.nextUrl.origin,
+      title: "Xyro AI API",
+      connectTimeoutMs: 25_000,
+    });
+    upstream = completion.response;
+    usedAttemptModel = completion.model;
+  } catch (error) {
+    if (error instanceof OpenRouterAttemptsExhausted) {
+      const status = error.lastStatus === 429 ? 429 : 502;
+      await recordApiCall(identity.uid, {
+        keyId: identity.keyId,
+        keyPrefix: identity.displayPrefix,
+        endpoint: "chat/completions",
+        model: attempts[attempts.length - 1],
+        status: "error",
+        httpStatus: status,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        tokensEstimated: false,
+        context,
+        city,
+        country,
+        input: messages,
+        output: null,
       });
-    } catch {
-      return apiError(502, "model_unavailable", "The model service is temporarily unavailable.", "api_error");
+      return apiError(
+        status,
+        status === 429 ? "model_busy" : "model_unavailable",
+        status === 429
+          ? "Free models are busy right now. Please wait a moment and try again."
+          : "The model service is temporarily unavailable.",
+        status === 429 ? "rate_limit_error" : "api_error",
+      );
     }
-    if (candidate.ok) {
-      upstream = candidate;
-      break;
-    }
-    const retryable = candidate.status === 429 || candidate.status >= 500;
-    await candidate.body?.cancel();
-    if (retryable && index < attempts.length - 1) continue;
-    const status = candidate.status === 429 ? 429 : 502;
+    return apiError(502, "model_unavailable", "The model service is temporarily unavailable.", "api_error");
+  }
+  if (!upstream.ok) {
+    await upstream.body?.cancel().catch(() => undefined);
     await recordApiCall(identity.uid, {
       keyId: identity.keyId,
       keyPrefix: identity.displayPrefix,
       endpoint: "chat/completions",
-      model: attempts[index],
+      model: usedAttemptModel,
       status: "error",
-      httpStatus: status,
+      httpStatus: 502,
       promptTokens: 0,
       completionTokens: 0,
       totalTokens: 0,
@@ -369,17 +390,7 @@ export async function POST(request: NextRequest) {
       input: messages,
       output: null,
     });
-    return apiError(
-      status,
-      status === 429 ? "model_busy" : "model_request_failed",
-      status === 429
-        ? "Free models are busy right now. Please wait a moment and try again."
-        : "The model couldn’t process this request.",
-      status === 429 ? "rate_limit_error" : "api_error",
-    );
-  }
-  if (!upstream) {
-    return apiError(502, "model_unavailable", "The model service is temporarily unavailable.", "api_error");
+    return apiError(502, "model_request_failed", "The model couldn’t process this request.", "api_error");
   }
 
   const result = (await upstream.json().catch(() => null)) as {
@@ -394,6 +405,26 @@ export async function POST(request: NextRequest) {
       total_tokens?: number;
     };
   } | null;
+  if (!result) {
+    await recordApiCall(identity.uid, {
+      keyId: identity.keyId,
+      keyPrefix: identity.displayPrefix,
+      endpoint: "chat/completions",
+      model: usedAttemptModel,
+      status: "error",
+      httpStatus: 502,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      tokensEstimated: false,
+      context,
+      city,
+      country,
+      input: messages,
+      output: null,
+    });
+    return apiError(502, "model_request_failed", "The model returned a response that couldn’t be read.", "api_error");
+  }
   const content = result?.choices?.[0]?.message?.content ?? "";
   const usedModel = typeof result?.model === "string" ? result.model : requestedModel;
 

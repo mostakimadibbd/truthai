@@ -6,20 +6,34 @@ type CloudinaryConfig = {
   cloudName: string;
   apiKey: string;
   apiSecret: string;
-  uploadPreset: string;
 };
 
+/**
+ * Core account config: cloud name + API key/secret. Everything
+ * server-side (generated-image and avatar uploads, signed private
+ * download URLs, resource reads/deletes) needs only this. The
+ * upload preset is required ONLY by the browser direct-upload
+ * signing flow, so it is read separately there — a missing preset
+ * must not break generated images or avatars.
+ */
 function getCloudinaryConfig(): CloudinaryConfig {
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME?.trim();
   const apiKey = process.env.CLOUDINARY_API_KEY?.trim();
   const apiSecret = process.env.CLOUDINARY_API_SECRET?.trim();
-  const uploadPreset = process.env.CLOUDINARY_UPLOAD_PRESET?.trim();
-  if (!cloudName || !apiKey || !apiSecret || !uploadPreset) {
-    throw new Error("Cloudinary upload credentials or the signed upload preset are not configured.");
+  if (!cloudName || !apiKey || !apiSecret) {
+    throw new Error("Cloudinary account credentials are not configured.");
   }
 
   cloudinary.config({ cloud_name: cloudName, api_key: apiKey, api_secret: apiSecret, secure: true });
-  return { cloudName, apiKey, apiSecret, uploadPreset };
+  return { cloudName, apiKey, apiSecret };
+}
+
+function getCloudinaryUploadPreset(): string {
+  const uploadPreset = process.env.CLOUDINARY_UPLOAD_PRESET?.trim();
+  if (!uploadPreset) {
+    throw new Error("The signed Cloudinary upload preset is not configured.");
+  }
+  return uploadPreset;
 }
 
 export function createCloudinaryUploadSignature(params: {
@@ -29,11 +43,12 @@ export function createCloudinaryUploadSignature(params: {
   overwrite: false;
 }) {
   const config = getCloudinaryConfig();
-  const signedParams = { ...params, upload_preset: config.uploadPreset };
+  const uploadPreset = getCloudinaryUploadPreset();
+  const signedParams = { ...params, upload_preset: uploadPreset };
   return {
     cloudName: config.cloudName,
     apiKey: config.apiKey,
-    uploadPreset: config.uploadPreset,
+    uploadPreset,
     signature: cloudinary.utils.api_sign_request(signedParams, config.apiSecret),
   };
 }

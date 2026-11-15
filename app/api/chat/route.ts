@@ -29,9 +29,13 @@ import {
   MAX_ATTACHMENT_BYTES_PER_MESSAGE,
   MAX_ATTACHMENTS_PER_MESSAGE,
 } from "@/lib/server/upload-policy";
+import {
+  OpenRouterAttemptsExhausted,
+  fetchChatCompletionWithFallback,
+} from "@/lib/server/openrouter";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 const CHAT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_BODY_BYTES = 16_384;
@@ -324,6 +328,7 @@ export async function POST(request: NextRequest) {
   let responseText = "";
   let locked = false;
   let assistantCreated = false;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
   let assistantSaved = false;
   let modelMessages: StoredChatMessage[] = [];
 
@@ -572,74 +577,12 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Ordered attempts: the chosen model first, then Auto (Free), with
-    // exactly one retry when the first attempt answers 429/5xx.
-    const attempts = modelAttemptOrder(effectiveModel);
-    let upstream: Response | null = null;
-    for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
-      let candidate: Response;
-      try {
-        candidate = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-            "HTTP-Referer": request.nextUrl.origin,
-            "X-Title": "Xyro AI",
-          },
-          body: JSON.stringify({
-            model: attempts[attemptIndex],
-            messages: prepared.messages,
-            stream: true,
-            max_tokens: 2048,
-          }),
-          signal: AbortSignal.any([request.signal, AbortSignal.timeout(45_000)]),
-          cache: "no-store",
-        });
-      } catch {
-        if (request.signal.aborted) {
-          throw new ChatRouteError(499, "RESPONSE_STOPPED", "Response stopped.");
-        }
-        throw new ChatRouteError(502, "MODEL_UNAVAILABLE", "The free model service is temporarily unavailable.");
-      }
-
-      if (candidate.ok && candidate.body) {
-        upstream = candidate;
-        break;
-      }
-
-      const retryable = candidate.status === 429 || candidate.status >= 500;
-      const retryAfter = candidate.headers.get("retry-after");
-      await candidate.body?.cancel();
-      if (retryable && attemptIndex < attempts.length - 1) {
-        continue;
-      }
-      const status = candidate.status === 429 ? 429 : candidate.status >= 500 ? 503 : 502;
-      throw new ChatRouteError(
-        status,
-        status === 429 ? "MODEL_BUSY" : "MODEL_REQUEST_FAILED",
-        status === 429
-          ? "Free models are busy right now. Please wait a moment and try again."
-          : "The model couldn’t process this request. Try again or remove an attachment.",
-        retryAfter ? { "Retry-After": retryAfter } : undefined,
-      );
-    }
-
-    if (!upstream || !upstream.ok || !upstream.body) {
-      throw new ChatRouteError(502, "MODEL_UNAVAILABLE", "The free model service is temporarily unavailable.");
-    }
-
-    const reader = upstream.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
+    // Live-stream state (Phase 5 hardening): every published node
+    // carries a monotonically increasing seq plus the responseId, so
+    // duplicated, reordered or stale Realtime Database events can
+    // never rewind or corrupt the visible reply.
     let lastPublishedAt = 0;
     let streamDone = false;
-    // Monotonically increasing sequence number for every published
-    // chunk (Phase 5 streaming hardening). The client renders only
-    // chunks whose responseId matches its in-flight request and whose
-    // seq is newer than the last one it applied, so duplicated,
-    // reordered or stale Realtime Database events can never rewind or
-    // corrupt the visible reply.
     let streamSeq = 0;
     async function publishLive(force: boolean) {
       const currentTime = Date.now();
@@ -655,6 +598,69 @@ export async function POST(request: NextRequest) {
       });
       lastPublishedAt = currentTime;
     }
+
+    // Heartbeat: while the models are being tried and while a reply
+    // is generating, republish the stream node every 8 seconds even
+    // when no new text has arrived. Free models can think for a long
+    // time before the first token; without this the client's stall
+    // detection mistook a slow model for a dead one.
+    heartbeat = setInterval(() => {
+      void publishLive(true).catch(() => undefined);
+    }, 8_000);
+    void publishLive(true).catch(() => undefined);
+
+    // Walk the fallback chain (chosen model → Auto router → curated
+    // free models) with backoff between attempts — free models
+    // rate-limit and drop out constantly, and a single retry was
+    // not enough. Each attempt has a connect timeout only, so a
+    // long streamed reply is never killed mid-generation.
+    const attempts = modelAttemptOrder(effectiveModel);
+    let upstream: Response;
+    try {
+      const result = await fetchChatCompletionWithFallback({
+        apiKey,
+        attempts,
+        messages: prepared.messages,
+        stream: true,
+        maxTokens: 4096,
+        signal: request.signal,
+        referer: request.nextUrl.origin,
+        title: "Xyro AI",
+        connectTimeoutMs: 25_000,
+      });
+      upstream = result.response;
+    } catch (error) {
+      if (request.signal.aborted) {
+        throw new ChatRouteError(499, "RESPONSE_STOPPED", "Response stopped.");
+      }
+      if (error instanceof OpenRouterAttemptsExhausted) {
+        const busy = error.lastStatus === 429;
+        throw new ChatRouteError(
+          busy ? 429 : 503,
+          busy ? "MODEL_BUSY" : "MODEL_UNAVAILABLE",
+          busy
+            ? "Free models are busy right now. Please wait a moment and try again."
+            : "The free model service is temporarily unavailable.",
+          error.retryAfter ? { "Retry-After": error.retryAfter } : undefined,
+        );
+      }
+      throw new ChatRouteError(502, "MODEL_UNAVAILABLE", "The free model service is temporarily unavailable.");
+    }
+    if (!upstream.ok) {
+      await upstream.body?.cancel().catch(() => undefined);
+      throw new ChatRouteError(
+        502,
+        "MODEL_REQUEST_FAILED",
+        "The model couldn’t process this request. Try again or remove an attachment.",
+      );
+    }
+    if (!upstream.body) {
+      throw new ChatRouteError(502, "MODEL_UNAVAILABLE", "The free model service is temporarily unavailable.");
+    }
+
+    const reader = upstream.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
     async function handleLine(line: string) {
       const delta = parseDelta(line);
       if (delta.error) {
@@ -667,8 +673,43 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Read with an IDLE timeout, not a total one: a reply may take
+    // minutes on a slow free model as long as tokens keep arriving,
+    // but a stream that goes silent for 50 seconds is dead. If it
+    // dies after producing text, the partial reply is kept as the
+    // answer instead of an error — a long answer that stops early
+    // beats no answer at all.
+    const STREAM_IDLE_TIMEOUT_MS = 50_000;
+    let idleTimedOut = false;
+    async function readWithIdleTimeout() {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          reader.read(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error("STREAM_IDLE_TIMEOUT")),
+              STREAM_IDLE_TIMEOUT_MS,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
     while (true) {
-      const { done, value } = await reader.read();
+      let chunk: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        chunk = await readWithIdleTimeout();
+      } catch (error) {
+        if (error instanceof Error && error.message === "STREAM_IDLE_TIMEOUT") {
+          idleTimedOut = true;
+          await reader.cancel().catch(() => undefined);
+          break;
+        }
+        throw error;
+      }
+      const { done, value } = chunk;
       buffer += decoder.decode(value, { stream: !done });
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
@@ -679,7 +720,7 @@ export async function POST(request: NextRequest) {
     if (request.signal.aborted) {
       throw new ChatRouteError(499, "RESPONSE_STOPPED", "Response stopped.");
     }
-    if (!streamDone || !responseText.trim()) {
+    if ((!streamDone && !idleTimedOut) || !responseText.trim()) {
       throw new ChatRouteError(502, "EMPTY_MODEL_RESPONSE", "The model ended before returning a response. Please try again.");
     }
 
@@ -741,6 +782,7 @@ export async function POST(request: NextRequest) {
     console.error("Chat request failed.", error);
     return errorResponse(503, "CHAT_REQUEST_FAILED", "The response couldn’t be completed or saved. Please try again.");
   } finally {
+    if (heartbeat) clearInterval(heartbeat);
     if (locked) {
       try {
         await streamRef.remove();
