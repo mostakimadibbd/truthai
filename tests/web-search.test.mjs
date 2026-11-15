@@ -6,7 +6,10 @@ import {
   hasSearchIntent,
   parseBingResults,
   parseDdgInstant,
+  parseHnResults,
   parseRssResults,
+  parseWikipediaResults,
+  simplifyQuery,
 } from "../lib/server/web-search.ts";
 
 test("extractUrls dedupes, trims trailing punctuation, and caps", () => {
@@ -79,4 +82,32 @@ test("cleanSearchQuery strips imperatives and links", () => {
   assert.equal(cleanSearchQuery("Search for the latest AI news"), "the latest AI news");
   assert.equal(cleanSearchQuery("Please research electric cars online"), "electric cars");
   assert.match(cleanSearchQuery("What happened https://example.com/x today"), /What happened\s+today/);
+});
+
+test("parseWikipediaResults maps the opensearch tuple shape", () => {
+  const results = parseWikipediaResults([
+    "query",
+    ["Alpha", "Beta"],
+    ["First description", ""],
+    ["https://en.wikipedia.org/wiki/Alpha", "https://en.wikipedia.org/wiki/Beta"],
+  ]);
+  assert.equal(results.length, 2);
+  assert.equal(results[0].snippet, "First description");
+  assert.equal(results[1].url, "https://en.wikipedia.org/wiki/Beta");
+});
+
+test("parseHnResults prefers story fields and falls back to the HN item page", () => {
+  const results = parseHnResults({
+    hits: [
+      { title: "Launch post", url: "https://example.com/launch", objectID: "1" },
+      { story_title: "Ask HN: things", objectID: "42" },
+      { objectID: "3" },
+    ],
+  });
+  assert.equal(results.length, 2);
+  assert.equal(results[1].url, "https://news.ycombinator.com/item?id=42");
+});
+
+test("simplifyQuery strips question scaffolding", () => {
+  assert.equal(simplifyQuery("What is the latest iPhone price?"), "latest iPhone price");
 });

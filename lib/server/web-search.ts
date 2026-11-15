@@ -33,15 +33,18 @@ export type WebSearchResult = WebSource & { snippet: string };
 
 export type SearchOutcome = {
   results: WebSearchResult[];
-  /** Which provider answered: "bing-rss" | "bing" | "google-news" | "ddg" | null. */
+  /** The first provider that contributed results, or null. */
   provider: string | null;
+  /** Every provider that contributed (results are merged). */
+  providers: string[];
 };
 
 const BROWSER_UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
-const PROVIDER_TIMEOUT_MS = 6_000;
-const CHAIN_BUDGET_MS = 12_000;
+const PROVIDER_TIMEOUT_MS = 5_000;
+const CHAIN_BUDGET_MS = 14_000;
+const TARGET_RESULTS = 5;
 const MAX_CONTEXT_CHARS = 9_000;
 
 function decodeEntities(text: string): string {
@@ -231,6 +234,68 @@ export function parseDdgInstant(payload: unknown, count = 6): WebSearchResult[] 
   return results.slice(0, count);
 }
 
+/** Parses a Wikipedia OpenSearch payload: [query, titles, descriptions, urls]. */
+export function parseWikipediaResults(payload: unknown, count = 6): WebSearchResult[] {
+  if (!Array.isArray(payload) || payload.length < 4) return [];
+  const titles = Array.isArray(payload[1]) ? payload[1] : [];
+  const descriptions = Array.isArray(payload[2]) ? payload[2] : [];
+  const urls = Array.isArray(payload[3]) ? payload[3] : [];
+  const results: WebSearchResult[] = [];
+  for (let index = 0; index < titles.length; index += 1) {
+    const title = titles[index];
+    const url = urls[index];
+    if (typeof title !== "string" || typeof url !== "string") continue;
+    if (!/^https?:\/\//.test(url)) continue;
+    results.push({
+      title: title.slice(0, 160),
+      url,
+      snippet:
+        typeof descriptions[index] === "string"
+          ? (descriptions[index] as string).slice(0, 320)
+          : "",
+    });
+    if (results.length >= count) break;
+  }
+  return results;
+}
+
+/** Parses Hacker News Algolia search hits. */
+export function parseHnResults(payload: unknown, count = 6): WebSearchResult[] {
+  if (typeof payload !== "object" || payload === null) return [];
+  const hits = (payload as { hits?: unknown }).hits;
+  if (!Array.isArray(hits)) return [];
+  const results: WebSearchResult[] = [];
+  for (const hit of hits) {
+    if (typeof hit !== "object" || hit === null) continue;
+    const entry = hit as {
+      title?: unknown;
+      story_title?: unknown;
+      url?: unknown;
+      story_url?: unknown;
+      objectID?: unknown;
+    };
+    const title =
+      typeof entry.title === "string"
+        ? entry.title
+        : typeof entry.story_title === "string"
+          ? entry.story_title
+          : null;
+    if (!title) continue;
+    const url =
+      typeof entry.url === "string" && /^https?:\/\//.test(entry.url)
+        ? entry.url
+        : typeof entry.story_url === "string" && /^https?:\/\//.test(entry.story_url)
+          ? entry.story_url
+          : typeof entry.objectID === "string"
+            ? `https://news.ycombinator.com/item?id=${entry.objectID}`
+            : null;
+    if (!url) continue;
+    results.push({ title: title.slice(0, 160), url, snippet: title.slice(0, 320) });
+    if (results.length >= count) break;
+  }
+  return results;
+}
+
 async function fetchText(url: string): Promise<string | null> {
   try {
     const response = await fetch(url, {
@@ -277,6 +342,43 @@ const PROVIDERS: {
     },
   },
   {
+    id: "bing-news",
+    run: async (query) => {
+      const xml = await fetchText(
+        `https://www.bing.com/news/search?format=rss&q=${encodeURIComponent(query)}`,
+      );
+      return xml ? parseRssResults(xml) : [];
+    },
+  },
+  {
+    id: "wikipedia",
+    run: async (query) => {
+      const text = await fetchText(
+        `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(query)}&limit=6&namespace=0&format=json`,
+      );
+      if (!text) return [];
+      try {
+        return parseWikipediaResults(JSON.parse(text));
+      } catch {
+        return [];
+      }
+    },
+  },
+  {
+    id: "hn",
+    run: async (query) => {
+      const text = await fetchText(
+        `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(query)}&hitsPerPage=6`,
+      );
+      if (!text) return [];
+      try {
+        return parseHnResults(JSON.parse(text));
+      } catch {
+        return [];
+      }
+    },
+  },
+  {
     id: "ddg",
     run: async (query) => {
       const text = await fetchText(
@@ -292,30 +394,74 @@ const PROVIDERS: {
   },
 ];
 
+function providerOrder(newsFirst: boolean) {
+  if (!newsFirst) return PROVIDERS;
+  const lead = ["google-news", "bing-news"]
+    .map((id) => PROVIDERS.find((provider) => provider.id === id)!)
+    .filter(Boolean);
+  return [...lead, ...PROVIDERS.filter((provider) => !lead.includes(provider))];
+}
+
+/** Strips question words for the simplified second-pass query. */
+export function simplifyQuery(query: string): string {
+  return query
+    .replace(/[?!.]+$/g, "")
+    .replace(
+      /\b(what|when|where|who|whom|whose|why|how|which|is|are|was|were|do|does|did|can|could|tell me|give me|the|a|an)\b/gi,
+      " ",
+    )
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 300);
+}
+
 /**
- * Runs the provider chain until one returns results. News-intent
- * queries try Google News first (freshest headlines); everything
- * else starts with the RSS/HTML web indexes. Bounded by a total
- * time budget so a bad network day can't stall the reply.
+ * Runs the provider chain, MERGING unique results across providers
+ * until enough are collected (one blocked or thin source no longer
+ * decides the outcome). News-intent queries try the news feeds
+ * first. If a full pass finds nothing, one more pass runs with a
+ * simplified query over the strongest providers. Bounded by a
+ * total time budget so a bad network day can't stall the reply.
  */
 export async function searchWeb(query: string): Promise<SearchOutcome> {
   const q = query.trim().slice(0, 300);
-  if (!q) return { results: [], provider: null };
+  if (!q) return { results: [], provider: null, providers: [] };
   const startedAt = Date.now();
-  const ordered = hasNewsIntent(q)
-    ? [
-        PROVIDERS.find((provider) => provider.id === "google-news")!,
-        ...PROVIDERS.filter((provider) => provider.id !== "google-news"),
-      ]
-    : PROVIDERS;
-  for (const provider of ordered) {
-    if (Date.now() - startedAt > CHAIN_BUDGET_MS) break;
-    const results = await provider.run(q).catch(() => [] as WebSearchResult[]);
-    if (results.length) {
-      return { results, provider: provider.id };
+  const merged: WebSearchResult[] = [];
+  const seen = new Set<string>();
+  const contributors: string[] = [];
+
+  const runPass = async (passQuery: string, providers: typeof PROVIDERS) => {
+    for (const provider of providers) {
+      if (merged.length >= TARGET_RESULTS) break;
+      if (Date.now() - startedAt > CHAIN_BUDGET_MS) break;
+      const results = await provider.run(passQuery).catch(() => [] as WebSearchResult[]);
+      let added = false;
+      for (const result of results) {
+        if (seen.has(result.url)) continue;
+        seen.add(result.url);
+        merged.push(result);
+        added = true;
+        if (merged.length >= TARGET_RESULTS + 1) break;
+      }
+      if (added) contributors.push(provider.id);
+    }
+  };
+
+  const ordered = providerOrder(hasNewsIntent(q));
+  await runPass(q, ordered);
+  if (!merged.length) {
+    const simplified = simplifyQuery(q);
+    if (simplified && simplified.toLowerCase() !== q.toLowerCase()) {
+      await runPass(simplified, ordered.slice(0, 3));
     }
   }
-  return { results: [], provider: null };
+
+  return {
+    results: merged.slice(0, 6),
+    provider: contributors[0] ?? null,
+    providers: contributors,
+  };
 }
 
 export function extractUrls(text: string, max = 2): string[] {
@@ -419,6 +565,7 @@ export type WebContextResult = {
   /** True when a search was run (toggle or auto-detected). */
   searched: boolean;
   provider: string | null;
+  providers: string[];
   resultCount: number;
   query: string;
 };
@@ -444,7 +591,7 @@ export async function buildWebContext(options: {
   const [outcome, pageTexts] = await Promise.all([
     options.searchEnabled
       ? searchWeb(query)
-      : Promise.resolve({ results: [], provider: null } as SearchOutcome),
+      : Promise.resolve({ results: [], provider: null, providers: [] } as SearchOutcome),
     Promise.all(urls.map(async (url) => ({ url, text: await fetchPageText(url) }))),
   ]);
 
@@ -487,14 +634,16 @@ export async function buildWebContext(options: {
       sources: [],
       searched: options.searchEnabled,
       provider: outcome.provider,
+      providers: outcome.providers,
       resultCount: 0,
       query,
     };
   }
 
   const context = [
-    "You have live web access for this reply. The material below was retrieved from the web just now.",
-    "Use it for anything time-sensitive (news, prices, schedules, current facts) and prefer it over your training knowledge when they conflict.",
+    "TOOL RESULT — LIVE WEB SEARCH: the Xyro AI platform searched the web seconds ago on the user's behalf and retrieved the material below.",
+    "You DO have browsing in this conversation: the platform performs web searches for you and hands you the results. When this block is present, never say you cannot browse, lack a browsing tool, or cannot access the internet — answer from these results.",
+    "Use them for anything time-sensitive (news, prices, schedules, current facts) and prefer them over your training knowledge when they conflict.",
     "Think carefully across the sources before answering: compare what they agree on, note disagreements or uncertainty, and date any fact that could change.",
     "Cite the numbered sources inline like [1] or [2] next to the claims they support, and keep citations honest — only cite a source for what its text actually says.",
     "",
@@ -508,6 +657,7 @@ export async function buildWebContext(options: {
     sources,
     searched: options.searchEnabled,
     provider: outcome.provider,
+    providers: outcome.providers,
     resultCount: results.length,
     query,
   };

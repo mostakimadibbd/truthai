@@ -621,6 +621,7 @@ export async function POST(request: NextRequest) {
             query: web.query,
             trigger: searchTrigger,
             provider: web.provider,
+            providers: web.providers,
             resultCount: web.resultCount,
             sources: web.sources.slice(0, 6),
             ts: Date.now(),
@@ -628,20 +629,28 @@ export async function POST(request: NextRequest) {
           })
           .catch(() => undefined);
         messagesBeforeWeb = [...prepared.messages];
+        // The web block goes immediately BEFORE the final user
+        // message, not up with the system prompts: models attend to
+        // recent context most, and an early block was being ignored
+        // in favor of the model's trained "I can't browse" prior.
+        const insertAt = Math.max(1, prepared.messages.length - 1);
         if (web.context) {
-          prepared.messages.splice(instructions ? 2 : 1, 0, {
+          prepared.messages.splice(insertAt, 0, {
             role: "system",
             content: web.context,
           });
           webSources = web.sources;
           webContextInjected = true;
         } else if (searchTrigger !== "link") {
-          // Search was attempted and returned nothing: tell the
-          // model plainly instead of letting it improvise.
-          prepared.messages.splice(instructions ? 2 : 1, 0, {
+          // Search was attempted and returned nothing: frame it as
+          // an attempt that came back empty (a temporary service
+          // issue), never as a missing capability — the previous
+          // wording was being paraphrased into "I don't have a
+          // browsing tool".
+          prepared.messages.splice(insertAt, 0, {
             role: "system",
             content:
-              "LIVE SEARCH NOTE: a web search was attempted for this message but returned no results (the search service may be briefly unavailable). If the user needs current information, say plainly that live search didn't return results this time, then answer from your own knowledge and note it may be out of date. Do not claim you searched or invent current facts.",
+              "LIVE SEARCH NOTE: the platform just attempted a live web search for this message and it returned no results this time (a temporary search-service problem — you DO have browsing in this conversation; this attempt simply came back empty). If the user needs current information, tell them you just tried searching and it came back empty, then answer from your own knowledge and note it may be out of date. Do not claim to have found results, and do not say you lack browsing capability.",
           });
           webContextInjected = true;
         }

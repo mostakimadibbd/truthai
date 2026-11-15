@@ -10,7 +10,7 @@ import {
   getAnalyticsTopUsers,
   getRecentUsageEvents,
 } from "@/lib/server/analytics";
-import { getFirebaseAdminAuth } from "@/lib/server/firebase-admin";
+import { getFirebaseAdminAuth, getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -44,13 +44,36 @@ export async function GET(request: NextRequest) {
     }
 
     const today = analyticsDayKey();
-    const [totals, minutes, models, topUsers, recentEvents] = await Promise.all([
-      getAnalyticsDayTotals(today),
-      getAnalyticsMinuteSeries(60),
-      getAnalyticsModelDay(today),
-      getAnalyticsTopUsers(today, 10),
-      getRecentUsageEvents(50),
-    ]);
+    const [totals, minutes, models, topUsers, recentEvents, recentSearches] =
+      await Promise.all([
+        getAnalyticsDayTotals(today),
+        getAnalyticsMinuteSeries(60),
+        getAnalyticsModelDay(today),
+        getAnalyticsTopUsers(today, 10),
+        getRecentUsageEvents(50),
+        // Recent web-search log (searchEvents): which queries ran,
+        // what triggered them, which provider answered and how many
+        // results came back — the visibility the owner asked for.
+        getFirebaseAdminFirestore()
+          .collection("searchEvents")
+          .orderBy("ts", "desc")
+          .limit(20)
+          .get()
+          .then((snapshot) =>
+            snapshot.docs.map((doc) => {
+              const data = doc.data();
+              return {
+                query: typeof data.query === "string" ? data.query : "",
+                trigger: typeof data.trigger === "string" ? data.trigger : "",
+                provider: typeof data.provider === "string" ? data.provider : null,
+                resultCount:
+                  typeof data.resultCount === "number" ? data.resultCount : 0,
+                ts: typeof data.ts === "number" ? data.ts : 0,
+              };
+            }),
+          )
+          .catch(() => []),
+      ]);
 
     // Resolve display emails for the top users and the ledger's
     // distinct users (best-effort; a deleted account shows its uid).
@@ -83,6 +106,7 @@ export async function GET(request: NextRequest) {
         ...entry,
         email: emailByUid.get(entry.uid) ?? null,
       })),
+      recentSearches,
     });
   } catch (error) {
     console.error("Couldn’t load admin overview.", error);

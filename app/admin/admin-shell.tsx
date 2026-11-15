@@ -45,6 +45,14 @@ type LedgerEntry = {
   status: string;
 };
 
+type SearchEntry = {
+  query: string;
+  trigger: string;
+  provider: string | null;
+  resultCount: number;
+  ts: number;
+};
+
 type AdminOverview = {
   today: string;
   totals: Totals;
@@ -52,6 +60,7 @@ type AdminOverview = {
   models: ModelTotal[];
   topUsers: TopUser[];
   recentEvents: LedgerEntry[];
+  recentSearches?: SearchEntry[];
 };
 
 function formatUsd(amount: number): string {
@@ -258,6 +267,39 @@ export default function AdminShell() {
                     </div>
                   ))}
                 </div>
+              )}
+            </div>
+
+            <div className="dev-card">
+              <span className="settings-label">Web searches — latest activity</span>
+              <p className="settings-hint">
+                Every chat web search, newest first: the query, what triggered it
+                (toggle, auto-detected, or a pasted link), which provider answered,
+                and how many results came back. Zero-result rows mean every search
+                source failed for that query.
+              </p>
+              {(!data.recentSearches || data.recentSearches.length === 0) && (
+                <p className="settings-hint">No web searches recorded yet.</p>
+              )}
+              {data.recentSearches && data.recentSearches.length > 0 && (
+                <ul className="settings-session-list">
+                  {data.recentSearches.map((entry, index) => (
+                    <li key={`${entry.ts}-${index}`}>
+                      <span className="settings-session-device">
+                        {entry.query || "(link)"}
+                        <span className="settings-badge">{entry.trigger}</span>
+                        {entry.resultCount === 0 && (
+                          <span className="settings-badge settings-badge-warn">no results</span>
+                        )}
+                      </span>
+                      <span className="settings-file-meta">
+                        {entry.provider ?? "no provider"}
+                        {" · "}{entry.resultCount} results
+                        {" · "}{formatTime(entry.ts)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
 
