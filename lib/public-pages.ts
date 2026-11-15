@@ -413,6 +413,7 @@ Object.assign(articles, {
           "- Chats: Firestore holds your conversations and messages; Realtime Database holds only presence and in-progress reply text, which is removed when generation finishes",
           "- Files: Cloudinary holds your uploads as private, authenticated assets",
           "- Sessions: Firestore holds a record per signed-in session (device label, approximate city/country from request headers, last active time); Upstash Redis holds rate-limit counters and session-revocation keys",
+          "- Device security: at sign-in your browser computes a device fingerprint (from browser and screen characteristics) and sends only its SHA-256 hash; Firestore stores that hash with your sessions, a per-account device list (first/last seen, sign-in count) and a security activity feed, and your IP address is stored only as a keyed hash — never in plain text. This powers the device list and new-device badges in Settings → Security and helps detect abusive sign-ups; it is never used for advertising or cross-site tracking",
         ],
       },
       {

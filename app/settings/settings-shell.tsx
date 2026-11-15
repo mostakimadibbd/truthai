@@ -983,6 +983,35 @@ type SessionInfo = {
   createdAt: number;
   lastActiveAt: number;
   current: boolean;
+  deviceId?: string | null;
+  authMethod?: string | null;
+  newDevice?: boolean;
+};
+
+type DeviceInfo = {
+  deviceId: string;
+  label: string;
+  browser: string;
+  os: string;
+  deviceType: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  loginCount: number;
+};
+
+type SecurityEventInfo = {
+  id: string;
+  type: string;
+  deviceLabel: string | null;
+  createdAt: number;
+};
+
+const SECURITY_EVENT_LABELS: Record<string, string> = {
+  sign_in: "Signed in with password",
+  sign_up: "Account created",
+  google_sign_in: "Signed in with Google",
+  new_device: "Sign-in from a new device",
+  device_velocity: "Many accounts created from one device",
 };
 
 function SecurityTab({
@@ -996,6 +1025,8 @@ function SecurityTab({
 }) {
   const [methods, setMethods] = useState<{ id: string; email: string | null }[] | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
+  const [devices, setDevices] = useState<DeviceInfo[] | null>(null);
+  const [recentEvents, setRecentEvents] = useState<SecurityEventInfo[] | null>(null);
   const [securityError, setSecurityError] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -1014,9 +1045,13 @@ function SecurityTab({
       }
       const data = (await response.json()) as {
         sessions?: SessionInfo[];
+        devices?: DeviceInfo[];
+        recentEvents?: SecurityEventInfo[];
         methods?: { id: string; email: string | null }[];
       };
       setSessions(Array.isArray(data.sessions) ? data.sessions : []);
+      setDevices(Array.isArray(data.devices) ? data.devices : []);
+      setRecentEvents(Array.isArray(data.recentEvents) ? data.recentEvents : []);
       setMethods(Array.isArray(data.methods) ? data.methods : []);
     } catch (error) {
       setSecurityError(error instanceof Error ? error.message : "Security details couldn’t be loaded.");
@@ -1184,10 +1219,14 @@ function SecurityTab({
                 <span className="settings-session-device">
                   {session.device}
                   {session.current && <span className="settings-badge settings-badge-ok">This device</span>}
+                  {session.newDevice && <span className="settings-badge">New device</span>}
                 </span>
                 <span className="settings-file-meta">
                   {[session.city, session.country].filter(Boolean).join(", ") || "Location unavailable"}
                   {" · "}Active {formatDate(session.lastActiveAt)}
+                  {session.authMethod && (
+                    <>{" · "}via {session.authMethod === "google" ? "Google" : "password"}</>
+                  )}
                 </span>
                 {!session.current && (
                   <button
@@ -1210,6 +1249,56 @@ function SecurityTab({
             Sign out of all devices
           </button>
         </div>
+      </div>
+
+      <div className="settings-field">
+        <span className="settings-label">Your devices</span>
+        <p className="settings-hint">
+          Devices are recognised by a privacy-preserving fingerprint computed in your
+          browser at sign-in. It helps spot sign-ins you don’t recognise; it is never
+          used to track you across other sites.
+        </p>
+        {devices === null && <p className="settings-hint" role="status">Loading devices…</p>}
+        {devices !== null && devices.length === 0 && (
+          <p className="settings-hint">No devices recorded yet. They appear here after your next sign-in.</p>
+        )}
+        {devices !== null && devices.length > 0 && (
+          <ul className="settings-session-list">
+            {devices.map((device) => (
+              <li key={device.deviceId}>
+                <span className="settings-session-device">{device.label}</span>
+                <span className="settings-file-meta">
+                  First seen {formatDate(device.firstSeenAt)}
+                  {" · "}Last active {formatDate(device.lastSeenAt)}
+                  {" · "}{device.loginCount} {device.loginCount === 1 ? "sign-in" : "sign-ins"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="settings-field">
+        <span className="settings-label">Recent security activity</span>
+        {recentEvents === null && <p className="settings-hint" role="status">Loading activity…</p>}
+        {recentEvents !== null && recentEvents.length === 0 && (
+          <p className="settings-hint">No security activity recorded yet.</p>
+        )}
+        {recentEvents !== null && recentEvents.length > 0 && (
+          <ul className="settings-session-list">
+            {recentEvents.map((event) => (
+              <li key={event.id}>
+                <span className="settings-session-device">
+                  {SECURITY_EVENT_LABELS[event.type] ?? "Security event"}
+                </span>
+                <span className="settings-file-meta">
+                  {event.deviceLabel ?? "Unknown device"}
+                  {" · "}{formatDate(event.createdAt)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       <ConfirmDialog

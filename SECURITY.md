@@ -361,3 +361,57 @@ shows a queued state and retries once automatically. At ≥95%,
 chat pauses with 503 BUDGET_PAUSED. GET /api/usage reports the
 current budget percentages. When Redis is unconfigured the guard
 is skipped with a warning.
+
+## Device signals — fingerprinting and login telemetry
+
+Added after the Phase 9 audit, at the owner's request, to make
+bot/abuse detection and account-security visibility stronger.
+
+**What is collected at sign-in / sign-up (and only then):**
+
+- A device fingerprint hash computed in the browser
+  (`lib/device-fingerprint.ts`) from ordinary signals — user agent,
+  platform, languages, timezone, screen size/colour depth,
+  hardware concurrency, device memory, touch points and a small
+  canvas render — hashed with SHA-256. Only the hash leaves the
+  browser; it is cached only in `sessionStorage` (per tab session),
+  never in a persistent cookie, and never used across sites.
+- Server-side facts (`lib/server/device.ts`): the user agent parsed
+  into browser / OS / device type, and the client IP stored **only**
+  as an HMAC-SHA256 hash keyed with `SESSION_SECRET`, so raw IPs
+  never land in the database while equal IPs still correlate.
+
+**Where it is stored (Firestore, all writes server-side via Admin):**
+
+| Location | Contents |
+| --- | --- |
+| `users/{uid}/sessions/{sid}` | device label, `deviceId`, `authMethod` (password/google), `newDevice` flag, `ipHash`, coarse Vercel city/country, timestamps |
+| `users/{uid}/devices/{deviceId}` | label, browser, OS, device type, user agent, first/last seen, login count, last `ipHash` |
+| `users/{uid}/securityEvents/{id}` | `sign_in` / `sign_up` / `google_sign_in` / `new_device` / `device_velocity` events with device label + `ipHash` |
+| `deviceSignals/{deviceId}` | sign-up velocity counter: total accounts created from the fingerprint + capped list of account-id hashes; **no client access at all** |
+
+Client access is owner-read-only for `sessions`, `devices` and
+`securityEvents` (see `firestore.rules`); everything is written by
+the server, and recording is best-effort — a telemetry failure can
+never break or block a sign-in.
+
+**How it is used:**
+
+- Settings → Security shows the session list (with a **New device**
+  badge and sign-in method), the account's device registry and the
+  recent security activity feed, so a user can spot and revoke
+  sign-ins they don't recognise.
+- A fingerprint the account has never seen produces a `new_device`
+  event.
+- Five or more accounts created from one fingerprint produces a
+  `device_velocity` event on the new account. It is a signal for
+  review, **not** an automatic block: households, schools and
+  shared computers legitimately create many accounts from one
+  device.
+
+**Honest limits:** a fingerprint is a hint, not an identity proof.
+It can be spoofed by a determined attacker and can change when a
+browser updates or privacy settings change (which simply looks
+like a new device). It complements — never replaces — Turnstile,
+per-IP/per-account rate limits and server-side sessions, and it is
+never the sole basis for denying access.

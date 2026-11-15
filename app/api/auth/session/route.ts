@@ -37,6 +37,7 @@ export async function POST(request: NextRequest) {
   const idToken = stringField(body, "idToken") ?? "";
   const turnstileToken = stringField(body, "turnstileToken") ?? "";
   const action = stringField(body, "action") ?? "";
+  const deviceId = stringField(body, "deviceId") ?? undefined;
   const termsAccepted = body.termsAccepted;
   if (
     idToken.length === 0 ||
@@ -179,7 +180,10 @@ export async function POST(request: NextRequest) {
   // session_refresh renewals are skipped: they would mint a fresh sid
   // each time and fill the list with duplicate devices.
   if (action !== "session_refresh") {
-    await recordSessionLogin(decoded.uid, sid, request);
+    await recordSessionLogin(decoded.uid, sid, request, {
+      deviceId,
+      eventType: "google_sign_in",
+    });
   }
   return response;
 }

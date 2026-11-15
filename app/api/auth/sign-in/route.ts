@@ -32,6 +32,7 @@ export async function POST(request: NextRequest) {
   const email = stringField(body, "email")?.trim() ?? "";
   const password = stringField(body, "password") ?? "";
   const turnstileToken = stringField(body, "turnstileToken") ?? "";
+  const deviceId = stringField(body, "deviceId") ?? undefined;
   if (
     email.length === 0 ||
     email.length > 254 ||
@@ -133,7 +134,10 @@ export async function POST(request: NextRequest) {
       { headers: { "Cache-Control": "no-store" } },
     );
     const { sid } = await createSession(response, signIn.uid);
-    await recordSessionLogin(signIn.uid, sid, request);
+    await recordSessionLogin(signIn.uid, sid, request, {
+      deviceId,
+      eventType: "sign_in",
+    });
     return response;
   } catch (error) {
     console.error("Firebase sign-in session creation failed.", error);

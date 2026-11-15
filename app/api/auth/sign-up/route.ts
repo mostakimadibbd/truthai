@@ -16,7 +16,12 @@ import {
 } from "@/lib/server/firebase-admin";
 import { checkPasswordNotBreached } from "@/lib/server/password";
 import { createSession, isSessionConfigured } from "@/lib/server/session";
-import { recordSessionLogin } from "@/lib/server/session-record";
+import { getDeviceContext } from "@/lib/server/device";
+import {
+  recordDeviceSignUp,
+  recordSecurityEvent,
+  recordSessionLogin,
+} from "@/lib/server/session-record";
 import { getRemoteIp, verifyTurnstile } from "@/lib/server/turnstile";
 
 export const runtime = "nodejs";
@@ -46,6 +51,7 @@ export async function POST(request: NextRequest) {
   const password = stringField(body, "password") ?? "";
   const displayName = stringField(body, "displayName") ?? "";
   const turnstileToken = stringField(body, "turnstileToken") ?? "";
+  const deviceId = stringField(body, "deviceId") ?? undefined;
   if (
     email.length === 0 ||
     email.length > 254 ||
@@ -172,7 +178,21 @@ export async function POST(request: NextRequest) {
     // token, so a created account is immediately a Turnstile-gated
     // session.
     const { sid } = await createSession(response, user.uid);
-    await recordSessionLogin(user.uid, sid, request);
+    await recordSessionLogin(user.uid, sid, request, {
+      deviceId,
+      eventType: "sign_up",
+    });
+    // Sign-up velocity signal: many accounts from one device is an
+    // abuse indicator worth an activity entry (never a block — shared
+    // devices are legitimate).
+    const deviceContext = getDeviceContext(request, deviceId);
+    const velocity = await recordDeviceSignUp(deviceContext.deviceId, user.uid);
+    if (velocity.flagged) {
+      await recordSecurityEvent(user.uid, {
+        type: "device_velocity",
+        context: deviceContext,
+      });
+    }
     return response;
   } catch (error) {
     console.error("Firebase custom token creation failed after account creation.", error);

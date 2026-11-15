@@ -87,6 +87,27 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Device registry: one document per browser fingerprint the
+    // account has signed in from. Written only by the server at
+    // login; owners may read their own list.
+    match /users/{userId}/devices/{deviceId} {
+      allow read: if ownsUser(userId);
+      allow write: if false;
+    }
+
+    // Security activity feed: sign-in / sign-up / new-device /
+    // velocity events, appended only by the server at login.
+    match /users/{userId}/securityEvents/{eventId} {
+      allow read: if ownsUser(userId);
+      allow write: if false;
+    }
+
+    // Sign-up velocity counters per device fingerprint: server-only,
+    // never readable or writable by clients.
+    match /deviceSignals/{deviceId} {
+      allow read, write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

@@ -19,6 +19,7 @@ import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/auth-clien
 import { nextPathOrDefault } from "@/lib/auth-redirect";
 import TurnstileWidget from "@/components/turnstile-widget";
 import TurnstileBoundary from "@/components/turnstile-boundary";
+import { getDeviceId } from "@/lib/device-fingerprint";
 
 type AuthMode = "sign-in" | "sign-up";
 
@@ -248,10 +249,12 @@ export default function SignInForm({
 
   async function establishGoogleSession(user: User, token: string, terms: boolean) {
     const idToken = await user.getIdToken();
+    const deviceId = await getDeviceId();
     const response = await authFetch("/api/auth/session", {
       idToken,
       turnstileToken: token,
       action: formAction,
+      deviceId: deviceId || undefined,
       ...(mode === "sign-up" ? { termsAccepted: terms } : {}),
     });
     if (!response.ok) {
@@ -317,6 +320,7 @@ export default function SignInForm({
           displayName: displayName.trim().slice(0, 100),
           turnstileToken,
           termsAccepted,
+          deviceId: (await getDeviceId()) || undefined,
         });
         if (!response.ok) {
           setError(await getApiErrorMessage(response, "We couldn’t create your account. Please try again."));
@@ -364,6 +368,7 @@ export default function SignInForm({
         email: email.trim(),
         password,
         turnstileToken,
+        deviceId: (await getDeviceId()) || undefined,
       });
       if (!response.ok) {
         setError(await getApiErrorMessage(response, "We couldn’t sign you in. Please try again."));

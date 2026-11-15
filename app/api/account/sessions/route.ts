@@ -13,6 +13,8 @@ import { getFirebaseAdminAuth } from "@/lib/server/firebase-admin";
 import { revokeSession } from "@/lib/server/session";
 import {
   deleteSessionRecord,
+  listDevices,
+  listSecurityEvents,
   listSessionRecords,
 } from "@/lib/server/session-record";
 
@@ -41,8 +43,12 @@ export async function GET(request: NextRequest) {
     const adminAuth = getFirebaseAdminAuth();
     const user = await adminAuth.getUser(auth.uid);
     const sessions = await listSessionRecords(auth.uid, auth.sid);
+    const devices = await listDevices(auth.uid).catch(() => []);
+    const recentEvents = await listSecurityEvents(auth.uid).catch(() => []);
     return json({
       sessions,
+      devices,
+      recentEvents,
       currentSid: auth.sid,
       methods: user.providerData.map((provider) => ({
         id: provider.providerId,
