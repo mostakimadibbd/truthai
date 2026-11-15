@@ -4,6 +4,7 @@ import {
   type CloudinaryResourceType,
 } from "@/lib/server/cloudinary";
 import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
+import { limitDeniedResponse, limit as rateLimit } from "@/lib/server/limit";
 import { authenticateVerifiedUser } from "@/lib/server/request-auth";
 
 export const runtime = "nodejs";
@@ -20,6 +21,24 @@ function errorResponse(status: number, code: string, message: string) {
 export async function GET(request: NextRequest) {
   const auth = await authenticateVerifiedUser(request);
   if (!auth.ok) return errorResponse(auth.status, auth.code, auth.message);
+
+  // Phase 4: signed-URL minting is capped at 60 per user per hour.
+  // This is a cheap read, so the limiter fails open (with a warning)
+  // when Redis is unreachable; when Redis is unconfigured the check
+  // is skipped, as with the other limiters. (The brief lists this
+  // limit as POST /api/uploads/access; in the current codebase the
+  // route is a GET with an assetId query parameter, and the limit is
+  // applied to that handler.)
+  const limitResult = await rateLimit(
+    `uploads:access:user:${auth.uid}`,
+    60 * 60 * 1000,
+    60,
+    "open",
+  );
+  if (!limitResult.allowed) {
+    const denied = limitDeniedResponse(limitResult);
+    return errorResponse(denied.status, denied.code, denied.message);
+  }
 
   const assetId = request.nextUrl.searchParams.get("assetId");
   if (!assetId || !UUID_PATTERN.test(assetId)) {

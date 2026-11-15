@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import { headers } from "next/headers";
 import PwaRegistration from "./pwa-registration";
+import AuthSync from "@/components/auth-sync";
 import SiteHeader from "@/components/site-header";
 import { siteUrl } from "@/lib/site";
 import "./globals.css";
@@ -38,21 +39,36 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0a090d",
+  themeColor: [
+    { media: "(prefers-color-scheme: dark)", color: "#0b0910" },
+    { media: "(prefers-color-scheme: light)", color: "#faf8fc" },
+  ],
   width: "device-width",
   initialScale: 1,
 };
+
+// Runs before first paint: reads the theme preference mirrored in
+// localStorage by lib/theme-client.ts (the saved preference itself
+// lives in Firestore via /api/settings), resolves "system" against
+// the device colour scheme, and sets data-theme on <html> so
+// globals.css paints the right theme with no flash. The script is
+// served with the middleware CSP nonce, like Next's own scripts.
+const THEME_INIT_SCRIPT = `try{var m=window.matchMedia("(prefers-color-scheme: light)");var applyTheme=function(){var t="system";try{t=window.localStorage.getItem("xyro-theme")||"system";}catch(e){}document.documentElement.dataset.theme=t==="light"||(t!=="dark"&&m.matches)?"light":"dark";};applyTheme();if(m.addEventListener){m.addEventListener("change",applyTheme);}}catch(e){}`;
 
 export default async function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   // Request-time rendering lets Next.js attach the middleware CSP nonce to its scripts.
-  await headers();
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
 
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <script nonce={nonce} dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+      </head>
       <body>
         <PwaRegistration />
+        <AuthSync />
         <a className="skip-link" href="#main">
           Skip to content
         </a>
@@ -61,7 +77,7 @@ export default async function RootLayout({
         <footer className="site-footer">
           <div className="footer-top">
             <div>
-              <Link className="wordmark footer-wordmark" href="/">
+              <Link className="wordmark footer-wordmark" href="/chat">
                 <span className="wordmark-icon" aria-hidden="true">x</span>
                 <span>xyro<span className="wordmark-light">ai</span></span>
               </Link>
@@ -71,19 +87,32 @@ export default async function RootLayout({
               <div>
                 <span className="footer-heading">Explore</span>
                 <Link href="/about">About</Link>
-                <Link href="/help">How it works</Link>
-                <Link href="/pricing">Plans</Link>
+                <Link href="/company">Company</Link>
+                <Link href="/pricing">Pricing</Link>
+                <Link href="/changelog">Changelog</Link>
+                <Link href="/xyroaidetect">XyroAIDetect</Link>
               </div>
               <div>
                 <span className="footer-heading">Support</span>
                 <Link href="/help">Help center</Link>
+                <Link href="/faq">FAQ</Link>
                 <Link href="/contact">Contact</Link>
+                <Link href="/status">Status</Link>
+              </div>
+              <div>
+                <span className="footer-heading">Trust &amp; data</span>
+                <Link href="/security">Security</Link>
+                <Link href="/privacy-center">Privacy center</Link>
+                <Link href="/subprocessors">Subprocessors</Link>
+                <Link href="/developers">Developers</Link>
               </div>
               <div>
                 <span className="footer-heading">Legal</span>
                 <Link href="/terms">Terms</Link>
                 <Link href="/privacy">Privacy</Link>
                 <Link href="/acceptable-use">Acceptable use</Link>
+                <Link href="/cookies">Cookies</Link>
+                <Link href="/api-terms">API terms</Link>
               </div>
             </div>
           </div>

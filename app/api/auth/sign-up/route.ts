@@ -1,29 +1,29 @@
-import { createHash } from "node:crypto";
+import { FieldValue } from "firebase-admin/firestore";
 import { NextRequest, NextResponse } from "next/server";
-import { getFirebaseAdminAuth } from "@/lib/server/firebase-admin";
-import { verifyTurnstileToken } from "@/lib/server/turnstile";
+import {
+  authErrorResponse as errorResponse,
+  guardAuthPost,
+  stringField,
+} from "@/lib/server/auth-guard";
+import {
+  checkWindowLimit,
+  hashRateLimitKeyPart,
+  rateLimitedResponse,
+} from "@/lib/server/auth-rate-limit";
+import {
+  getFirebaseAdminAuth,
+  getFirebaseAdminFirestore,
+} from "@/lib/server/firebase-admin";
+import { checkPasswordNotBreached } from "@/lib/server/password";
+import { createSession, isSessionConfigured } from "@/lib/server/session";
+import { recordSessionLogin } from "@/lib/server/session-record";
+import { getRemoteIp, verifyTurnstile } from "@/lib/server/turnstile";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
 const MAX_BODY_BYTES = 16_384;
 const MAX_PASSWORD_LENGTH = 1024;
-const HIBP_RANGE_URL = "https://api.pwnedpasswords.com/range/";
-
-type SignUpBody = {
-  email?: unknown;
-  password?: unknown;
-  displayName?: unknown;
-  turnstileToken?: unknown;
-  termsAccepted?: unknown;
-};
-
-function errorResponse(status: number, code: string, message: string) {
-  return NextResponse.json(
-    { error: { code, message } },
-    { status, headers: { "Cache-Control": "no-store" } },
-  );
-}
 
 function getErrorCode(error: unknown): string | undefined {
   if (
@@ -37,86 +37,53 @@ function getErrorCode(error: unknown): string | undefined {
   return undefined;
 }
 
-async function checkPasswordNotBreached(password: string): Promise<
-  | { state: "safe" }
-  | { state: "breached" }
-  | { state: "unavailable" }
-> {
-  const hash = createHash("sha1").update(password, "utf8").digest("hex").toUpperCase();
-  let response: Response;
-  try {
-    response = await fetch(`${HIBP_RANGE_URL}${hash.slice(0, 5)}`, {
-      headers: { "Add-Padding": "true" },
-      cache: "no-store",
-      signal: AbortSignal.timeout(5000),
-    });
-  } catch {
-    return { state: "unavailable" };
-  }
-  if (!response.ok) return { state: "unavailable" };
-
-  let lines: string[];
-  try {
-    lines = (await response.text()).split(/\r?\n/);
-  } catch {
-    return { state: "unavailable" };
-  }
-
-  const suffix = hash.slice(5);
-  return lines.some((line) => {
-    const [candidate, count] = line.split(":");
-    return candidate?.toUpperCase() === suffix && Number(count) > 0;
-  })
-    ? { state: "breached" }
-    : { state: "safe" };
-}
-
 export async function POST(request: NextRequest) {
-  if (request.headers.get("origin") !== request.nextUrl.origin) {
-    return errorResponse(403, "ORIGIN_NOT_ALLOWED", "This request origin isn’t allowed.");
-  }
+  const guarded = await guardAuthPost(request, MAX_BODY_BYTES);
+  if (!guarded.ok) return guarded.response;
+  const { body } = guarded;
 
-  const contentType = request.headers.get("content-type")?.split(";")[0].trim();
-  const contentLength = Number(request.headers.get("content-length"));
+  const email = stringField(body, "email")?.trim() ?? "";
+  const password = stringField(body, "password") ?? "";
+  const displayName = stringField(body, "displayName") ?? "";
+  const turnstileToken = stringField(body, "turnstileToken") ?? "";
   if (
-    contentType !== "application/json" ||
-    (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES)
-  ) {
-    return errorResponse(400, "INVALID_REQUEST", "The sign-up request isn’t valid.");
-  }
-
-  let body: SignUpBody;
-  try {
-    const rawBody = await request.text();
-    if (new TextEncoder().encode(rawBody).byteLength > MAX_BODY_BYTES) {
-      return errorResponse(400, "INVALID_REQUEST", "The sign-up request is too large.");
-    }
-    body = JSON.parse(rawBody) as SignUpBody;
-  } catch {
-    return errorResponse(400, "INVALID_REQUEST", "The sign-up request isn’t valid JSON.");
-  }
-
-  if (
-    typeof body.email !== "string" ||
-    body.email.trim().length === 0 ||
-    body.email.trim().length > 254 ||
-    typeof body.password !== "string" ||
-    body.password.length < 10 ||
-    body.password.length > MAX_PASSWORD_LENGTH ||
+    email.length === 0 ||
+    email.length > 254 ||
+    password.length < 10 ||
+    password.length > MAX_PASSWORD_LENGTH ||
     body.termsAccepted !== true ||
-    (body.displayName !== undefined &&
-      (typeof body.displayName !== "string" || body.displayName.length > 100)) ||
-    typeof body.turnstileToken !== "string" ||
-    body.turnstileToken.length === 0 ||
-    body.turnstileToken.length > 2048
+    displayName.length > 100 ||
+    turnstileToken.length === 0 ||
+    turnstileToken.length > 2048
   ) {
     return errorResponse(400, "INVALID_SIGN_UP", "Check the name, email, password, and security check.");
   }
 
-  const verification = await verifyTurnstileToken(
-    body.turnstileToken,
-    request.nextUrl.hostname,
+  if (!isSessionConfigured()) {
+    return errorResponse(503, "SESSION_NOT_CONFIGURED", "Account sessions aren’t configured for this deployment.");
+  }
+
+  // Phase 4 audit addition: account creation had no IP limit. Cap
+  // sign-up attempts at 10 per hour per IP (fail closed), before the
+  // Turnstile and Admin work below.
+  const signUpLimit = await checkWindowLimit(
+    `xyro:auth:sign-up:ip:${hashRateLimitKeyPart(getRemoteIp(request) ?? "unknown")}`,
+    60 * 60 * 1000,
+    10,
   );
+  if (signUpLimit.state !== "allowed") {
+    const limited = rateLimitedResponse(signUpLimit);
+    return errorResponse(limited.status, limited.code, limited.message, {
+      ...(limited.retryAfter
+        ? { "Retry-After": String(limited.retryAfter) }
+        : {}),
+    });
+  }
+
+  const verification = await verifyTurnstile(turnstileToken, {
+    expectedAction: "create_account",
+    remoteIp: getRemoteIp(request),
+  });
   if (verification.state === "misconfigured") {
     return errorResponse(503, "TURNSTILE_NOT_CONFIGURED", "Account security verification isn’t configured.");
   }
@@ -124,15 +91,26 @@ export async function POST(request: NextRequest) {
     return errorResponse(503, "TURNSTILE_UNAVAILABLE", "Security verification is temporarily unavailable.");
   }
   if (verification.state === "invalid") {
-    return errorResponse(403, "TURNSTILE_INVALID", "The security check expired or was invalid. Please try again.");
+    return errorResponse(403, "TURNSTILE_INVALID", verification.reason);
   }
 
-  const passwordCheck = await checkPasswordNotBreached(body.password);
-  if (passwordCheck.state === "unavailable") {
-    return errorResponse(503, "PASSWORD_CHECK_UNAVAILABLE", "We couldn’t check this password right now. Please try again.");
-  }
+  const passwordCheck = await checkPasswordNotBreached(password);
   if (passwordCheck.state === "breached") {
     return errorResponse(400, "PASSWORD_BREACHED", "This password appears in known data breaches. Please choose another one.");
+  }
+  if (passwordCheck.state === "unavailable") {
+    // Fail open with a stricter rule: if the breach-check service is
+    // down, sign-up still works but the password must be 12+ characters.
+    if (password.length < 12) {
+      return errorResponse(
+        400,
+        "PASSWORD_TOO_SHORT_WHILE_CHECK_UNAVAILABLE",
+        "Our password safety check is unavailable right now, so please choose a password with at least 12 characters.",
+      );
+    }
+    console.warn(
+      "Breach-check service unavailable during sign-up; allowing a 12+ character password.",
+    );
   }
 
   let adminAuth: ReturnType<typeof getFirebaseAdminAuth>;
@@ -145,12 +123,10 @@ export async function POST(request: NextRequest) {
 
   let user;
   try {
-    const displayName =
-      typeof body.displayName === "string" ? body.displayName.trim() : "";
     user = await adminAuth.createUser({
-      email: body.email.trim(),
-      password: body.password,
-      displayName: displayName || undefined,
+      email,
+      password,
+      displayName: displayName.trim() || undefined,
     });
   } catch (error) {
     const code = getErrorCode(error);
@@ -164,12 +140,40 @@ export async function POST(request: NextRequest) {
     return errorResponse(503, "ACCOUNT_CREATION_FAILED", "We couldn’t create your account right now. Please try again.");
   }
 
+  // Create the profile server-side so the account is complete even if
+  // the browser closes right after sign-up.
+  try {
+    await getFirebaseAdminFirestore()
+      .collection("users")
+      .doc(user.uid)
+      .set(
+        {
+          uid: user.uid,
+          email,
+          displayName: displayName.trim(),
+          photoURL: "",
+          createdAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+          lastSignInAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+  } catch (error) {
+    console.error("Server profile creation failed after sign-up.", error);
+  }
+
   try {
     const customToken = await adminAuth.createCustomToken(user.uid);
-    return NextResponse.json(
+    const response = NextResponse.json(
       { customToken },
       { headers: { "Cache-Control": "no-store" } },
     );
+    // The session cookie is minted in the same response as the custom
+    // token, so a created account is immediately a Turnstile-gated
+    // session.
+    const { sid } = await createSession(response, user.uid);
+    await recordSessionLogin(user.uid, sid, request);
+    return response;
   } catch (error) {
     console.error("Firebase custom token creation failed after account creation.", error);
     return errorResponse(

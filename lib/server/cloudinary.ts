@@ -62,6 +62,91 @@ export function getCloudinaryPrivateDownloadUrl(
   });
 }
 
+/**
+ * Uploads a profile avatar (Phase 3). Unlike chat attachments, avatars
+ * are public profile pictures, so they use delivery type "upload"
+ * under xyro/avatars/{uid} with a random public id, overwrite +
+ * invalidate, exactly as the settings brief specifies. The caller has
+ * already validated the bytes (image magic bytes, 2 MB cap, 256px
+ * square crop done client-side).
+ */
+export async function uploadAvatarImage(
+  buffer: Buffer,
+  uid: string,
+): Promise<{ url: string; publicId: string }> {
+  getCloudinaryConfig();
+  const publicId = `avatar-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+  const result = await new Promise<{
+    secure_url: string;
+    public_id: string;
+  }>((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        public_id: publicId,
+        folder: `xyro/avatars/${uid}`,
+        type: "upload",
+        overwrite: true,
+        invalidate: true,
+        resource_type: "image",
+      },
+      (error, uploaded) => {
+        if (error || !uploaded) {
+          reject(error ?? new Error("Cloudinary avatar upload failed."));
+          return;
+        }
+        resolve({
+          secure_url: uploaded.secure_url,
+          public_id: uploaded.public_id,
+        });
+      },
+    );
+    stream.end(buffer);
+  });
+  return { url: result.secure_url, publicId: result.public_id };
+}
+
+/**
+ * Uploads a generated image (Phase 7). The buffer has ALREADY been
+ * watermarked by the caller (lib/server/watermark.ts) — the
+ * unwatermarked original is never stored. Generated pictures use
+ * the same authenticated (private) delivery as user uploads, under
+ * xyro/generated/{uid}, with the generation id as the public id so
+ * the asset is traceable back to its watermark payload.
+ */
+export async function uploadGeneratedImage(
+  buffer: Buffer,
+  uid: string,
+  generationId: string,
+): Promise<{ publicId: string; bytes: number }> {
+  getCloudinaryConfig();
+  const result = await new Promise<{
+    public_id: string;
+    bytes: number;
+  }>((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        public_id: generationId,
+        folder: `xyro/generated/${uid}`,
+        type: "authenticated",
+        resource_type: "image",
+        format: "png",
+        overwrite: false,
+      },
+      (error, uploaded) => {
+        if (error || !uploaded) {
+          reject(error ?? new Error("Cloudinary generated-image upload failed."));
+          return;
+        }
+        resolve({ public_id: uploaded.public_id, bytes: uploaded.bytes });
+      },
+    );
+    stream.end(buffer);
+  });
+  return { publicId: result.public_id, bytes: result.bytes };
+}
+
 export async function deleteCloudinaryResource(
   publicId: string,
   resourceType: CloudinaryResourceType,

@@ -2,19 +2,13 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import Script from "next/script";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
-  browserLocalPersistence,
-  browserSessionPersistence,
+  browserPopupRedirectResolver,
   getRedirectResult,
   GoogleAuthProvider,
   reload,
-  sendEmailVerification,
-  sendPasswordResetEmail,
-  setPersistence,
   signInWithCustomToken,
-  signInWithEmailAndPassword,
   signInWithPopup,
   signInWithRedirect,
   updateProfile,
@@ -22,9 +16,13 @@ import {
 } from "firebase/auth";
 import { FirebaseError } from "firebase/app";
 import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/auth-client";
-import TurnstileField, { notifyTurnstileReady } from "@/components/turnstile-field";
+import { nextPathOrDefault } from "@/lib/auth-redirect";
+import TurnstileWidget from "@/components/turnstile-widget";
+import TurnstileBoundary from "@/components/turnstile-boundary";
 
 type AuthMode = "sign-in" | "sign-up";
+
+const GOOGLE_REDIRECT_FLAG = "xyro-google-redirect";
 
 function getAuthErrorMessage(error: unknown): string {
   if (!(error instanceof FirebaseError)) {
@@ -92,23 +90,21 @@ async function getApiErrorMessage(response: Response, fallback: string): Promise
   return fallback;
 }
 
-function getProfileSaveErrorMessage(error: unknown): string {
-  if (error instanceof FirebaseError) {
-    if (error.code === "permission-denied") {
-      return "Your account exists, but Firestore rejected the profile save. Confirm that Cloud Firestore is created and the current firestore.rules are deployed.";
-    }
-    if (error.code === "unavailable" || error.code === "deadline-exceeded") {
-      return "Your account exists, but Firestore is temporarily unreachable. Check your connection and retry the profile save.";
-    }
-  }
-  return "Your account exists, but we couldn’t save its profile in Firestore. Check the Firebase configuration and retry.";
-}
-
 function shouldUseRedirect(): boolean {
   if (typeof navigator === "undefined") return false;
   return /Android|iPhone|iPad|iPod|; wv\)|FBAN|FBAV|Instagram|Line\//i.test(
     navigator.userAgent,
   );
+}
+
+/** All /api/auth/* POSTs carry the header the server guard requires. */
+function authFetch(path: string, body: Record<string, unknown>) {
+  return fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Requested-With": "xyro" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
 }
 
 export default function SignInForm({
@@ -120,52 +116,65 @@ export default function SignInForm({
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [rememberMe, setRememberMe] = useState(true);
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [turnstileToken, setTurnstileToken] = useState("");
-  const [turnstileStatus, setTurnstileStatus] = useState("");
   const [turnstileResetKey, setTurnstileResetKey] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [verificationUser, setVerificationUser] = useState<User | null>(null);
-  const [profileSaved, setProfileSaved] = useState(false);
-  const [emailVerified, setEmailVerified] = useState(false);
+  const [signupStep, setSignupStep] = useState<"idle" | "creating" | "verify">("idle");
+  const [showReset, setShowReset] = useState(false);
+  const [resetToken, setResetToken] = useState("");
+  const [resetKey, setResetKey] = useState(0);
+  const [googleReturnUser, setGoogleReturnUser] = useState<User | null>(null);
+  const [googleTermsAccepted, setGoogleTermsAccepted] = useState(false);
+  const [googleToken, setGoogleToken] = useState("");
+  const [googleKey, setGoogleKey] = useState(0);
+  const [resendCooldown, setResendCooldown] = useState(0);
   const configured = isFirebaseConfigured;
   const turnstileSiteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY?.trim() ?? "";
   const mode = initialMode;
+  const formAction = mode === "sign-up" ? "create_account" : "sign_in";
 
+  // Finishes a sign-in whose server session already exists (the
+  // /api/auth/sign-in custom-token flow, or /api/auth/session for
+  // Google). There is deliberately NO client profile write and NO
+  // intermediate card here: the profile is created/upserted
+  // server-side, so during login the only progress UI is the submit
+  // button's spinner. (The previous version set a verification user
+  // before "saving the profile" client-side, which flashed the
+  // "Finish setting up your account" card on every login.)
+  //
+  // If the server session call itself failed, callers never reach
+  // this function — they stay on the form with an inline error and
+  // can simply submit again.
+  //
+  // Unverified users are sent into the app as well: the chat
+  // workspace shows the persistent "Verify your email" banner and
+  // blocks sending until the email is verified.
   const completeSignIn = useCallback(async (user: User) => {
     await reload(user);
-    setVerificationUser(user);
-    setEmailVerified(user.emailVerified);
-    setProfileSaved(false);
-
-    try {
-      const { saveUserProfile } = await import("@/lib/firebase/profile");
-      await saveUserProfile(user);
-      setProfileSaved(true);
-    } catch (profileError) {
-      setError(getProfileSaveErrorMessage(profileError));
-      return;
-    }
-
-    if (!user.emailVerified) {
-      setNotice("");
-      setError("");
-      return;
-    }
-
     setVerificationUser(null);
-    router.replace("/chat");
+    const next = nextPathOrDefault(
+      new URLSearchParams(window.location.search).get("next"),
+    );
+    router.replace(next);
     router.refresh();
   }, [router]);
 
   function resetTurnstile() {
+    // Turnstile tokens are single-use: reset the widget after every
+    // attempt so the next submit needs a fresh token.
     setTurnstileToken("");
-    setTurnstileStatus("");
     setTurnstileResetKey((key) => key + 1);
   }
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const timer = window.setTimeout(() => setResendCooldown((value) => value - 1), 1000);
+    return () => window.clearTimeout(timer);
+  }, [resendCooldown]);
 
   useEffect(() => {
     if (!configured) return;
@@ -181,9 +190,25 @@ export default function SignInForm({
 
     void redirectResult
       .then(async (result) => {
-        if (result?.user && active) {
-          await completeSignIn(result.user);
+        if (!result?.user || !active) return;
+        // The Turnstile token does not survive a redirect, so a Google
+        // redirect return must run the widget once more before the
+        // server will issue a session.
+        let flag: { termsAccepted?: boolean } | null = null;
+        try {
+          const raw = sessionStorage.getItem(GOOGLE_REDIRECT_FLAG);
+          if (raw) flag = JSON.parse(raw) as { termsAccepted?: boolean };
+          sessionStorage.removeItem(GOOGLE_REDIRECT_FLAG);
+        } catch {
+          flag = null;
         }
+        // Whether or not the flag survived, a redirect return has no
+        // Turnstile token and no server session yet, so it always
+        // goes through the "one more step" widget before
+        // /api/auth/session is called.
+        setGoogleTermsAccepted(flag?.termsAccepted === true);
+        setGoogleReturnUser(result.user);
+        setNotice("One more step: verify you’re human to finish signing in.");
       })
       .catch((redirectError: unknown) => {
         if (active) setError(getAuthErrorMessage(redirectError));
@@ -192,55 +217,95 @@ export default function SignInForm({
     return () => {
       active = false;
     };
-  }, [completeSignIn, configured]);
+  }, [configured]);
+
+  /** Sends the verification email through the session-gated server route. */
+  async function sendVerificationViaServer(user: User): Promise<boolean> {
+    try {
+      const idToken = await user.getIdToken();
+      const response = await authFetch("/api/auth/resend-verification", { idToken });
+      if (!response.ok) {
+        setError(await getApiErrorMessage(response, "We couldn’t send the verification email. Please try again."));
+        return false;
+      }
+      setResendCooldown(60);
+      return true;
+    } catch {
+      setError("We couldn’t send the verification email. Check your connection and try again.");
+      return false;
+    }
+  }
+
+  async function establishGoogleSession(user: User, token: string, terms: boolean) {
+    const idToken = await user.getIdToken();
+    const response = await authFetch("/api/auth/session", {
+      idToken,
+      turnstileToken: token,
+      action: formAction,
+      ...(mode === "sign-up" ? { termsAccepted: terms } : {}),
+    });
+    if (!response.ok) {
+      setError(await getApiErrorMessage(response, "The security check failed. Please try again."));
+      return false;
+    }
+    return true;
+  }
+
+  async function handleGoogleReturnContinue() {
+    if (!googleReturnUser || !googleToken) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const ok = await establishGoogleSession(googleReturnUser, googleToken, googleTermsAccepted);
+      if (!ok) return;
+      const user = googleReturnUser;
+      setGoogleReturnUser(null);
+      await completeSignIn(user);
+    } catch (sessionError) {
+      setError(getAuthErrorMessage(sessionError));
+    } finally {
+      setGoogleToken("");
+      setGoogleKey((key) => key + 1);
+      setBusy(false);
+    }
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (mode === "sign-up") {
-      if (!termsAccepted) {
-        setError("Please agree to the Terms and Conditions and Privacy Policy to create an account.");
-        return;
-      }
-      if (!turnstileSiteKey) {
-        setError("Account security verification isn’t configured. Please contact the site administrator.");
-        return;
-      }
-      if (!turnstileToken) {
-        setError("Complete the security check before creating your account.");
-        return;
-      }
+    if (!turnstileSiteKey) {
+      setError("Security verification isn’t configured. Please contact the site administrator.");
+      return;
+    }
+    if (!turnstileToken) {
+      setError("Complete the security check before continuing.");
+      return;
+    }
+    if (mode === "sign-up" && !termsAccepted) {
+      setError("Please agree to the Terms and Conditions and Privacy Policy to create an account.");
+      return;
     }
 
     setBusy(true);
     setError("");
     setNotice("");
     setVerificationUser(null);
-    setProfileSaved(false);
-    setEmailVerified(false);
+    if (mode === "sign-up") setSignupStep("creating");
 
     try {
       const auth = getFirebaseAuth();
-      await setPersistence(
-        auth,
-        rememberMe ? browserLocalPersistence : browserSessionPersistence,
-      );
       if (mode === "sign-up") {
         if (password.length < 10) {
           setError("Use a password with at least 10 characters.");
           return;
         }
 
-        const response = await fetch("/api/auth/sign-up", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            email: email.trim(),
-            password,
-            displayName: displayName.trim().slice(0, 100),
-            turnstileToken,
-            termsAccepted,
-          }),
-          cache: "no-store",
+        const response = await authFetch("/api/auth/sign-up", {
+          email: email.trim(),
+          password,
+          displayName: displayName.trim().slice(0, 100),
+          turnstileToken,
+          termsAccepted,
         });
         if (!response.ok) {
           setError(await getApiErrorMessage(response, "We couldn’t create your account. Please try again."));
@@ -258,10 +323,12 @@ export default function SignInForm({
           return;
         }
 
+        // The server created the account AND its profile and minted
+        // the session in one call, so steps 1–2 of the sign-up
+        // progress are done; what remains is email verification.
         const credential = await signInWithCustomToken(auth, result.customToken);
         setVerificationUser(credential.user);
-        setProfileSaved(false);
-        setEmailVerified(false);
+        setSignupStep("verify");
         setPassword("");
         if (displayName.trim()) {
           try {
@@ -273,107 +340,125 @@ export default function SignInForm({
           }
         }
 
-        let savedProfile = false;
-        try {
-          const { saveUserProfile } = await import("@/lib/firebase/profile");
-          await saveUserProfile(credential.user);
-          savedProfile = true;
-          setProfileSaved(true);
-        } catch (profileError) {
-          setError(getProfileSaveErrorMessage(profileError));
+        const sent = await sendVerificationViaServer(credential.user);
+        if (sent) {
+          setNotice("Your account and profile are saved. Verify your email to open your workspace.");
         }
-
-        try {
-          await sendEmailVerification(credential.user);
-        } catch {
-          setError(savedProfile
-            ? "Your profile is saved, but we couldn’t send the verification email. Use the resend option below."
-            : "Your account exists, but we couldn’t save its profile or send the verification email. Retry both below.");
-          return;
-        }
-        setNotice(savedProfile
-          ? "Your account and profile are saved. Verify your email to open your workspace."
-          : "We sent a verification email. Save your profile below before continuing.");
         return;
       }
 
-      const credential = await signInWithEmailAndPassword(
-        auth,
-        email.trim(),
+      // Sign-in: the server verifies Turnstile and the password, then
+      // returns a custom token and sets the session cookie.
+      const response = await authFetch("/api/auth/sign-in", {
+        email: email.trim(),
         password,
-      );
+        turnstileToken,
+      });
+      if (!response.ok) {
+        setError(await getApiErrorMessage(response, "We couldn’t sign you in. Please try again."));
+        return;
+      }
+      const result: unknown = await response.json();
+      if (
+        typeof result !== "object" ||
+        result === null ||
+        !("customToken" in result) ||
+        typeof result.customToken !== "string"
+      ) {
+        setError("The sign-in service returned an invalid response. Please try again.");
+        return;
+      }
+      const credential = await signInWithCustomToken(auth, result.customToken);
       await completeSignIn(credential.user);
     } catch (authError) {
       setError(getAuthErrorMessage(authError));
     } finally {
-      if (mode === "sign-up") resetTurnstile();
+      resetTurnstile();
       setBusy(false);
     }
   }
 
   async function handleGoogleSignIn() {
-    if (mode === "sign-up") {
-      if (!termsAccepted) {
-        setError("Please agree to the Terms and Conditions and Privacy Policy to create an account.");
-        return;
-      }
-      if (!turnstileSiteKey) {
-        setError("Account security verification isn’t configured. Please contact the site administrator.");
-        return;
-      }
-      if (!turnstileToken) {
-        setError("Complete the security check before creating an account.");
-        return;
-      }
+    if (!turnstileSiteKey) {
+      setError("Security verification isn’t configured. Please contact the site administrator.");
+      return;
+    }
+    if (!turnstileToken) {
+      setError("Complete the security check before continuing with Google.");
+      return;
+    }
+    if (mode === "sign-up" && !termsAccepted) {
+      setError("Please agree to the Terms and Conditions and Privacy Policy to create an account.");
+      return;
     }
 
-    setBusy(true);
     setError("");
     setNotice("");
 
-    try {
-      const auth = getFirebaseAuth();
-      await setPersistence(
-        auth,
-        rememberMe ? browserLocalPersistence : browserSessionPersistence,
-      );
-      if (mode === "sign-up") {
-        const response = await fetch("/api/auth/turnstile", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token: turnstileToken, termsAccepted }),
-          cache: "no-store",
-        });
-        if (!response.ok) {
-          setError(await getApiErrorMessage(response, "The security check failed. Please try again."));
-          return;
-        }
-      }
+    const auth = getFirebaseAuth();
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: "select_account" });
 
-      const provider = new GoogleAuthProvider();
-      provider.setCustomParameters({ prompt: "select_account" });
-      if (shouldUseRedirect()) {
-        await signInWithRedirect(auth, provider);
-        return;
-      }
-
+    if (shouldUseRedirect()) {
+      // The Turnstile token is lost during the redirect; the return
+      // step runs the widget again before calling /api/auth/session.
       try {
-        const credential = await signInWithPopup(auth, provider);
-        await completeSignIn(credential.user);
-      } catch (popupError) {
-        if (
-          popupError instanceof FirebaseError &&
-          popupError.code === "auth/popup-blocked"
-        ) {
-          await signInWithRedirect(auth, provider);
+        sessionStorage.setItem(
+          GOOGLE_REDIRECT_FLAG,
+          JSON.stringify({ termsAccepted }),
+        );
+      } catch {
+        // Storage unavailable: the return step will ask for terms again
+        // via the generic flow.
+      }
+      setBusy(true);
+      try {
+        await signInWithRedirect(auth, provider, browserPopupRedirectResolver);
+      } catch (redirectError) {
+        setError(getAuthErrorMessage(redirectError));
+        setBusy(false);
+        resetTurnstile();
+      }
+      return;
+    }
+
+    // The popup must open synchronously on the click — no awaits before
+    // this call, or browsers block it.
+    let popupPromise: ReturnType<typeof signInWithPopup>;
+    try {
+      popupPromise = signInWithPopup(auth, provider, browserPopupRedirectResolver);
+    } catch (popupError) {
+      setError(getAuthErrorMessage(popupError));
+      resetTurnstile();
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const credential = await popupPromise;
+      const ok = await establishGoogleSession(credential.user, turnstileToken, termsAccepted);
+      if (!ok) return;
+      await completeSignIn(credential.user);
+    } catch (popupError) {
+      if (
+        popupError instanceof FirebaseError &&
+        popupError.code === "auth/popup-blocked"
+      ) {
+        try {
+          sessionStorage.setItem(
+            GOOGLE_REDIRECT_FLAG,
+            JSON.stringify({ termsAccepted }),
+          );
+          await signInWithRedirect(auth, provider, browserPopupRedirectResolver);
+          return;
+        } catch (redirectError) {
+          setError(getAuthErrorMessage(redirectError));
           return;
         }
-        throw popupError;
       }
-    } catch (authError) {
-      setError(getAuthErrorMessage(authError));
+      setError(getAuthErrorMessage(popupError));
     } finally {
-      if (mode === "sign-up") resetTurnstile();
+      resetTurnstile();
       setBusy(false);
     }
   }
@@ -386,7 +471,6 @@ export default function SignInForm({
 
     try {
       await reload(verificationUser);
-      setEmailVerified(verificationUser.emailVerified);
       if (!verificationUser.emailVerified) {
         setError("Your email is not verified yet. Open the link in your inbox, then try again.");
         return;
@@ -399,49 +483,30 @@ export default function SignInForm({
     }
   }
 
-  async function handleRetryProfileSave() {
-    if (!verificationUser) return;
-    setBusy(true);
-    setError("");
-    setNotice("");
-
-    try {
-      const { saveUserProfile } = await import("@/lib/firebase/profile");
-      await saveUserProfile(verificationUser);
-      setProfileSaved(true);
-      if (emailVerified) {
-        setVerificationUser(null);
-        router.replace("/chat");
-        router.refresh();
-      } else {
-        setNotice("Your profile is saved. Verify your email to open your workspace.");
-      }
-    } catch (profileError) {
-      setError(getProfileSaveErrorMessage(profileError));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function handleResendVerification() {
-    if (!verificationUser) return;
+    if (!verificationUser || resendCooldown > 0) return;
     setBusy(true);
     setError("");
     setNotice("");
 
     try {
-      await sendEmailVerification(verificationUser);
-      setNotice("A fresh verification link is on its way. Check your inbox and spam folder.");
-    } catch (verificationError) {
-      setError(getAuthErrorMessage(verificationError));
+      const sent = await sendVerificationViaServer(verificationUser);
+      if (sent) {
+        setNotice("A fresh verification link is on its way. Check your inbox and spam folder.");
+      }
     } finally {
       setBusy(false);
     }
   }
 
-  async function handlePasswordReset() {
+  async function handlePasswordReset(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
     if (!email.trim()) {
-      setError("Enter your email address first, then choose “Forgot password?”.");
+      setError("Enter your email address first.");
+      return;
+    }
+    if (!resetToken) {
+      setError("Complete the security check before requesting a reset.");
       return;
     }
 
@@ -449,14 +514,39 @@ export default function SignInForm({
     setError("");
     setNotice("");
     try {
-      await sendPasswordResetEmail(getFirebaseAuth(), email.trim());
-      setNotice("If an account exists for this address, a password reset email has been sent.");
-    } catch (resetError) {
-      setError(getAuthErrorMessage(resetError));
+      const response = await authFetch("/api/auth/reset", {
+        email: email.trim(),
+        turnstileToken: resetToken,
+      });
+      if (!response.ok) {
+        setError(await getApiErrorMessage(response, "We couldn’t request a password reset. Please try again."));
+        return;
+      }
+      const result: unknown = await response.json();
+      const message =
+        typeof result === "object" &&
+        result !== null &&
+        "message" in result &&
+        typeof result.message === "string"
+          ? result.message
+          : "If an account exists for this address, a password reset email has been sent.";
+      setNotice(message);
+      setShowReset(false);
+    } catch {
+      setError("We couldn’t request a password reset. Check your connection and try again.");
     } finally {
+      setResetToken("");
+      setResetKey((key) => key + 1);
       setBusy(false);
     }
   }
+
+  const formBlocked =
+    !configured ||
+    busy ||
+    !turnstileSiteKey ||
+    !turnstileToken ||
+    (mode === "sign-up" && !termsAccepted);
 
   return (
     <div className="auth-layout">
@@ -516,76 +606,137 @@ export default function SignInForm({
         )}
         {error && <div className="form-message form-error" role="alert">{error}</div>}
         {notice && <div className="form-message form-success" role="status">{notice}</div>}
+        {mode === "sign-up" && signupStep !== "idle" && (
+          <ol className="auth-steps" aria-label="Account creation progress">
+            <li className={signupStep === "creating" ? "auth-step-active" : "auth-step-done"}>
+              Creating account
+            </li>
+            <li className={signupStep === "verify" ? "auth-step-done" : ""}>
+              Saving profile
+            </li>
+            <li className={signupStep === "verify" ? "auth-step-active" : ""}>
+              Verify email
+            </li>
+          </ol>
+        )}
 
-        {verificationUser ? (
+        {googleReturnUser && !verificationUser ? (
+          <div className="verification-card">
+            <span className="verification-icon" aria-hidden="true">✦</span>
+            <h3>One more step: verify you’re human</h3>
+            <p>
+              Google signed you in, but the security check doesn’t survive a
+              redirect. Complete it once more for <strong>{googleReturnUser.email}</strong> to
+              finish signing in.
+            </p>
+            <TurnstileBoundary onRetry={() => setGoogleKey((key) => key + 1)}>
+              <TurnstileWidget
+                key={googleKey}
+                action={formAction}
+                resetKey={googleKey}
+                onToken={setGoogleToken}
+              />
+            </TurnstileBoundary>
+            <button
+              className="button button-primary auth-submit"
+              type="button"
+              onClick={handleGoogleReturnContinue}
+              disabled={busy || !googleToken}
+            >
+              {busy ? "Please wait…" : "Verify and continue"}
+            </button>
+            <button
+              className="text-button"
+              type="button"
+              onClick={() => setGoogleReturnUser(null)}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+          </div>
+        ) : verificationUser ? (
           <div className="verification-card">
             <span className="verification-icon" aria-hidden="true">✉</span>
-            <h3>{profileSaved ? "Account details saved" : "Finish setting up your account"}</h3>
+            <h3>Verify your email</h3>
             <p>
-              {profileSaved
-                ? <>Your profile for <strong>{verificationUser.email}</strong> is saved. {emailVerified ? "You can continue to your workspace." : "Verify your email to use AI features."}</>
-                : <>Your Firebase account for <strong>{verificationUser.email}</strong> exists, but its profile has not been saved yet.</>}
+              Your account and profile for <strong>{verificationUser.email}</strong> are
+              saved. Open the verification link in your inbox to finish — or
+              continue to your workspace now and verify from there; sending
+              messages stays off until your email is verified.
             </p>
-            {!profileSaved && (
-              <button
-                className="button button-primary auth-submit"
-                type="button"
-                onClick={handleRetryProfileSave}
-                disabled={busy}
-              >
-                {busy ? "Saving…" : "Retry saving my profile"}
-              </button>
-            )}
-            {profileSaved && emailVerified && (
-              <button
-                className="button button-primary auth-submit"
-                type="button"
-                onClick={handleRetryProfileSave}
-                disabled={busy}
-              >
-                {busy ? "Opening…" : "Continue to workspace"}
-              </button>
-            )}
-            {profileSaved && !emailVerified && (
-              <>
-                <button
-                  className="button button-primary auth-submit"
-                  type="button"
-                  onClick={handleVerification}
-                  disabled={busy}
-                >
-                  {busy ? "Checking…" : "I’ve verified my email"}
-                </button>
-                <button
-                  className="text-button"
-                  type="button"
-                  onClick={handleResendVerification}
-                  disabled={busy}
-                >
-                  Send another verification email
-                </button>
-              </>
-            )}
-            {!profileSaved && !emailVerified && (
-              <button
-                className="text-button"
-                type="button"
-                onClick={handleResendVerification}
-                disabled={busy}
-              >
-                Resend verification email
-              </button>
-            )}
-            {profileSaved && !emailVerified && (
-              <Link className="button button-outline auth-submit" href="/settings">
-                Continue to account settings
-              </Link>
-            )}
+            <button
+              className="button button-primary auth-submit"
+              type="button"
+              onClick={handleVerification}
+              disabled={busy}
+            >
+              {busy ? "Checking…" : "I’ve verified my email"}
+            </button>
+            <button
+              className="text-button"
+              type="button"
+              onClick={handleResendVerification}
+              disabled={busy || resendCooldown > 0}
+            >
+              {resendCooldown > 0
+                ? `Resend verification email (${resendCooldown}s)`
+                : "Resend verification email"}
+            </button>
+            <Link className="button button-outline auth-submit" href="/chat">
+              Continue to workspace
+            </Link>
           </div>
+        ) : showReset ? (
+          <form className="auth-form" onSubmit={handlePasswordReset}>
+            <h3 className="auth-reset-heading">Reset your password</h3>
+            <p className="password-help">
+              Enter your account email and complete the security check. If an
+              account exists, we’ll email you a reset link.
+            </p>
+            <label className="form-field">
+              <span>Email address</span>
+              <input
+                type="email"
+                name="resetEmail"
+                autoComplete="email"
+                inputMode="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                disabled={!configured || busy}
+                placeholder="you@example.com"
+                required
+              />
+            </label>
+            <div className="auth-signup-security">
+              <TurnstileBoundary onRetry={() => setResetKey((key) => key + 1)}>
+                <TurnstileWidget
+                  key={resetKey}
+                  action="reset_password"
+                  resetKey={resetKey}
+                  onToken={setResetToken}
+                />
+              </TurnstileBoundary>
+            </div>
+            <button
+              className="button button-primary auth-submit"
+              type="submit"
+              disabled={!configured || busy || !resetToken}
+            >
+              {busy ? "Please wait…" : "Send reset email"}
+            </button>
+            <button
+              className="text-button"
+              type="button"
+              onClick={() => setShowReset(false)}
+              disabled={busy}
+            >
+              Back to sign in
+            </button>
+          </form>
         ) : (
           <>
-            {mode === "sign-up" && (
-              <div className="auth-signup-security">
+            <div className="auth-signup-security">
+              {mode === "sign-up" && (
                 <label className="auth-checkbox-row auth-consent-row">
                   <input
                     type="checkbox"
@@ -601,42 +752,22 @@ export default function SignInForm({
                     <Link href="/privacy">Privacy Policy</Link>.
                   </span>
                 </label>
-                {turnstileSiteKey ? (
-                  <>
-                    <Script
-                      src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
-                      strategy="afterInteractive"
-                      onReady={notifyTurnstileReady}
-                      onError={() => setTurnstileStatus("The security check couldn’t load. Please refresh and try again.")}
-                    />
-                    <TurnstileField
-                      key={turnstileResetKey}
-                      siteKey={turnstileSiteKey}
-                      resetKey={turnstileResetKey}
-                      onToken={setTurnstileToken}
-                      onStatus={setTurnstileStatus}
-                    />
-                    {turnstileStatus && (
-                      <p className="turnstile-status" role="status">{turnstileStatus}</p>
-                    )}
-                  </>
-                ) : (
-                  <p className="turnstile-status" role="alert">
-                    Account creation security verification isn’t configured for this deployment.
-                  </p>
-                )}
-              </div>
-            )}
+              )}
+              <TurnstileBoundary onRetry={resetTurnstile}>
+                <TurnstileWidget
+                  key={turnstileResetKey}
+                  action={formAction}
+                  resetKey={turnstileResetKey}
+                  onToken={setTurnstileToken}
+                />
+              </TurnstileBoundary>
+            </div>
 
             <button
               className="button button-google"
               type="button"
               onClick={handleGoogleSignIn}
-              disabled={
-                !configured ||
-                busy ||
-                (mode === "sign-up" && (!termsAccepted || !turnstileSiteKey || !turnstileToken))
-              }
+              disabled={formBlocked}
             >
               <span className="google-mark" aria-hidden="true">G</span>
               <span>Continue with Google</span>
@@ -698,24 +829,14 @@ export default function SignInForm({
                 </p>
               )}
 
-              <label className="auth-checkbox-row auth-remember-row">
-                <input
-                  type="checkbox"
-                  checked={rememberMe}
-                  onChange={(event) => setRememberMe(event.target.checked)}
-                  disabled={!configured || busy}
-                />
-                <span>Remember me</span>
-                <small>
-                  {rememberMe ? "Stay signed in on this device" : "Sign out when you close the browser"}
-                </small>
-              </label>
-
               {mode === "sign-in" && (
                 <button
                   className="forgot-password"
                   type="button"
-                  onClick={handlePasswordReset}
+                  onClick={() => {
+                    setShowReset(true);
+                    setError("");
+                  }}
                   disabled={!configured || busy}
                 >
                   Forgot password?
@@ -725,18 +846,20 @@ export default function SignInForm({
               <button
                 className="button button-primary auth-submit"
                 type="submit"
-                disabled={
-                  !configured ||
-                  busy ||
-                  (mode === "sign-up" && (!termsAccepted || !turnstileSiteKey || !turnstileToken))
-                }
+                disabled={formBlocked}
+                aria-busy={busy}
               >
-                {busy
-                  ? "Please wait…"
-                  : mode === "sign-in"
-                    ? "Sign in"
-                    : "Create your account"}
-                {!busy && <span aria-hidden="true">→</span>}
+                {busy ? (
+                  <>
+                    <span className="button-spinner" aria-hidden="true" />
+                    {mode === "sign-in" ? "Signing in…" : "Creating your account…"}
+                  </>
+                ) : (
+                  <>
+                    {mode === "sign-in" ? "Sign in" : "Create your account"}
+                    <span aria-hidden="true">→</span>
+                  </>
+                )}
               </button>
             </form>
 

@@ -1,113 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-
-type Article = { title: string; intro: string; updated?: string; sections: { title: string; body: string[] }[] };
-
-const articles: Record<string, Article> = {
-  about: {
-    title: "A thoughtful place to work with AI.",
-    intro: "Xyro AI is designed to make useful AI feel a little more human, a little more understandable, and a lot easier to bring into your day.",
-    sections: [
-      { title: "Start with the work", body: ["A good tool should meet you where your work is: in a half-formed question, a document you need to understand, or an idea you want to explore.", "Xyro AI brings conversation and creative tools into one workspace. The goal is not to replace your judgment, but to help you put it to work sooner."] },
-      { title: "Honest about the limits", body: ["AI systems can make mistakes, omit context, or sound certain when they are wrong. We believe a useful product makes those limits visible and gives people room to check the work.", "Xyro AI is an independent product. XyroSocial sign-in and shared-account features are not part of this standalone release."] },
-      { title: "Built with care", body: ["Privacy, clear controls, and responsible use belong in the product from the start. Read our draft [privacy notice](/privacy) and [acceptable use policy](/acceptable-use) for more about the intended approach."] },
-    ],
-  },
-  company: {
-    title: "XyroBase and its products",
-    intro: "XyroBase is the product studio behind a growing set of tools for thoughtful work. Xyro AI is its conversational AI workspace.",
-    sections: [
-      { title: "Xyro AI", body: ["Xyro AI currently provides text conversations using OpenRouter’s free model pool when configured. Chat history syncs through Firestore, and images or supported documents can be attached and stored privately in Cloudinary. Image creation and research are not available yet."] },
-      { title: "XyroAIDetect", body: ["XyroAIDetect is the planned image-signal detector for Xyro AI-generated images. Its results are intended to be informative, not definitive proof of origin."] },
-      { title: "Independent products", body: ["Each XyroBase product may have separate accounts, data systems, and terms. This Xyro AI site is standalone and does not currently share sign-in or a Firebase project with XyroSocial."] },
-    ],
-  },
-  pricing: {
-    title: "Straightforward plans, when they’re ready.",
-    intro: "We’ll publish exact prices, feature availability, and usage limits before making any plan available for purchase.",
-    sections: [
-      { title: "Free", body: ["A free plan is planned. Its daily message and generation limits, file-size allowance, and research availability have not been set publicly yet."] },
-      { title: "Pro", body: ["A paid plan is planned. Features, recurring price, billing terms, and cancellation details will be shown before checkout. No payment provider or subscription is currently connected."] },
-      { title: "No surprise billing", body: ["This information site does not collect payment details or start subscriptions. If you have a question, use the [contact page](/contact)."] },
-    ],
-  },
-  terms: {
-    title: "Terms of Service",
-    updated: "Draft for legal review · November 13, 2026",
-    intro: "This draft describes intended terms for Xyro AI. It is not final legal advice and must be reviewed and completed by qualified counsel before the product is offered.",
-    sections: [
-      { title: "1. The service and eligibility", body: ["Xyro AI is an independent product. The intended minimum age is 18. Do not use the service if you are under 18. Google and email/password sign-in and text chat are available when Firebase, OpenRouter, and the capacity guard are configured. File analysis, image generation, and paid subscriptions are not currently available.", "These draft terms are not yet a binding, complete agreement. Before launch, the operator’s legal name, contact address, effective date, and dispute process must be added."] },
-      { title: "2. AI-generated output", body: ["AI output can be wrong, incomplete, biased, or out of date. You are responsible for evaluating output and verifying important information. Do not rely on it as medical, legal, financial, or other professional advice.", "You retain responsibility for how you use, publish, and act on generated output, subject to applicable law and third-party rights."] },
-      { title: "3. Information processed", body: ["If the planned service is launched, it may process and store chats, uploaded files, saved memories if enabled, and image-generation records. Prompts and relevant file content may be sent to OpenRouter and selected model providers to provide requested features.", "See the [draft Privacy Notice](/privacy) for planned retention, controls, and export/deletion information. Product behavior and provider terms will be disclosed before launch."] },
-      { title: "4. Images and watermarks", body: ["Images created by the planned service may carry visible and invisible Xyro AI watermark signals. These signals can be damaged, removed, or misread. You must not remove, conceal, or circumvent a watermark or provenance signal added by Xyro AI, except where applicable law grants a non-waivable right.", "No watermark or detector result guarantees that an image is AI-generated or that it has not been altered."] },
-      { title: "5. Acceptable use, suspension, and termination", body: ["Use of the planned service will be subject to the [Acceptable Use Policy](/acceptable-use). We may restrict access to protect users, comply with law, or address abuse, subject to the final terms and applicable law.", "You will be able to request an export and deletion of your account data when account features launch. The final retention schedule and exceptions must be specified before launch."] },
-      { title: "6. Governing law and contact", body: ["Governing law and venue have not been provided and remain to be determined. This section must be completed by counsel before these terms are used. For now, direct questions to [contact](/contact)."] },
-    ],
-  },
-  privacy: {
-    title: "Privacy Notice",
-    updated: "Draft for legal review · November 13, 2026",
-    intro: "This draft explains the data flows currently planned for Xyro AI. It must be checked against the implemented product, operator, providers, and applicable laws before launch.",
-    sections: [
-      { title: "1. Information we plan to process", body: ["When Firebase is configured, account sign-in stores a profile document containing your Firebase user ID, email address, display name, profile photo URL, and creation/update/sign-in timestamps. Firestore rules restrict profile and chat history access to the signed-in account. Realtime Database stores short-lived presence markers and in-progress response text under that UID; these streams are removed when generation finishes.", "Account creation uses Cloudflare Turnstile to help prevent automated signups. Cloudflare processes its challenge token and may process browser and network signals to verify the challenge. Firebase Admin credentials remain server-side and are not sent to your browser.", "When you use chat, conversation messages are stored in Firestore. Files you attach (images, PDF, TXT, Markdown, or CSV; up to 10 MB per file) are uploaded directly to Cloudinary using signed parameters and stored as authenticated/private assets. Files remain until you delete the conversation; deleting a chat also requests deletion of its stored files."] },
-      { title: "2. AI providers", body: ["When you send a message, the chat service sends the conversation context needed for that reply to OpenRouter and the free model provider selected by its Auto routing. Relevant attached image and file contents may also be sent so the model can analyze them. Those providers process prompts and file content in plaintext to generate a response and may retain or use them under their own terms and settings. Do not submit sensitive information. Review OpenRouter’s, Cloudinary’s, and the selected model provider’s policies before using chat."] },
-      { title: "3. Storage and security", body: ["Firebase Authentication stores account credentials; Firestore stores profile data and durable chat history; Realtime Database stores owner-restricted presence and temporary response streams; Cloudinary stores authenticated chat uploads. Browser rules deny client writes to chat data and response streams. Temporary file access URLs expire, but content already sent to an AI provider may be subject to that provider’s retention terms.", "We plan to use safeguards appropriate to the information processed, but no system can promise perfect security."] },
-      { title: "4. Memories and sensitive information", body: ["If a memory feature is offered, it will be optional and user-managed. The intended design excludes sensitive information such as health, financial, and government-identification data from saved memories. Do not submit sensitive information unless the final product explicitly supports your use case."] },
-      { title: "5. Watermarks, export, and deletion", body: ["You can delete an individual conversation from chat history. The service removes its Firestore messages and requests deletion of associated Cloudinary assets. Exact deletion timing and any legal or security exceptions must be confirmed before launch.", "Deleting a chat does not erase information already processed by an external model provider. Review the provider’s terms and the final disclosures."] },
-      { title: "6. Cookies, age, and contact", body: ["This site does not set non-essential cookies, so it does not display a cookie-consent banner. The intended minimum age for the service is 18.", "The legal operator and governing jurisdiction have not been specified. This draft must be updated with the responsible entity, privacy contact, applicable rights, and jurisdiction-specific disclosures before launch."] },
-    ],
-  },
-  "acceptable-use": {
-    title: "Acceptable Use Policy",
-    updated: "Draft for legal review · November 13, 2026",
-    intro: "This draft describes intended safeguards for Xyro AI. It is not a substitute for legal review and must be aligned with the final service before launch.",
-    sections: [
-      { title: "Use the service lawfully and responsibly", body: ["Do not use Xyro AI to violate the law, infringe others’ rights, threaten or harass people, facilitate violence, exploit minors, or create deceptive material for harmful purposes.", "Do not attempt to bypass access controls, abuse rate limits, interfere with service availability, or access another person’s data."] },
-      { title: "Respect provenance signals", body: ["Do not remove, obscure, or circumvent visible or invisible watermarks that Xyro AI adds to generated images, except where applicable law provides a non-waivable right. Do not present detector output as conclusive proof of an image’s origin.", "Watermarking and detection can fail after editing, compression, cropping, screenshots, or re-generation. A missing mark does not establish that an image is human-created."] },
-      { title: "Protect sensitive information", body: ["Do not provide sensitive personal information unless the final service specifically supports and protects the relevant use. The planned memory feature will not save health, financial, government-ID, or other sensitive facts."] },
-      { title: "AI limitations", body: ["AI-generated answers may be inaccurate or unsafe. Review and verify output before relying on or sharing it, particularly in high-impact contexts."] },
-      { title: "Reporting and enforcement", body: ["A report and enforcement process will be described before the service launches. The operator’s legal identity, governing law, and appeals process remain to be supplied and reviewed by counsel. The intended minimum age is 18."] },
-    ],
-  },
-  help: {
-    title: "A guide to Xyro AI",
-    intro: "Xyro AI is not yet open for product use. This guide describes the planned features and how they are intended to work; it will be updated as features become available.",
-    sections: [
-      { title: "Start a conversation", body: ["After signing in with a verified email, choose New chat or start with a suggested prompt. Ask a question, add context, and follow up to refine the response. Enter sends a message; Shift+Enter adds a line. Use the stop button or Escape to stop a response, and choose Regenerate to try the last question again. AI can make mistakes, so verify important details."] },
-      { title: "Work with files", body: ["Attach images, PDF, TXT, Markdown, or CSV files to a chat. Each file can be up to 10 MB, with up to five files (20 MB combined) in a message. Files are stored as private Cloudinary assets until you delete the conversation. Review the privacy notice and avoid uploading sensitive material."] },
-      { title: "Create images", body: ["Image generation and editing are planned. Generated images are intended to pass through a watermarking step before delivery. The original, unwatermarked image is not intended to be stored or sent to the browser."] },
-      { title: "Use XyroAIDetect", body: ["The detector is planned to analyze images for Xyro AI signals and report a confidence-based result. It will not be a universal AI-image detector, and heavy editing or re-generation may remove the signal."] },
-      { title: "Chat history and account controls", body: ["Chat history is stored only in this browser, and the sidebar search searches saved chat titles. Deleting a chat removes that local copy. History does not sync to another device and is not currently encrypted by Xyro AI. Google and email/password sign-in require Firebase configuration and email verification. Xyro AI is standalone; XyroSocial SSO is not configured. Account export and deletion are not yet available."] },
-    ],
-  },
-  contact: {
-    title: "Get in touch.",
-    intro: "Questions about Xyro AI, its planned features, or these draft policies? We’d be glad to hear from you.",
-    sections: [
-      { title: "Product and general questions", body: ["Email [hello@xyro.ai](mailto:hello@xyro.ai) with a short description of what you need. Please do not include passwords, payment information, or sensitive personal data."] },
-      { title: "Privacy and legal requests", body: ["The legal operator and privacy contact have not yet been confirmed. This page must be updated with a monitored privacy-request address before account features launch."] },
-      { title: "Response times", body: ["This is an early product site, and a response is not guaranteed. Do not use this contact address for emergencies."] },
-    ],
-  },
-  changelog: {
-    title: "What’s changing",
-    intro: "A record of meaningful product updates. We’ll add dated entries as features ship.",
-    sections: [
-      { title: "November 14, 2026 · Chat and file storage", body: ["Added Firestore chat history, live response updates through Realtime Database, private Cloudinary uploads for images and common documents, chat search and deletion, stop and regenerate controls, and per-user capacity limits through Upstash Redis."] },
-    ],
-  },
-  xyroaidetect: {
-    title: "A signal, not a verdict.",
-    intro: "XyroAIDetect is the planned detector for images created by Xyro AI. It is not a general-purpose AI detector, and it is not available for uploads on this site.",
-    sections: [
-      { title: "What it is designed to look for", body: ["The intended design combines multiple signals: a visible Xyro AI label, an invisible image watermark, and—where available—a match against a registry of generated images. The registry would use a perceptual fingerprint to help find related images even when some signals are damaged.", "Detection results may include a verdict, confidence, matched signal layers, and a region map. Exact behavior depends on the implementation and will be described when the detector is available."] },
-      { title: "What a result means", body: ["A match may indicate that an image contains a signal associated with Xyro AI. It is not proof of who created, owns, or edited the image. A non-match does not prove that an image is human-created or that it has never been generated by AI.", "Compression, cropping, resizing, screenshots, brightness or contrast changes, and other edits can weaken or remove signals. AI re-generation may remove them entirely."] },
-      { title: "Privacy and availability", body: ["The planned detector is intended to process uploads in memory, delete them promptly, and apply rate limits. Upload-based detection is not enabled on this site; no image upload is accepted here. The exact retention and processing behavior will be published before launch."] },
-      { title: "Research and limitations", body: ["Robustness depends on image format, resolution, transformations, and implementation. Detection should be one input among many, never a sole basis for consequential decisions."] },
-    ],
-  },
-};
+import { articles } from "@/lib/public-pages";
 
 export function generateStaticParams() {
   return Object.keys(articles).map((slug) => ({ slug }));
@@ -153,6 +47,34 @@ function renderText(text: string) {
   return parts;
 }
 
+/** Paragraphs, with consecutive "- " lines grouped into a bullet list. */
+function renderBody(body: string[]) {
+  const blocks: React.ReactNode[] = [];
+  let list: string[] = [];
+  const flushList = () => {
+    if (list.length === 0) return;
+    const items = list;
+    blocks.push(
+      <ul key={`list-${blocks.length}`}>
+        {items.map((item, index) => (
+          <li key={index}>{renderText(item)}</li>
+        ))}
+      </ul>,
+    );
+    list = [];
+  };
+  for (const paragraph of body) {
+    if (paragraph.startsWith("- ")) {
+      list.push(paragraph.slice(2));
+    } else {
+      flushList();
+      blocks.push(<p key={`p-${blocks.length}`}>{renderText(paragraph)}</p>);
+    }
+  }
+  flushList();
+  return blocks;
+}
+
 export default async function InformationPage({
   params,
 }: {
@@ -161,26 +83,48 @@ export default async function InformationPage({
   const { slug } = await params;
   const article = articles[slug];
   if (!article) notFound();
+  const isHelpArticle = slug.startsWith("help-");
 
   return (
     <article className="article page-width">
-      <Link href="/" className="back-link">← Back to Xyro AI</Link>
+      <Link href={isHelpArticle ? "/help" : "/"} className="back-link">
+        ← Back to {isHelpArticle ? "help center" : "Xyro AI"}
+      </Link>
       <header className="article-header">
         <span className="eyebrow">Xyro AI</span>
         <h1>{article.title}</h1>
-        <p>{article.intro}</p>
+        <p>{renderText(article.intro)}</p>
         {article.updated && <span className="article-date">{article.updated}</span>}
       </header>
+
+      {article.cards && (
+        <nav className="article-cards" aria-label="Help topics">
+          {article.cards.map((card) => (
+            <Link key={card.href} href={card.href} className="article-card">
+              <strong>{card.title}</strong>
+              <span>{card.blurb}</span>
+              <span className="article-card-arrow" aria-hidden="true">→</span>
+            </Link>
+          ))}
+        </nav>
+      )}
+
+      {article.faqs && (
+        <div className="faq-list article-faqs">
+          {article.faqs.map((item) => (
+            <details key={item.q}>
+              <summary>{item.q}<span aria-hidden="true">＋</span></summary>
+              <p>{renderText(item.a)}</p>
+            </details>
+          ))}
+        </div>
+      )}
+
       <div className="article-body">
         {article.sections.map((section) => (
-          <section
-            key={section.title}
-            id={slug === "help" && section.title === "Work with files" ? "files" : undefined}
-          >
+          <section key={section.title}>
             <h2>{section.title}</h2>
-            {section.body.map((paragraph, index) => (
-              <p key={index}>{renderText(paragraph)}</p>
-            ))}
+            {renderBody(section.body)}
           </section>
         ))}
       </div>

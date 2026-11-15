@@ -8,8 +8,22 @@ import {
   getFirebaseAdminDatabase,
   getFirebaseAdminFirestore,
 } from "@/lib/server/firebase-admin";
+import { guardMutationHeaders } from "@/lib/server/auth-guard";
+import { getBudgetStatus, recordBudget } from "@/lib/server/budget";
 import { authenticateVerifiedUser } from "@/lib/server/request-auth";
 import { checkRateLimit } from "@/lib/server/rate-limit";
+import {
+  AUTO_MODEL_ID,
+  getFreeModels,
+  isAllowedFreeModel,
+  modelAttemptOrder,
+  modelHasVision,
+  pickFreeVisionModel,
+} from "@/lib/server/models";
+import {
+  getCustomInstructionsSystemText,
+  readPreferences,
+} from "@/lib/server/settings";
 import {
   MAX_ATTACHMENT_BYTES_PER_MESSAGE,
   MAX_ATTACHMENTS_PER_MESSAGE,
@@ -33,6 +47,7 @@ type RequestBody = {
   content?: unknown;
   attachmentIds?: unknown;
   regenerate?: unknown;
+  model?: unknown;
 };
 
 class ChatRouteError extends Error {
@@ -168,10 +183,8 @@ function parseDelta(line: string): { text?: string; done?: boolean; error?: stri
 }
 
 export async function POST(request: NextRequest) {
-  const origin = request.headers.get("origin");
-  if (origin && origin !== request.nextUrl.origin) {
-    return errorResponse(403, "ORIGIN_NOT_ALLOWED", "This request origin isn’t allowed.");
-  }
+  const guard = guardMutationHeaders(request);
+  if (guard) return guard;
   const auth = await authenticateVerifiedUser(request);
   if (!auth.ok) return errorResponse(auth.status, auth.code, auth.message);
 
@@ -232,6 +245,27 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Model selection (Phase 3): an explicit model must be on the free
+  // list; when none is sent, the user's default-model preference is
+  // used (itself validated, falling back to Auto (Free) if the stored
+  // value is no longer a free model).
+  let requestedModel: string | null = null;
+  if (body.model !== undefined) {
+    if (
+      typeof body.model !== "string" ||
+      body.model.length === 0 ||
+      body.model.length > 200 ||
+      !(await isAllowedFreeModel(body.model))
+    ) {
+      return errorResponse(
+        400,
+        "INVALID_MODEL",
+        "Choose one of the free models from the model list.",
+      );
+    }
+    requestedModel = body.model;
+  }
+
   const rateLimit = await checkRateLimit(auth.uid, "chat", 10, 60);
   if (rateLimit.state === "unavailable") {
     return errorResponse(
@@ -246,6 +280,29 @@ export async function POST(request: NextRequest) {
       "RATE_LIMITED",
       "You’ve reached the chat limit. Please wait before sending another message.",
       { "Retry-After": String(rateLimit.retryAfter) },
+    );
+  }
+
+  // Daily budget guard (Phase 4): at >=95% of the estimated daily
+  // Firestore write budget, new turns pause; at >=85% they are
+  // queued (429 BUDGET_QUEUE — the client shows a queued/retrying
+  // state and retries, rather than treating it as a failure). When
+  // Redis is unconfigured the guard is skipped (see budget.ts).
+  const budget = await getBudgetStatus();
+  if (budget.state === "paused") {
+    return errorResponse(
+      503,
+      "BUDGET_PAUSED",
+      "Chat is paused for today because the service has reached its daily capacity. Please come back tomorrow.",
+      { "Retry-After": "1800" },
+    );
+  }
+  if (budget.state === "queue") {
+    return errorResponse(
+      429,
+      "BUDGET_QUEUE",
+      "You’re in a short queue — today’s capacity is nearly full. Your message will be retried shortly.",
+      { "Retry-After": "30" },
     );
   }
 
@@ -369,6 +426,7 @@ export async function POST(request: NextRequest) {
         messageId: assistantMessageId,
         status: "generating",
         text: "",
+        seq: 0,
         updatedAt: now,
       };
     });
@@ -438,39 +496,110 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    let upstream: Response;
-    try {
-      upstream = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": request.nextUrl.origin,
-          "X-Title": "Xyro AI",
-        },
-        body: JSON.stringify({
-          model: "openrouter/free",
-          messages: prepared.messages,
-          ...(prepared.includesPdf
-            ? { plugins: [{ id: "file-parser", pdf: { engine: "cloudflare-ai" } }] }
-            : {}),
-          stream: true,
-          max_tokens: 2048,
-        }),
-        signal: AbortSignal.any([request.signal, AbortSignal.timeout(45_000)]),
-        cache: "no-store",
-      });
-    } catch {
-      if (request.signal.aborted) {
-        throw new ChatRouteError(499, "RESPONSE_STOPPED", "Response stopped.");
-      }
-      throw new ChatRouteError(502, "MODEL_UNAVAILABLE", "The free model service is temporarily unavailable.");
+    // Custom instructions (Phase 3): injected as a system message right
+    // after the built-in safety system message, when the user enabled
+    // them. Cached server-side for 60 s; failures never block chat.
+    const instructions = await getCustomInstructionsSystemText(auth.uid);
+    if (instructions) {
+      prepared.messages.splice(1, 0, { role: "system", content: instructions });
     }
 
-    if (!upstream.ok || !upstream.body) {
-      const status = upstream.status === 429 ? 429 : upstream.status >= 500 ? 503 : 502;
-      const retryAfter = upstream.headers.get("retry-after");
-      await upstream.body?.cancel();
+    let effectiveModel = requestedModel ?? AUTO_MODEL_ID;
+    if (!requestedModel) {
+      try {
+        const preferences = await readPreferences(auth.uid);
+        effectiveModel = (await isAllowedFreeModel(preferences.defaultModel))
+          ? preferences.defaultModel
+          : AUTO_MODEL_ID;
+      } catch (error) {
+        console.error("Couldn’t read the default-model preference.", error);
+        effectiveModel = AUTO_MODEL_ID;
+      }
+    }
+
+    // Vision routing (Phase 7): when the context carries image
+    // attachments, the answering model must actually be able to see
+    // images. If the chosen model can't, switch to a free
+    // vision-capable model from the live catalogue. If none is
+    // available, the image parts are removed and a plain note is
+    // added to the prompt so the model tells the user it can't view
+    // the images — an attachment is never silently dropped.
+    if (prepared.includesImages) {
+      const { models: catalogue } = await getFreeModels();
+      const chosenCanSee =
+        effectiveModel !== AUTO_MODEL_ID &&
+        modelHasVision(catalogue, effectiveModel);
+      if (!chosenCanSee) {
+        const visionModel = pickFreeVisionModel(catalogue);
+        if (visionModel) {
+          effectiveModel = visionModel.id;
+        } else {
+          for (const message of prepared.messages) {
+            if (message.role !== "user" || !Array.isArray(message.content)) {
+              continue;
+            }
+            const kept = message.content.filter(
+              (part) => part.type !== "image_url",
+            );
+            const note =
+              "[Note: the user attached one or more images, but no vision-capable free model is available right now, so you cannot see them. Say so plainly and answer as best you can from the text.]";
+            const textPart = kept.find((part) => part.type === "text");
+            if (textPart && textPart.type === "text") {
+              textPart.text = `${textPart.text}\n\n${note}`;
+            } else {
+              kept.unshift({ type: "text", text: note });
+            }
+            message.content = kept.length === 1 && kept[0].type === "text"
+              ? kept[0].text
+              : kept;
+          }
+        }
+      }
+    }
+
+    // Ordered attempts: the chosen model first, then Auto (Free), with
+    // exactly one retry when the first attempt answers 429/5xx.
+    const attempts = modelAttemptOrder(effectiveModel);
+    let upstream: Response | null = null;
+    for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
+      let candidate: Response;
+      try {
+        candidate = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": request.nextUrl.origin,
+            "X-Title": "Xyro AI",
+          },
+          body: JSON.stringify({
+            model: attempts[attemptIndex],
+            messages: prepared.messages,
+            stream: true,
+            max_tokens: 2048,
+          }),
+          signal: AbortSignal.any([request.signal, AbortSignal.timeout(45_000)]),
+          cache: "no-store",
+        });
+      } catch {
+        if (request.signal.aborted) {
+          throw new ChatRouteError(499, "RESPONSE_STOPPED", "Response stopped.");
+        }
+        throw new ChatRouteError(502, "MODEL_UNAVAILABLE", "The free model service is temporarily unavailable.");
+      }
+
+      if (candidate.ok && candidate.body) {
+        upstream = candidate;
+        break;
+      }
+
+      const retryable = candidate.status === 429 || candidate.status >= 500;
+      const retryAfter = candidate.headers.get("retry-after");
+      await candidate.body?.cancel();
+      if (retryable && attemptIndex < attempts.length - 1) {
+        continue;
+      }
+      const status = candidate.status === 429 ? 429 : candidate.status >= 500 ? 503 : 502;
       throw new ChatRouteError(
         status,
         status === 429 ? "MODEL_BUSY" : "MODEL_REQUEST_FAILED",
@@ -481,19 +610,32 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (!upstream || !upstream.ok || !upstream.body) {
+      throw new ChatRouteError(502, "MODEL_UNAVAILABLE", "The free model service is temporarily unavailable.");
+    }
+
     const reader = upstream.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     let lastPublishedAt = 0;
     let streamDone = false;
+    // Monotonically increasing sequence number for every published
+    // chunk (Phase 5 streaming hardening). The client renders only
+    // chunks whose responseId matches its in-flight request and whose
+    // seq is newer than the last one it applied, so duplicated,
+    // reordered or stale Realtime Database events can never rewind or
+    // corrupt the visible reply.
+    let streamSeq = 0;
     async function publishLive(force: boolean) {
       const currentTime = Date.now();
       if (!force && currentTime - lastPublishedAt < LIVE_UPDATE_INTERVAL_MS) return;
+      streamSeq += 1;
       await streamRef.set({
         responseId,
         messageId: assistantMessageId,
         status: "generating",
         text: responseText,
+        seq: streamSeq,
         updatedAt: currentTime,
       });
       lastPublishedAt = currentTime;
@@ -542,6 +684,16 @@ export async function POST(request: NextRequest) {
       }),
     ]);
     assistantSaved = true;
+    // Budget accounting for the completed turn (estimate model in
+    // lib/server/budget.ts): the batch (user message + assistant
+    // placeholder + chat update = 3 writes) plus the two final
+    // updates, and the reads spent loading the chat, history and
+    // attachments.
+    await recordBudget({
+      firestoreWrites: regenerate ? 6 : 5,
+      firestoreReads: 2 + history.length + attachmentIds.length,
+      redisCommands: 4,
+    });
     return NextResponse.json(
       { success: true, responseId },
       { headers: { "Cache-Control": "no-store" } },

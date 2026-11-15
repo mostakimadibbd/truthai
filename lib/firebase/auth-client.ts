@@ -1,3 +1,7 @@
 "use client";
 
-export { getFirebaseAuth, isFirebaseConfigured } from "./client";
+export {
+  getFirebaseAuth,
+  isFirebaseConfigured,
+  tryGetFirebaseAuth,
+} from "./client";

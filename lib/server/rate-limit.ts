@@ -11,6 +11,54 @@ export type RateLimitResult =
   | { state: "limited"; retryAfter: number }
   | { state: "unavailable" };
 
+export type UsagePeek = {
+  state: "ok" | "unconfigured" | "unavailable";
+  minuteCount: number;
+  dayCount: number;
+  /** Epoch ms when the daily counter resets (null when unknown). */
+  dayResetAt: number | null;
+};
+
+/**
+ * Read-only view of the counters written by checkRateLimit — used by
+ * GET /api/usage. Issues GET + PTTL for the minute and day keys in one
+ * pipeline (4 commands, no INCR), so checking usage never consumes it.
+ * Keys must match checkRateLimit exactly: xyro:{feature}:{uid}:minute
+ * and xyro:{feature}:{uid}:day (the Lua script sets a 60 s / 24 h TTL
+ * on first increment, which anchors the windows).
+ */
+export async function peekRateLimitUsage(
+  uid: string,
+  feature: "chat" | "upload",
+): Promise<UsagePeek> {
+  const { redisPipeline } = await import("@/lib/server/redis");
+  const result = await redisPipeline([
+    ["GET", `xyro:${feature}:${uid}:minute`],
+    ["GET", `xyro:${feature}:${uid}:day`],
+    ["PTTL", `xyro:${feature}:${uid}:day`],
+  ]);
+  if (result.state !== "ok") {
+    return {
+      state: result.state,
+      minuteCount: 0,
+      dayCount: 0,
+      dayResetAt: null,
+    };
+  }
+  const [minuteRaw, dayRaw, dayTtl] = result.results;
+  const toCount = (value: unknown) => {
+    const parsed = typeof value === "string" ? Number(value) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+  };
+  return {
+    state: "ok",
+    minuteCount: toCount(minuteRaw),
+    dayCount: toCount(dayRaw),
+    dayResetAt:
+      typeof dayTtl === "number" && dayTtl > 0 ? Date.now() + dayTtl : null,
+  };
+}
+
 export async function checkRateLimit(
   uid: string,
   feature: "chat" | "upload",

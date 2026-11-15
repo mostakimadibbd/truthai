@@ -4,10 +4,13 @@ import {
   deleteCloudinaryResource,
   type CloudinaryResourceType,
 } from "@/lib/server/cloudinary";
+import { guardMutationHeaders } from "@/lib/server/auth-guard";
+import { recordBudget } from "@/lib/server/budget";
 import {
   getFirebaseAdminDatabase,
   getFirebaseAdminFirestore,
 } from "@/lib/server/firebase-admin";
+import { limitDeniedResponse, limit as rateLimit } from "@/lib/server/limit";
 import { authenticateVerifiedUser } from "@/lib/server/request-auth";
 
 export const runtime = "nodejs";
@@ -29,12 +32,22 @@ function isCloudinaryResourceType(value: unknown): value is CloudinaryResourceTy
 }
 
 export async function PATCH(request: NextRequest, context: RouteContext) {
-  const origin = request.headers.get("origin");
-  if (origin && origin !== request.nextUrl.origin) {
-    return errorResponse(403, "ORIGIN_NOT_ALLOWED", "This request origin isn’t allowed.");
-  }
+  const guard = guardMutationHeaders(request);
+  if (guard) return guard;
   const auth = await authenticateVerifiedUser(request);
   if (!auth.ok) return errorResponse(auth.status, auth.code, auth.message);
+
+  // Phase 4: renames capped at 60 per user per hour (fail closed).
+  const limitResult = await rateLimit(
+    `chats:patch:user:${auth.uid}`,
+    60 * 60 * 1000,
+    60,
+    "closed",
+  );
+  if (!limitResult.allowed) {
+    const denied = limitDeniedResponse(limitResult);
+    return errorResponse(denied.status, denied.code, denied.message);
+  }
 
   const { chatId } = await context.params;
   if (!CHAT_ID_PATTERN.test(chatId)) {
@@ -71,6 +84,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       return errorResponse(404, "CHAT_NOT_FOUND", "This conversation no longer exists.");
     }
     await chatRef.update({ title, updatedAt: FieldValue.serverTimestamp() });
+    await recordBudget({ firestoreWrites: 1, firestoreReads: 1, redisCommands: 4 });
     return NextResponse.json({ success: true }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     console.error("Couldn’t rename the Firestore chat.", error);
@@ -79,12 +93,23 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 }
 
 export async function DELETE(request: NextRequest, context: RouteContext) {
-  const origin = request.headers.get("origin");
-  if (origin && origin !== request.nextUrl.origin) {
-    return errorResponse(403, "ORIGIN_NOT_ALLOWED", "This request origin isn’t allowed.");
-  }
+  const guard = guardMutationHeaders(request);
+  if (guard) return guard;
   const auth = await authenticateVerifiedUser(request);
   if (!auth.ok) return errorResponse(auth.status, auth.code, auth.message);
+
+  // Phase 4: chat deletes are destructive — 60 per user per hour
+  // (fail closed), separately from renames.
+  const limitResult = await rateLimit(
+    `chats:delete:user:${auth.uid}`,
+    60 * 60 * 1000,
+    60,
+    "closed",
+  );
+  if (!limitResult.allowed) {
+    const denied = limitDeniedResponse(limitResult);
+    return errorResponse(denied.status, denied.code, denied.message);
+  }
 
   const { chatId } = await context.params;
   if (!CHAT_ID_PATTERN.test(chatId)) {
@@ -123,6 +148,7 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
     await getFirebaseAdminDatabase().ref(`chatStreams/${auth.uid}/${chatId}`).remove();
 
     const messagesRef = chatRef.collection("messages");
+    let deletedMessages = 0;
     let lastDocument: FirebaseFirestore.QueryDocumentSnapshot | undefined;
     while (true) {
       let query = messagesRef.orderBy("__name__").limit(400);
@@ -132,6 +158,7 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
       const batch = db.batch();
       page.docs.forEach((snapshot) => batch.delete(snapshot.ref));
       await batch.commit();
+      deletedMessages += page.size;
       lastDocument = page.docs.at(-1);
       if (page.size < 400) break;
     }
@@ -142,6 +169,11 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
       await batch.commit();
     }
     await chatRef.delete();
+    await recordBudget({
+      firestoreWrites: 1 + deletedMessages + uploads.docs.length,
+      firestoreReads: 1 + uploads.docs.length,
+      redisCommands: 4,
+    });
     return NextResponse.json({ success: true }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     console.error("Couldn’t fully delete the Firestore chat and its Cloudinary assets.", error);

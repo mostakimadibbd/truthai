@@ -3,6 +3,7 @@ import {
   getCloudinaryPrivateDownloadUrl,
   type CloudinaryResourceType,
 } from "@/lib/server/cloudinary";
+import { extractPdfText } from "@/lib/server/pdf-text";
 import { MAX_ATTACHMENT_BYTES_PER_MESSAGE } from "@/lib/server/upload-policy";
 
 const MAX_CONTEXT_ATTACHMENTS = 5;
@@ -26,8 +27,7 @@ export type StoredChatMessage = {
 
 type OpenRouterPart =
   | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } }
-  | { type: "file"; file: { filename: string; file_data: string } };
+  | { type: "image_url"; image_url: { url: string } };
 
 export type OpenRouterMessage = {
   role: "system" | "user" | "assistant";
@@ -120,7 +120,7 @@ export async function buildOpenRouterMessages(
   uid: string,
   chatId: string,
   messages: StoredChatMessage[],
-): Promise<{ messages: OpenRouterMessage[]; includesPdf: boolean }> {
+): Promise<{ messages: OpenRouterMessage[]; includesImages: boolean }> {
   const allAttachments = messages.flatMap((message, messageIndex) =>
     message.attachments.map((attachment) => ({ messageIndex, attachment })),
   );
@@ -147,7 +147,7 @@ export async function buildOpenRouterMessages(
   }
 
   let extractedTextLength = 0;
-  let includesPdf = false;
+  let includesImages = false;
   const output: OpenRouterMessage[] = [
     {
       role: "system",
@@ -166,6 +166,7 @@ export async function buildOpenRouterMessages(
     for (const attachment of selectedByMessage.get(messageIndex) ?? []) {
       const upload = await readVerifiedUpload(db, uid, chatId, attachment);
       if (upload.resourceType === "image") {
+        includesImages = true;
         parts.push({
           type: "image_url",
           image_url: {
@@ -176,29 +177,33 @@ export async function buildOpenRouterMessages(
             ),
           },
         });
-      } else if (upload.mimeType === "application/pdf") {
-        const bytes = await downloadPrivateAsset(upload);
-        if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") {
-          throw new Error("An attached PDF failed file-signature validation.");
-        }
-        parts.push({
-          type: "file",
-          file: {
-            filename: upload.name,
-            file_data: `data:application/pdf;base64,${bytes.toString("base64")}`,
-          },
-        });
-        includesPdf = true;
       } else {
+        // Documents (PDF, TXT, MD, CSV): the text is extracted HERE,
+        // on the server, from the stored Cloudinary asset — never
+        // from client-supplied text, and never via a paid parsing
+        // plugin. PDFs go through the pure-JS extractor in
+        // lib/server/pdf-text.ts (which also verifies the "%PDF-"
+        // signature); text formats must decode as clean UTF-8.
+        // Everything shares one truncation budget:
+        // MAX_EXTRACTED_TEXT characters per request.
         const bytes = await downloadPrivateAsset(upload);
         let text: string;
-        try {
-          text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-        } catch {
-          throw new Error(`The attached text file “${upload.name}” isn’t valid UTF-8.`);
-        }
-        if (text.includes("\u0000")) {
-          throw new Error(`The attached text file “${upload.name}” contains binary data.`);
+        if (upload.mimeType === "application/pdf") {
+          text = await extractPdfText(bytes);
+          if (!text.trim()) {
+            throw new Error(
+              `The attached PDF “${upload.name}” has no readable text — it may be a scan of images. Try a text-based PDF, or attach page images instead.`,
+            );
+          }
+        } else {
+          try {
+            text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+          } catch {
+            throw new Error(`The attached text file “${upload.name}” isn’t valid UTF-8.`);
+          }
+          if (text.includes("\u0000")) {
+            throw new Error(`The attached text file “${upload.name}” contains binary data.`);
+          }
         }
         const remaining = MAX_EXTRACTED_TEXT - extractedTextLength;
         if (remaining <= 0) continue;
@@ -225,5 +230,5 @@ export async function buildOpenRouterMessages(
     });
   }
 
-  return { messages: output, includesPdf };
+  return { messages: output, includesImages };
 }

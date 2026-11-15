@@ -1,11 +1,76 @@
+import { jwtVerify } from "jose";
 import { NextRequest, NextResponse } from "next/server";
+import { sanitizeNextPath } from "@/lib/auth-redirect";
 
-export function middleware(request: NextRequest) {
+// Phase 2 session redirects. The middleware verifies ONLY the session
+// cookie's signature and expiry (HS256 via jose, Edge-compatible). It
+// deliberately makes no Redis or database calls: revocation is
+// enforced by the API routes through requireSession; the worst case
+// here is a revoked-but-unexpired cookie briefly passing a redirect
+// check, after which AuthSync / the APIs end the session properly.
+//
+//  - Valid cookie on "/", "/sign-in", "/sign-up", "/forgot-password"
+//    → redirect to "/chat" (a signed-in user has no use for the
+//    landing or auth forms; info/legal pages stay reachable).
+//  - No valid cookie on a protected page → redirect to
+//    "/sign-in?next=<path>", where the path is the request's own
+//    same-origin relative path, re-validated by sanitizeNextPath.
+
+const SESSION_COOKIE_NAMES = ["__Host-xyro_session", "xyro_session"];
+const AUTH_ONLY_PAGES = new Set(["/", "/sign-in", "/sign-up", "/forgot-password"]);
+const PROTECTED_PREFIXES = [
+  "/chat",
+  "/settings",
+  "/account",
+  "/gallery",
+  "/projects",
+  "/assistants",
+  "/admin",
+];
+
+async function hasValidSessionCookie(request: NextRequest): Promise<boolean> {
+  const secret = process.env.SESSION_SECRET?.trim();
+  if (!secret || secret.length < 32) return false;
+
+  let token: string | undefined;
+  for (const name of SESSION_COOKIE_NAMES) {
+    token = request.cookies.get(name)?.value;
+    if (token) break;
+  }
+  if (!token) return false;
+
+  try {
+    const { payload } = await jwtVerify(token, new TextEncoder().encode(secret), {
+      algorithms: ["HS256"],
+    });
+    // jwtVerify has already enforced `exp`; also enforce the absolute
+    // expiry and the claims requireSession depends on.
+    if (typeof payload.sub !== "string" || typeof payload.sid !== "string") {
+      return false;
+    }
+    if (typeof payload.absExp === "number" && payload.absExp <= Date.now()) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false; // tampered, expired, or malformed — treated as signed out
+  }
+}
+
+export async function middleware(request: NextRequest) {
   const nonceBytes = new Uint8Array(16);
   crypto.getRandomValues(nonceBytes);
   const nonce = btoa(String.fromCharCode(...nonceBytes));
   const authDomain = process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN?.trim();
   const authOrigin = authDomain ? `https://${authDomain}` : "https://*.firebaseapp.com";
+  // NOTE: do NOT add "require-trusted-types-for 'script'" here. It breaks
+  // Cloudflare Turnstile, which next/script injects by assigning a plain
+  // string to HTMLScriptElement.src (Chromium then throws "This document
+  // requires 'TrustedScriptURL' assignment" and /sign-up lands on the error
+  // screen), and it breaks Firebase Auth Google sign-in, which loads
+  // https://apis.google.com/js/api.js the same way and has no Trusted Types
+  // support. The nonce-based script-src with 'strict-dynamic' below is the
+  // script protection this site relies on instead.
   const csp = [
     "default-src 'self'",
     "base-uri 'self'",
@@ -21,8 +86,47 @@ export function middleware(request: NextRequest) {
     "worker-src 'self' blob:",
     "media-src 'self' blob:",
     "manifest-src 'self'",
-    "require-trusted-types-for 'script'",
   ].join("; ");
+
+  function applySecurityHeaders(response: NextResponse): NextResponse {
+    response.headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    response.headers.set("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
+    response.headers.set("Cross-Origin-Resource-Policy", "same-origin");
+    response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+    response.headers.set("X-Frame-Options", "DENY");
+    response.headers.set("X-Content-Type-Options", "nosniff");
+    response.headers.set(
+      "Permissions-Policy",
+      "camera=(), microphone=(), geolocation=(), interest-cohort=()",
+    );
+    response.headers.set("Content-Security-Policy", csp);
+    return response;
+  }
+
+  const { pathname } = request.nextUrl;
+  const isProtected = PROTECTED_PREFIXES.some(
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+  );
+
+  if (AUTH_ONLY_PAGES.has(pathname) || isProtected) {
+    const signedIn = await hasValidSessionCookie(request);
+    if (signedIn && AUTH_ONLY_PAGES.has(pathname)) {
+      return applySecurityHeaders(
+        NextResponse.redirect(new URL("/chat", request.nextUrl.origin)),
+      );
+    }
+    if (!signedIn && isProtected) {
+      // The request's own path is same-origin by construction, but run
+      // it through the shared validator anyway (defence in depth) and
+      // fall back to the protected page itself if anything looks off.
+      const next =
+        sanitizeNextPath(`${pathname}${request.nextUrl.search}`) ?? pathname;
+      const signInUrl = new URL("/sign-in", request.nextUrl.origin);
+      signInUrl.searchParams.set("next", next);
+      return applySecurityHeaders(NextResponse.redirect(signInUrl));
+    }
+  }
+
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);
   requestHeaders.set("Content-Security-Policy", csp);
@@ -30,19 +134,7 @@ export function middleware(request: NextRequest) {
     request: { headers: requestHeaders },
   });
 
-  response.headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
-  response.headers.set("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
-  response.headers.set("Cross-Origin-Resource-Policy", "same-origin");
-  response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
-  response.headers.set("X-Frame-Options", "DENY");
-  response.headers.set("X-Content-Type-Options", "nosniff");
-  response.headers.set(
-    "Permissions-Policy",
-    "camera=(), microphone=(), geolocation=(), interest-cohort=()",
-  );
-  response.headers.set("Content-Security-Policy", csp);
-
-  return response;
+  return applySecurityHeaders(response);
 }
 
 export const config = {

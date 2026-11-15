@@ -45,24 +45,16 @@ service cloud.firestore {
     match /users/{userId} {
       allow get: if ownsUser(userId);
       allow list: if false;
-      allow create: if ownsUser(userId)
-        && hasValidProfile(userId)
-        && request.resource.data.createdAt == request.time
-        && request.resource.data.updatedAt == request.time
-        && request.resource.data.lastSignInAt == request.time;
-      allow update: if ownsUser(userId)
-        && hasValidProfile(userId)
-        && request.resource.data.createdAt == resource.data.createdAt
-        && request.resource.data.updatedAt == request.time
-        && request.resource.data.lastSignInAt == request.time
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'email',
-          'displayName',
-          'photoURL',
-          'updatedAt',
-          'lastSignInAt'
-        ]);
-      allow delete: if false;
+      // Phase 9 audit: profiles are created and updated ONLY by the
+      // server (sign-up / session routes create them; Settings →
+      // Profile updates them via /api/settings/profile, including the
+      // validated Cloudinary avatar pipeline). All client profile
+      // writes were removed in Phase 2, so direct client writes are
+      // denied outright — a client can no longer set an arbitrary
+      // photoURL/displayName by talking to Firestore directly. The
+      // hasValidProfile helpers above are now unused and are kept
+      // only as a record of the previous validation.
+      allow create, update, delete: if false;
     }
 
     match /users/{userId}/chats/{chatId} {
@@ -76,6 +68,21 @@ service cloud.firestore {
     }
 
     match /users/{userId}/uploads/{assetId} {
+      allow read: if ownsUser(userId);
+      allow write: if false;
+    }
+
+    // Settings preferences (Phase 3): written only by the server via
+    // /api/settings; owners may read their own document so the chat
+    // workspace can react to preference changes live.
+    match /users/{userId}/settings/{document} {
+      allow read: if ownsUser(userId);
+      allow write: if false;
+    }
+
+    // Session records (Phase 3): created and revoked only by the
+    // server; owners may read their own list for display fallback.
+    match /users/{userId}/sessions/{sessionId} {
       allow read: if ownsUser(userId);
       allow write: if false;
     }

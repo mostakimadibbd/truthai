@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Timestamp } from "firebase-admin/firestore";
 import { NextRequest, NextResponse } from "next/server";
+import { guardMutationHeaders } from "@/lib/server/auth-guard";
 import { createCloudinaryUploadSignature } from "@/lib/server/cloudinary";
 import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
 import { authenticateVerifiedUser } from "@/lib/server/request-auth";
@@ -24,10 +25,11 @@ function errorResponse(status: number, code: string, message: string) {
 }
 
 export async function POST(request: NextRequest) {
-  const origin = request.headers.get("origin");
-  if (origin && origin !== request.nextUrl.origin) {
-    return errorResponse(403, "ORIGIN_NOT_ALLOWED", "This request origin isn’t allowed.");
-  }
+  // Phase 4: a missing Origin is now rejected here too (previously
+  // any request without one was let through), and the
+  // X-Requested-With header is required like every other mutation.
+  const guard = guardMutationHeaders(request);
+  if (guard) return guard;
   const auth = await authenticateVerifiedUser(request);
   if (!auth.ok) return errorResponse(auth.status, auth.code, auth.message);
 

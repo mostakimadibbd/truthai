@@ -1,6 +1,9 @@
 import { Timestamp } from "firebase-admin/firestore";
 import { NextRequest, NextResponse } from "next/server";
+import { guardMutationHeaders } from "@/lib/server/auth-guard";
+import { recordBudget } from "@/lib/server/budget";
 import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
+import { limitDeniedResponse, limit as rateLimit } from "@/lib/server/limit";
 import { authenticateVerifiedUser } from "@/lib/server/request-auth";
 
 export const runtime = "nodejs";
@@ -15,13 +18,24 @@ function errorResponse(status: number, code: string, message: string) {
 }
 
 export async function POST(request: NextRequest) {
-  const origin = request.headers.get("origin");
-  if (origin && origin !== request.nextUrl.origin) {
-    return errorResponse(403, "ORIGIN_NOT_ALLOWED", "This request origin isn’t allowed.");
-  }
+  const guard = guardMutationHeaders(request);
+  if (guard) return guard;
 
   const auth = await authenticateVerifiedUser(request);
   if (!auth.ok) return errorResponse(auth.status, auth.code, auth.message);
+
+  // Phase 4: creating chats is a Firestore write path — cap it at
+  // 30 new chats per user per day (fail closed).
+  const limitResult = await rateLimit(
+    `chats:create:user:${auth.uid}`,
+    24 * 60 * 60 * 1000,
+    30,
+    "closed",
+  );
+  if (!limitResult.allowed) {
+    const denied = limitDeniedResponse(limitResult);
+    return errorResponse(denied.status, denied.code, denied.message);
+  }
 
   let body: unknown;
   try {
@@ -57,6 +71,7 @@ export async function POST(request: NextRequest) {
         createdAt: now,
         updatedAt: now,
       });
+      await recordBudget({ firestoreWrites: 1, firestoreReads: 1, redisCommands: 4 });
     }
     return NextResponse.json(
       { chatId },

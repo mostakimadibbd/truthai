@@ -5,8 +5,6 @@ import { useRouter } from "next/navigation";
 import {
   onAuthStateChanged,
   reload,
-  sendEmailVerification,
-  signOut,
   type User,
 } from "firebase/auth";
 import { onValue, ref } from "firebase/database";
@@ -29,8 +27,24 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
+import dynamic from "next/dynamic";
+
+// Phase 8 (performance): the markdown stack (react-markdown +
+// remark-gfm + rehype-sanitize, ~48 kB gzip) is only needed once a
+// message renders, so it is split out of the chat page's first load.
+// The workspace warms the chunk on mount (below) while auth and
+// history load, so in practice it is ready before the first message;
+// the empty fallback only covers a genuinely cold first render.
+const ChatMarkdown = dynamic(() => import("@/components/chat-markdown"), {
+  ssr: false,
+  loading: () => <div className="chat-markdown" aria-hidden="true" />,
+});
 import FirebasePresence from "@/components/firebase-presence";
-import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/auth-client";
+import SignOutDialog, { type SignOutVariant } from "@/components/sign-out-dialog";
+import { performSignOut } from "@/lib/firebase/sign-out";
+import { usePreferences } from "@/lib/preferences-client";
+import { useTypewriter } from "@/lib/typewriter";
+import { isFirebaseConfigured, tryGetFirebaseAuth } from "@/lib/firebase/auth-client";
 import {
   getFirebaseFirestore,
   getFirebaseRealtimeDatabase,
@@ -85,6 +99,17 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const MAX_FILE_BYTES_PER_MESSAGE = 20 * 1024 * 1024;
 const MAX_FILES_PER_MESSAGE = 5;
 const ACCEPTED_FILE_TYPES = ".jpg,.jpeg,.png,.webp,.gif,.pdf,.txt,.md,.csv";
+const IMAGE_FILE_TYPES = ".jpg,.jpeg,.png,.webp,.gif";
+const AUTO_MODEL_OPTION = { id: "openrouter/free", name: "Auto (Free)" };
+
+type ModelOption = { id: string; name: string };
+
+type StreamTarget = {
+  chatId: string;
+  responseId: string;
+  messageId: string;
+  startedAt: number;
+};
 
 function toMillis(value: unknown, fallback = Date.now()): number {
   if (
@@ -203,7 +228,6 @@ function getChatGroup(timestamp: number): string {
   const age = Date.now() - timestamp;
   const day = 24 * 60 * 60 * 1000;
   if (age < day && new Date(timestamp).getDate() === new Date().getDate()) return "Today";
-  if (age < day * 2) return "Yesterday";
   if (age < day * 7) return "Previous 7 days";
   return "Older";
 }
@@ -224,7 +248,10 @@ function Icon({
     | "spark"
     | "edit"
     | "download"
-    | "attach";
+    | "attach"
+    | "dots"
+    | "image"
+    | "file";
   size?: number;
 }) {
   const paths: Record<typeof name, ReactNode> = {
@@ -240,6 +267,9 @@ function Icon({
     edit: <><path d="m14 5 5 5M4 20l4.3-.9L19 8.4 15.6 5 4.9 15.7 4 20Z" /></>,
     download: <><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v3h16v-3" /></>,
     attach: <><path d="m21.4 11.6-8.5 8.5a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5" /></>,
+    dots: <><circle cx="5" cy="12" r="1.4" /><circle cx="12" cy="12" r="1.4" /><circle cx="19" cy="12" r="1.4" /></>,
+    image: <><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="9" cy="10" r="1.8" /><path d="m4 17 5-4 4 3 3-2 4 3" /></>,
+    file: <><path d="M6 2.8h8L19 8v13.2H6z" /><path d="M13.5 3v5.5H19" /></>,
   };
 
   return (
@@ -259,10 +289,38 @@ function Icon({
   );
 }
 
+/**
+ * Assistant text with the Phase 3 typewriter: live chunks from
+ * Realtime Database are buffered and drained at the user's typing
+ * speed; clicking the text skips to the full reply. Completed messages
+ * render instantly (active=false snaps to the full text). The drained
+ * text is rendered as sanitized markdown (Phase 5).
+ */
+function TypewriterText({
+  text,
+  speed,
+  active,
+}: {
+  text: string;
+  speed: Parameters<typeof useTypewriter>[1];
+  active: boolean;
+}) {
+  const { displayed, skip } = useTypewriter(text, speed, active);
+  return (
+    <div onClick={skip} title={active ? "Click to show the full reply" : undefined}>
+      <ChatMarkdown text={displayed} />
+    </div>
+  );
+}
+
 export default function ChatWorkspace() {
   const router = useRouter();
   const [authState, setAuthState] = useState<AuthState>("loading");
   const [user, setUser] = useState<User | null>(null);
+  // Settings preferences (Phase 3): typing speed, send key, empty-chat
+  // suggestions and the default model all read from the same live
+  // Firestore-backed hook the settings pages write through /api/settings.
+  const { preferences, loaded: preferencesLoaded } = usePreferences(user);
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [historyLoaded, setHistoryLoaded] = useState(false);
@@ -276,9 +334,36 @@ export default function ChatWorkspace() {
   const [editingChatId, setEditingChatId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [verificationBusy, setVerificationBusy] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
+  const [signOutVariant, setSignOutVariant] = useState<SignOutVariant | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
   const [uploadingFiles, setUploadingFiles] = useState(false);
+  // Model picker (Phase 5): the live free-model list from /api/models
+  // and the user's current selection. The selection starts from the
+  // stored per-device choice, then the default-model preference, and
+  // is sent with every /api/chat request (the server re-validates it
+  // against the free list and falls back to the preference/Auto).
+  const [availableModels, setAvailableModels] = useState<ModelOption[]>([AUTO_MODEL_OPTION]);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  // Image creation (Phase 7): when create mode is on, the composer
+  // describes a picture instead of sending a chat message. Submitting
+  // posts to /api/images/generate; the server checks the live
+  // catalogue for a free image model and says so plainly when none
+  // is available. Created pictures arrive as a normal assistant
+  // message (with the image attached) through the Firestore listener.
+  const [createMode, setCreateMode] = useState(false);
+  const [creatingImage, setCreatingImage] = useState(false);
+  const [fileAccept, setFileAccept] = useState(ACCEPTED_FILE_TYPES);
+  const [menuChatId, setMenuChatId] = useState<string | null>(null);
+  // Streaming target (Phase 5): non-null only while a response is in
+  // flight. The Realtime Database listener exists only while this is
+  // set, and it accepts chunks for exactly this responseId/messageId.
+  const [streamTarget, setStreamTarget] = useState<StreamTarget | null>(null);
+  const streamSeqRef = useRef(0);
+  const lastChunkAtRef = useRef(0);
   const [attachmentUrls, setAttachmentUrls] = useState<Record<string, string>>({});
   const controllerRef = useRef<AbortController | null>(null);
   const attachmentUrlLoadingRef = useRef(new Set<string>());
@@ -301,13 +386,25 @@ export default function ChatWorkspace() {
     );
   }, []);
 
+  // Warm the lazily loaded markdown chunk while auth/history load,
+  // so the first rendered message does not wait on it (Phase 8).
+  useEffect(() => {
+    void import("@/components/chat-markdown");
+  }, []);
+
   useEffect(() => {
     if (!isFirebaseConfigured) {
       setAuthState("not-configured");
       return;
     }
 
-    return onAuthStateChanged(getFirebaseAuth(), (currentUser) => {
+    const auth = tryGetFirebaseAuth();
+    if (!auth) {
+      setAuthState("not-configured");
+      return;
+    }
+
+    return onAuthStateChanged(auth, (currentUser) => {
       if (previousUserIdRef.current !== (currentUser?.uid ?? null)) {
         setPendingAttachments([]);
         setAttachmentUrls({});
@@ -337,7 +434,7 @@ export default function ChatWorkspace() {
   }, [router]);
 
   useEffect(() => {
-    if (!user || authState !== "ready") return;
+    if (!user || (authState !== "ready" && authState !== "unverified")) return;
     const currentUser = user;
     let active = true;
     let unsubscribeChats: (() => void) | undefined;
@@ -362,6 +459,7 @@ export default function ChatWorkspace() {
               headers: {
                 Authorization: `Bearer ${idToken}`,
                 "Content-Type": "application/json",
+                "X-Requested-With": "xyro",
               },
               body: JSON.stringify({ chats: legacyChats }),
             });
@@ -440,7 +538,7 @@ export default function ChatWorkspace() {
   }, [authState, user]);
 
   useEffect(() => {
-    if (!user || !activeChatId || authState !== "ready") return;
+    if (!user || !activeChatId || (authState !== "ready" && authState !== "unverified")) return;
     let unsubscribeMessages: (() => void) | undefined;
     try {
       const messagesQuery = query(
@@ -561,31 +659,132 @@ export default function ChatWorkspace() {
     };
   }, [activeChatId, attachmentPreviewKey, user]);
 
+  // Model list for the top-bar picker (Phase 5). Fetched once per
+  // signed-in user from /api/models (session + ID token; the server
+  // serves only free OpenRouter models). On any failure the picker
+  // keeps just Auto (Free), which the server always accepts.
   useEffect(() => {
-    if (!user || !activeChatId || authState !== "ready") return;
+    if (!user) {
+      setAvailableModels([AUTO_MODEL_OPTION]);
+      setSelectedModel(null);
+      return;
+    }
+    let active = true;
+    void (async () => {
+      try {
+        const idToken = await user.getIdToken();
+        const response = await fetch("/api/models", {
+          headers: { Authorization: `Bearer ${idToken}` },
+          cache: "no-store",
+        });
+        if (!response.ok) return;
+        const result: unknown = await response.json();
+        if (
+          active &&
+          typeof result === "object" &&
+          result !== null &&
+          "models" in result &&
+          Array.isArray(result.models)
+        ) {
+          const models = result.models.flatMap((item: unknown) =>
+            typeof item === "object" &&
+            item !== null &&
+            "id" in item &&
+            typeof item.id === "string" &&
+            "name" in item &&
+            typeof item.name === "string"
+              ? [{ id: item.id, name: item.name }]
+              : [],
+          );
+          if (models.length) setAvailableModels(models);
+        }
+      } catch (error) {
+        console.error("Couldn’t load the free model list.", error);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [user]);
+
+  // Initial model selection: the per-device stored choice wins, then
+  // the default-model preference once it has loaded.
+  useEffect(() => {
+    if (!user || selectedModel !== null) return;
+    let stored: string | null = null;
+    try {
+      stored = localStorage.getItem(`xyro:model:${user.uid}`);
+    } catch {
+      stored = null;
+    }
+    if (stored) {
+      setSelectedModel(stored);
+    } else if (preferencesLoaded) {
+      setSelectedModel(preferences.defaultModel);
+    }
+  }, [preferences.defaultModel, preferencesLoaded, selectedModel, user]);
+
+  function handleModelChange(modelId: string) {
+    setSelectedModel(modelId);
+    if (user) {
+      try {
+        localStorage.setItem(`xyro:model:${user.uid}`, modelId);
+      } catch {
+        // Storage can be unavailable (private mode); the in-memory
+        // selection still applies for this session.
+      }
+    }
+  }
+
+  // Realtime Database streaming (Phase 5 hardening). The listener is
+  // attached ONLY while a response is in flight (streamTarget set by
+  // sendMessage, cleared when the request settles) to respect the
+  // Realtime Database connection quota, and it detaches on completion,
+  // error and unmount via the onValue unsubscribe.
+  //
+  // A chunk is rendered only when ALL of these hold:
+  //   - its responseId equals the in-flight request's responseId and
+  //     its messageId equals the in-flight assistant message (chunks
+  //     from a previous response in the same chat are ignored);
+  //   - its seq is strictly greater than the last applied seq, so
+  //     duplicated or out-of-order deliveries never rewind the text
+  //     (nodes written before seq existed are accepted once);
+  //   - its updatedAt is not stale: not older than this request's
+  //     start (a leftover node from an earlier response) and not
+  //     older than five minutes in absolute terms.
+  useEffect(() => {
+    if (!user || !streamTarget) return;
+    if (streamTarget.chatId !== activeChatId) return;
+    let unsubscribe: (() => void) | undefined;
     try {
       const streamRef = ref(
         getFirebaseRealtimeDatabase(),
-        `chatStreams/${user.uid}/${activeChatId}`,
+        `chatStreams/${user.uid}/${streamTarget.chatId}`,
       );
-      return onValue(
+      unsubscribe = onValue(
         streamRef,
         (snapshot) => {
           const stream = snapshot.val();
-          if (
-            typeof stream !== "object" ||
-            stream === null ||
-            typeof stream.messageId !== "string" ||
-            typeof stream.text !== "string" ||
-            stream.status !== "generating"
-          ) {
-            return;
+          if (typeof stream !== "object" || stream === null) return;
+          if (stream.responseId !== streamTarget.responseId) return;
+          if (stream.messageId !== streamTarget.messageId) return;
+          if (stream.status !== "generating") return;
+          if (typeof stream.text !== "string") return;
+          if (typeof stream.updatedAt === "number") {
+            if (stream.updatedAt < streamTarget.startedAt - 5_000) return;
+            if (Date.now() - stream.updatedAt > 5 * 60 * 1000) return;
           }
-          updateChat(activeChatId, (chat) => ({
+          if (typeof stream.seq === "number") {
+            if (stream.seq <= streamSeqRef.current) return;
+            streamSeqRef.current = stream.seq;
+          }
+          lastChunkAtRef.current = Date.now();
+          const text = stream.text;
+          updateChat(streamTarget.chatId, (chat) => ({
             ...chat,
             messages: chat.messages.map((message) =>
-              message.id === stream.messageId
-                ? { ...message, content: stream.text, status: "generating" }
+              message.id === streamTarget.messageId
+                ? { ...message, content: text, status: "generating" }
                 : message,
             ),
           }));
@@ -599,7 +798,76 @@ export default function ChatWorkspace() {
       console.error("Couldn’t initialize the Realtime Database response listener.", error);
       setNotice("Live response updates are unavailable. Check your Firebase setup.");
     }
-  }, [activeChatId, authState, updateChat, user]);
+    return () => unsubscribe?.();
+  }, [activeChatId, streamTarget, updateChat, user]);
+
+  // Firestore fallback for a stalled stream (Phase 5): while a
+  // response is in flight, if no Realtime Database chunk has arrived
+  // for 12 seconds, read the assistant message document directly from
+  // Firestore and render whatever the server has saved so far instead
+  // of leaving the UI hanging. (The Firestore messages listener above
+  // is the second safety net and delivers the final state on its own.)
+  useEffect(() => {
+    if (!user || !streamTarget) return;
+    const timer = window.setInterval(() => {
+      if (Date.now() - lastChunkAtRef.current < 12_000) return;
+      void (async () => {
+        try {
+          const snapshot = await getDoc(
+            doc(
+              getFirebaseFirestore(),
+              "users",
+              user.uid,
+              "chats",
+              streamTarget.chatId,
+              "messages",
+              streamTarget.messageId,
+            ),
+          );
+          if (!snapshot.exists()) return;
+          const data = snapshot.data();
+          if (typeof data.content !== "string" || !data.content) return;
+          const status =
+            data.status === "complete" ||
+            data.status === "failed" ||
+            data.status === "stopped"
+              ? data.status
+              : undefined;
+          lastChunkAtRef.current = Date.now();
+          updateChat(streamTarget.chatId, (chat) => ({
+            ...chat,
+            messages: chat.messages.map((message) =>
+              message.id === streamTarget.messageId
+                ? {
+                    ...message,
+                    content: data.content as string,
+                    ...(status ? { status } : {}),
+                  }
+                : message,
+            ),
+          }));
+        } catch (error) {
+          console.error("Couldn’t load the Firestore fallback response.", error);
+        }
+      })();
+    }, 4_000);
+    return () => window.clearInterval(timer);
+  }, [streamTarget, updateChat, user]);
+
+  // Close the composer attach menu / sidebar chat menu on any click
+  // outside them (Phase 5).
+  useEffect(() => {
+    if (!attachMenuOpen && !menuChatId) return;
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target as Element | null;
+      if (!target?.closest(".chat-attach-wrap, .chat-history-menu-wrap")) {
+        setAttachMenuOpen(false);
+        setMenuChatId(null);
+      }
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [attachMenuOpen, menuChatId]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -609,6 +877,12 @@ export default function ChatWorkspace() {
   }, [draft]);
 
   useEffect(() => () => controllerRef.current?.abort(), []);
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const timer = window.setTimeout(() => setResendCooldown((value) => value - 1), 1000);
+    return () => window.clearTimeout(timer);
+  }, [resendCooldown]);
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
@@ -667,6 +941,7 @@ export default function ChatWorkspace() {
       headers: {
         Authorization: `Bearer ${idToken}`,
         "Content-Type": "application/json",
+        "X-Requested-With": "xyro",
       },
       body: JSON.stringify({ chatId: chat.id }),
     });
@@ -702,6 +977,7 @@ export default function ChatWorkspace() {
     if (sending) controllerRef.current?.abort();
     setActiveChatId(chatId);
     setSidebarOpen(false);
+    setMenuChatId(null);
     setNotice("");
   }
 
@@ -721,7 +997,10 @@ export default function ChatWorkspace() {
         const idToken = await user.getIdToken();
         const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}`, {
           method: "DELETE",
-          headers: { Authorization: `Bearer ${idToken}` },
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+            "X-Requested-With": "xyro",
+          },
         });
         if (!response.ok) {
           throw new Error(await getApiError(response, "This conversation couldn’t be deleted."));
@@ -761,6 +1040,7 @@ export default function ChatWorkspace() {
         headers: {
           Authorization: `Bearer ${idToken}`,
           "Content-Type": "application/json",
+          "X-Requested-With": "xyro",
         },
         body: JSON.stringify({ title }),
       });
@@ -840,6 +1120,7 @@ export default function ChatWorkspace() {
             headers: {
               Authorization: `Bearer ${idToken}`,
               "Content-Type": "application/json",
+              "X-Requested-With": "xyro",
             },
             body: JSON.stringify({
               chatId: chat.id,
@@ -880,6 +1161,7 @@ export default function ChatWorkspace() {
             headers: {
               Authorization: `Bearer ${idToken}`,
               "Content-Type": "application/json",
+              "X-Requested-With": "xyro",
             },
             body: JSON.stringify({ assetId }),
           });
@@ -910,7 +1192,10 @@ export default function ChatWorkspace() {
               const cleanupToken = await user.getIdToken();
               const cleanupResponse = await fetch(`/api/uploads/${encodeURIComponent(assetId)}`, {
                 method: "DELETE",
-                headers: { Authorization: `Bearer ${cleanupToken}` },
+                headers: {
+                  Authorization: `Bearer ${cleanupToken}`,
+                  "X-Requested-With": "xyro",
+                },
               });
               if (!cleanupResponse.ok) {
                 console.error(
@@ -945,7 +1230,10 @@ export default function ChatWorkspace() {
       const idToken = await user.getIdToken();
       const response = await fetch(`/api/uploads/${encodeURIComponent(attachment.id)}`, {
         method: "DELETE",
-        headers: { Authorization: `Bearer ${idToken}` },
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          "X-Requested-With": "xyro",
+        },
       });
       if (!response.ok) {
         throw new Error(await getApiError(response, "This attachment couldn’t be removed."));
@@ -986,6 +1274,13 @@ export default function ChatWorkspace() {
   async function sendMessage(text: string, regenerate = false) {
     const content = text.trim();
     if (!user || sending) return;
+    if (!user.emailVerified) {
+      // Unverified users may enter the app and read their chats, but
+      // sending stays blocked until the email is verified (the API
+      // enforces the same rule server-side).
+      setNotice("Verify your email to send messages. Use the banner above to resend the link.");
+      return;
+    }
     if (content.length > MESSAGE_MAX_LENGTH) {
       setNotice(`Messages must be ${MESSAGE_MAX_LENGTH.toLocaleString()} characters or fewer.`);
       return;
@@ -1025,24 +1320,75 @@ export default function ChatWorkspace() {
     setSending(true);
     try {
       chat = await ensurePersistedChat(chat);
-      const idToken = await user.getIdToken();
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${idToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          chatId: chat.id,
-          responseId,
-          userMessageId,
-          assistantMessageId,
-          content: messageContent,
-          attachmentIds: attachments.map((attachment) => attachment.id),
-          regenerate,
-        }),
-        signal: controller.signal,
+      const persistedChatId = chat.id;
+      // Arm the hardened stream listener for exactly this response
+      // (Phase 5): chunks for any other responseId, or with a seq at
+      // or below the last applied one, are ignored by the listener.
+      streamSeqRef.current = 0;
+      lastChunkAtRef.current = Date.now();
+      setStreamTarget({
+        chatId: persistedChatId,
+        responseId,
+        messageId: assistantMessageId,
+        startedAt: Date.now(),
       });
+      const idToken = await user.getIdToken();
+      const sendRequest = () =>
+        fetch("/api/chat", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+            "Content-Type": "application/json",
+            "X-Requested-With": "xyro",
+          },
+          body: JSON.stringify({
+            chatId: persistedChatId,
+            responseId,
+            userMessageId,
+            assistantMessageId,
+            content: messageContent,
+            attachmentIds: attachments.map((attachment) => attachment.id),
+            regenerate,
+            model: selectedModel ?? preferences.defaultModel,
+          }),
+          signal: controller.signal,
+        });
+      let response = await sendRequest();
+
+      // Daily-budget queue (Phase 4): at >=85% of the daily
+      // Firestore budget the server answers 429 BUDGET_QUEUE. That
+      // is not an error — show a queued state and retry once after
+      // the server's Retry-After. The rejected attempt wrote
+      // nothing server-side, so re-sending the same ids is safe.
+      // (BUDGET_PAUSED, 503, falls through to the normal error path
+      // below, whose message explains the pause.)
+      if (response.status === 429) {
+        const peek: unknown = await response.clone().json().catch(() => null);
+        const code =
+          typeof peek === "object" &&
+          peek !== null &&
+          "error" in peek &&
+          typeof peek.error === "object" &&
+          peek.error !== null &&
+          "code" in peek.error
+            ? peek.error.code
+            : undefined;
+        if (code === "BUDGET_QUEUE") {
+          setNotice(
+            "You’re in a short queue — today’s capacity is nearly full. Retrying your message shortly…",
+          );
+          const retryAfterSeconds = Math.min(
+            Number(response.headers.get("Retry-After")) || 30,
+            60,
+          );
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, retryAfterSeconds * 1000),
+          );
+          if (!controller.signal.aborted) {
+            response = await sendRequest();
+          }
+        }
+      }
 
       if (!response.ok) {
         throw new Error(await getApiError(response, "The assistant couldn’t respond. Please try again."));
@@ -1088,13 +1434,89 @@ export default function ChatWorkspace() {
       }
     } finally {
       controllerRef.current = null;
+      // The request has settled: detach the stream listener (the
+      // Firestore messages listener delivers the final saved state).
+      setStreamTarget(null);
       setSending(false);
+    }
+  }
+
+  // Image creation submit (Phase 7). Mirrors sendMessage's guards:
+  // verified email required, one request at a time, chat persisted
+  // first. The server's reply is authoritative — including the
+  // IMAGE_MODEL_UNAVAILABLE message, which is shown verbatim so the
+  // user hears plainly that no free image model is available.
+  async function createImage(text: string) {
+    const prompt = text.trim();
+    if (!user || creatingImage || sending) return;
+    if (!user.emailVerified) {
+      setNotice("Verify your email to create images. Use the banner above to resend the link.");
+      return;
+    }
+    if (!prompt) return;
+    if (prompt.length > MESSAGE_MAX_LENGTH) {
+      setNotice(`Descriptions must be ${MESSAGE_MAX_LENGTH.toLocaleString()} characters or fewer.`);
+      return;
+    }
+
+    let chat = chats.find((item) => item.id === activeChatId);
+    if (!chat) {
+      const createdChat = newChat();
+      chat = createdChat;
+      setChats((previous) => [createdChat, ...previous].slice(0, HISTORY_LIMIT));
+      setActiveChatId(chat.id);
+    }
+    setCreatingImage(true);
+    setNotice("");
+    try {
+      chat = await ensurePersistedChat(chat);
+      const idToken = await user.getIdToken();
+      const response = await fetch("/api/images/generate", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          "Content-Type": "application/json",
+          "X-Requested-With": "xyro",
+        },
+        body: JSON.stringify({
+          chatId: chat.id,
+          prompt,
+          userMessageId: crypto.randomUUID(),
+          assistantMessageId: crypto.randomUUID(),
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(
+          await getApiError(response, "The image couldn’t be created. Please try again."),
+        );
+      }
+      // Success: the user + assistant messages (with the watermarked
+      // picture attached) arrive through the Firestore listener.
+      setDraft("");
+      setCreateMode(false);
+      setNotice("Your image is ready — it appears in the conversation above.");
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "The image couldn’t be created. Please try again.",
+      );
+    } finally {
+      setCreatingImage(false);
+    }
+  }
+
+  async function submitDraft() {
+    if (createMode) {
+      await createImage(draft);
+    } else {
+      await sendMessage(draft);
     }
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await sendMessage(draft);
+    await submitDraft();
   }
 
   async function handleVerifyEmail() {
@@ -1104,8 +1526,7 @@ export default function ChatWorkspace() {
     try {
       await reload(user);
       if (!user.emailVerified) {
-        await sendEmailVerification(user);
-        setNotice("Your email isn’t verified yet. We sent a fresh verification link.");
+        setNotice("Your email isn’t verified yet. Open the link in your inbox, or resend it below.");
         return;
       }
       setAuthState("ready");
@@ -1119,10 +1540,53 @@ export default function ChatWorkspace() {
     }
   }
 
-  async function handleSignOut() {
+  // Resending goes through the session-gated server route
+  // (POST /api/auth/resend-verification), never the client SDK: the
+  // server enforces the session and the 1-per-60 s limit, and the UI
+  // mirrors it with a visible cooldown.
+  async function handleResendVerification() {
+    if (!user || resendCooldown > 0) return;
+    setVerificationBusy(true);
+    setNotice("");
+    try {
+      const idToken = await user.getIdToken();
+      const response = await fetch("/api/auth/resend-verification", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          "Content-Type": "application/json",
+          "X-Requested-With": "xyro",
+        },
+        body: JSON.stringify({ idToken }),
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new Error(
+          await getApiError(response, "We couldn’t send the verification email. Please try again."),
+        );
+      }
+      setResendCooldown(60);
+      setNotice("A fresh verification link is on its way. Check your inbox and spam folder.");
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "We couldn’t send the verification email. Please try again.",
+      );
+    } finally {
+      setVerificationBusy(false);
+    }
+  }
+
+  async function confirmSignOut() {
+    if (!signOutVariant) return;
+    setSigningOut(true);
     controllerRef.current?.abort();
-    await signOut(getFirebaseAuth());
-    router.replace("/sign-in");
+    // performSignOut revokes the server session, tears down Firebase
+    // and Firestore locally, and navigates to "/".
+    await performSignOut({ allDevices: signOutVariant === "all" });
+    setSigningOut(false);
+    setSignOutVariant(null);
   }
 
   async function copyMessage(message: Message) {
@@ -1141,7 +1605,10 @@ export default function ChatWorkspace() {
     if (lastUserMessage) void sendMessage(lastUserMessage.content, true);
   }
 
-  if (authState !== "ready") {
+  // Unverified users are NOT gated out: they enter the workspace,
+  // see the persistent verify banner, and can read their chats — only
+  // sending is blocked (see sendMessage and the composer).
+  if (authState !== "ready" && authState !== "unverified") {
     return (
       <div className="chat-gate">
         <FirebasePresence />
@@ -1153,22 +1620,6 @@ export default function ChatWorkspace() {
             <>
               <h1>Sign-in isn’t configured</h1>
               <p>Set up the Firebase web app settings before opening your chat workspace.</p>
-            </>
-          )}
-          {authState === "unverified" && (
-            <>
-              <h1>Verify your email to chat</h1>
-              <p>Chat access is available after you verify the email address on your account.</p>
-              {notice && <p className="chat-gate-notice" role="status">{notice}</p>}
-              <button
-                className="chat-primary-button"
-                type="button"
-                onClick={handleVerifyEmail}
-                disabled={verificationBusy}
-              >
-                {verificationBusy ? "Checking…" : "I’ve verified my email"}
-              </button>
-              <Link className="chat-gate-link" href="/sign-in">Back to sign in</Link>
             </>
           )}
         </div>
@@ -1195,7 +1646,7 @@ export default function ChatWorkspace() {
       )}
       <aside className={`chat-sidebar${sidebarOpen ? " chat-sidebar-open" : ""}`}>
         <div className="chat-sidebar-top">
-          <Link className="chat-wordmark" href="/" aria-label="Xyro AI home">
+          <Link className="chat-wordmark" href="/chat" aria-label="Xyro AI home">
             <span className="chat-brand-mark" aria-hidden="true">x</span>
             <span>xyro<span>ai</span></span>
           </Link>
@@ -1290,25 +1741,60 @@ export default function ChatWorkspace() {
                     </button>
                   )}
                   {editingChatId !== chat.id && (
-                    <button
-                      className="chat-history-rename"
-                      type="button"
-                      aria-label={`Rename ${chat.title}`}
-                      title="Rename chat"
-                      onClick={() => beginRenameChat(chat)}
-                    >
-                      <Icon name="edit" size={14} />
-                    </button>
+                    <div className="chat-history-menu-wrap">
+                      <button
+                        className="chat-history-menu-button"
+                        type="button"
+                        aria-label={`More actions for ${chat.title}`}
+                        aria-haspopup="menu"
+                        aria-expanded={menuChatId === chat.id}
+                        title="More actions"
+                        onClick={() =>
+                          setMenuChatId((current) => (current === chat.id ? null : chat.id))
+                        }
+                      >
+                        <Icon name="dots" size={16} />
+                      </button>
+                      {menuChatId === chat.id && (
+                        <div className="chat-history-menu" role="menu">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenuChatId(null);
+                              beginRenameChat(chat);
+                            }}
+                          >
+                            <Icon name="edit" size={14} />
+                            Rename
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenuChatId(null);
+                              exportChat(chat);
+                            }}
+                          >
+                            <Icon name="download" size={14} />
+                            Export
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="chat-history-menu-danger"
+                            onClick={() => {
+                              setMenuChatId(null);
+                              void deleteChat(chat.id);
+                            }}
+                          >
+                            <Icon name="trash" size={14} />
+                            Delete
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   )}
-                  <button
-                    className="chat-history-delete"
-                    type="button"
-                    aria-label={`Delete ${chat.title}`}
-                    title="Delete chat"
-                    onClick={() => deleteChat(chat.id)}
-                  >
-                    <Icon name="trash" size={15} />
-                  </button>
                 </div>
               ))}
             </section>
@@ -1325,17 +1811,32 @@ export default function ChatWorkspace() {
         </nav>
         <div className="chat-sidebar-bottom">
           <div className="chat-user-card">
-            <span className="chat-avatar" aria-hidden="true">
-              {(user?.displayName || user?.email || "x").slice(0, 1).toUpperCase()}
-            </span>
+            {user?.photoURL ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img className="chat-avatar chat-avatar-photo" src={user.photoURL} alt="" width={32} height={32} />
+            ) : (
+              <span className="chat-avatar" aria-hidden="true">
+                {(user?.displayName || user?.email || "x").slice(0, 1).toUpperCase()}
+              </span>
+            )}
             <span className="chat-user-email">{user?.displayName || user?.email}</span>
-            <button type="button" className="chat-signout" onClick={handleSignOut}>
+            <button type="button" className="chat-signout" onClick={() => setSignOutVariant("single")}>
               Sign out
             </button>
           </div>
+          <button type="button" className="chat-settings-link chat-signout-all" onClick={() => setSignOutVariant("all")}>
+            Sign out of all devices
+          </button>
           <Link className="chat-settings-link" href="/settings">Account settings <span>↗</span></Link>
         </div>
       </aside>
+      <SignOutDialog
+        open={signOutVariant !== null}
+        variant={signOutVariant ?? "single"}
+        busy={signingOut}
+        onCancel={() => setSignOutVariant(null)}
+        onConfirm={confirmSignOut}
+      />
 
       <main className="chat-main">
         <header className="chat-topbar">
@@ -1347,11 +1848,23 @@ export default function ChatWorkspace() {
           >
             <Icon name="menu" />
           </button>
-          <div className="chat-model-picker" aria-label="OpenRouter free models">
+          <label className="chat-model-picker">
             <span className="chat-model-dot" />
-            <span>OpenRouter</span>
-            <span className="chat-model-tier">Free models</span>
-          </div>
+            <select
+              aria-label="Choose a free model"
+              title="Choose a free model"
+              value={selectedModel ?? AUTO_MODEL_OPTION.id}
+              onChange={(event) => handleModelChange(event.target.value)}
+            >
+              {availableModels.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.name}
+                </option>
+              ))}
+            </select>
+            <span className="chat-model-tier">Free</span>
+            <span className="chat-model-chevron" aria-hidden="true">⌄</span>
+          </label>
           <div className="chat-topbar-actions">
             {activeChat && activeMessages.length > 0 && (
               <button
@@ -1372,6 +1885,36 @@ export default function ChatWorkspace() {
           <Link className="chat-topbar-link" href="/help">Help</Link>
         </header>
 
+        {authState === "unverified" && (
+          <div className="verify-banner" role="status">
+            <p>
+              <strong>Verify your email</strong>
+              <span>
+                You can browse your chats, but sending is off until you
+                verify {user?.email ?? "your email address"}.
+              </span>
+            </p>
+            <div className="verify-banner-actions">
+              <button
+                type="button"
+                onClick={handleResendVerification}
+                disabled={verificationBusy || resendCooldown > 0}
+              >
+                {resendCooldown > 0
+                  ? `Resend email (${resendCooldown}s)`
+                  : "Resend verification email"}
+              </button>
+              <button
+                type="button"
+                onClick={handleVerifyEmail}
+                disabled={verificationBusy}
+              >
+                {verificationBusy ? "Checking…" : "I’ve verified my email"}
+              </button>
+            </div>
+          </div>
+        )}
+
         <div
           ref={conversationRef}
           className={`chat-conversation${activeMessages.length ? " chat-conversation-has-messages" : ""}`}
@@ -1384,6 +1927,7 @@ export default function ChatWorkspace() {
               <p className="chat-empty-description">
                 Ask a question, work through an idea, or get a first draft. Choose a prompt or start with your own.
               </p>
+              {preferences.showSuggestions && (
               <div className="chat-suggestions">
                 {[
                   "Explain a tricky concept in simple terms",
@@ -1404,24 +1948,13 @@ export default function ChatWorkspace() {
                   </button>
                 ))}
               </div>
+              )}
             </section>
           ) : (
             <section className="chat-message-list" aria-label="Conversation">
               {activeMessages.map((message) => (
                 <article className={`chat-message chat-message-${message.role}`} key={message.id}>
-                  {message.role === "assistant" ? (
-                    <span className="chat-assistant-avatar" aria-hidden="true">
-                      <Icon name="spark" size={17} />
-                    </span>
-                  ) : (
-                    <span className="chat-avatar chat-message-user-avatar" aria-hidden="true">
-                      {(user?.displayName || user?.email || "x").slice(0, 1).toUpperCase()}
-                    </span>
-                  )}
                   <div className="chat-message-body">
-                    <span className="chat-message-author">
-                      {message.role === "assistant" ? "Xyro AI" : "You"}
-                    </span>
                     {message.attachments.length > 0 && (
                       <div className="chat-message-attachments">
                         {message.attachments.map((attachment) => {
@@ -1452,11 +1985,23 @@ export default function ChatWorkspace() {
                         })}
                       </div>
                     )}
-                    <div className="chat-message-content">
-                      {message.content || (sending && message.role === "assistant" ? (
-                        <span className="chat-thinking" role="status"><i /><i /><i /> Thinking</span>
-                      ) : null)}
-                    </div>
+                    {message.role === "user" ? (
+                      message.content ? (
+                        <div className="chat-message-bubble">{message.content}</div>
+                      ) : null
+                    ) : (
+                      <div className="chat-message-content">
+                        {message.content ? (
+                          <TypewriterText
+                            text={message.content}
+                            speed={preferences.typingSpeed}
+                            active={message.status === "generating"}
+                          />
+                        ) : sending ? (
+                          <span className="chat-thinking" role="status"><i /><i /><i /> Thinking</span>
+                        ) : null}
+                      </div>
+                    )}
                     {message.role === "assistant" && message.content && (
                       <div className="chat-message-actions">
                         <button
@@ -1488,6 +2033,24 @@ export default function ChatWorkspace() {
 
         <div className="chat-composer-area">
           {notice && <p className="chat-notice" role="status">{notice}</p>}
+          {createMode && (
+            <div className="chat-create-mode" role="status">
+              <Icon name="spark" size={15} />
+              <span>
+                <strong>Creating an image.</strong> Describe the picture below —
+                it’s made by a free model, watermarked invisibly, and saved to
+                this chat. If no free image model is available, we’ll say so.
+              </span>
+              <button
+                type="button"
+                aria-label="Exit image creation mode"
+                disabled={creatingImage}
+                onClick={() => setCreateMode(false)}
+              >
+                <Icon name="close" size={14} />
+              </button>
+            </div>
+          )}
           {pendingAttachments.length > 0 && (
             <div className="chat-pending-attachments" aria-label="Attachments to send">
               {pendingAttachments.map((attachment) => {
@@ -1524,7 +2087,7 @@ export default function ChatWorkspace() {
               ref={fileInputRef}
               className="chat-file-input"
               type="file"
-              accept={ACCEPTED_FILE_TYPES}
+              accept={fileAccept}
               multiple
               onChange={handleFilesSelected}
               disabled={sending || uploadingFiles}
@@ -1535,39 +2098,106 @@ export default function ChatWorkspace() {
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+                // Send-key preference (Phase 3): either plain Enter
+                // sends (Shift+Enter for a new line), or only
+                // Cmd/Ctrl+Enter sends and Enter adds a new line.
+                const modifier = event.metaKey || event.ctrlKey;
+                const shouldSend = preferences.sendWithEnter
+                  ? !event.shiftKey
+                  : modifier;
+                if (shouldSend) {
                   event.preventDefault();
-                  void sendMessage(draft);
+                  void submitDraft();
                 }
               }}
-              placeholder="Message Xyro AI…"
-              aria-label="Message Xyro AI"
+              placeholder={createMode ? "Describe the image you want to create…" : "Message Xyro AI…"}
+              aria-label={createMode ? "Describe an image to create" : "Message Xyro AI"}
               maxLength={MESSAGE_MAX_LENGTH}
               rows={1}
-              disabled={sending}
+              disabled={sending || creatingImage}
             />
             <div className="chat-composer-bottom">
               <span className="chat-composer-hint">
                 {draft.length > MESSAGE_MAX_LENGTH - 500
                   ? `${draft.length.toLocaleString()} / ${MESSAGE_MAX_LENGTH.toLocaleString()}`
-                  : uploadingFiles
-                    ? "Uploading files…"
-                    : "Shift + Enter for a new line"}
+                  : creatingImage
+                    ? "Creating your image…"
+                    : uploadingFiles
+                      ? "Uploading files…"
+                      : createMode
+                        ? "Free image models · 10 creations a day"
+                        : preferences.sendWithEnter
+                          ? "Shift + Enter for a new line"
+                          : "Cmd/Ctrl + Enter to send"}
               </span>
-              <button
-                className="chat-attach-button"
-                type="button"
-                aria-label="Attach images or documents"
-                title="Attach images or documents (10 MB max per file)"
-                disabled={
-                  sending ||
-                  uploadingFiles ||
-                  pendingAttachments.length >= MAX_FILES_PER_MESSAGE
-                }
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Icon name="attach" size={18} />
-              </button>
+              <div className="chat-attach-wrap">
+                <button
+                  className="chat-attach-button"
+                  type="button"
+                  aria-label="Attach files or create an image"
+                  aria-haspopup="menu"
+                  aria-expanded={attachMenuOpen}
+                  title="Attach or create"
+                  disabled={
+                    authState === "unverified" ||
+                    sending ||
+                    creatingImage ||
+                    uploadingFiles ||
+                    pendingAttachments.length >= MAX_FILES_PER_MESSAGE
+                  }
+                  onClick={() => setAttachMenuOpen((open) => !open)}
+                >
+                  <Icon name="plus" size={19} />
+                </button>
+                {attachMenuOpen && (
+                  <div className="chat-attach-menu" role="menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setAttachMenuOpen(false);
+                        if (pendingAttachments.length) {
+                          setNotice("Send or remove the current attachments before creating an image.");
+                          return;
+                        }
+                        setCreateMode(true);
+                        requestAnimationFrame(() => textareaRef.current?.focus());
+                      }}
+                    >
+                      <Icon name="spark" size={16} />
+                      Create an image
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setAttachMenuOpen(false);
+                        setCreateMode(false);
+                        setFileAccept(IMAGE_FILE_TYPES);
+                        requestAnimationFrame(() => fileInputRef.current?.click());
+                      }}
+                    >
+                      <Icon name="image" size={16} />
+                      Upload image
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setAttachMenuOpen(false);
+                        setCreateMode(false);
+                        setFileAccept(ACCEPTED_FILE_TYPES);
+                        requestAnimationFrame(() => fileInputRef.current?.click());
+                      }}
+                    >
+                      <Icon name="file" size={16} />
+                      Upload file or document
+                    </button>
+                    <p>Images, PDF, TXT, Markdown or CSV · 10 MB max per file · Image creation uses free models only</p>
+                  </div>
+                )}
+              </div>
               {sending ? (
                 <button
                   className="chat-send-button chat-stop-button"
@@ -1582,14 +2212,23 @@ export default function ChatWorkspace() {
                 <button
                   className="chat-send-button"
                   type="submit"
-                  aria-label="Send message"
-                  title="Send message"
+                  aria-label={createMode ? "Create image" : "Send message"}
+                  title={
+                    authState === "unverified"
+                      ? "Verify your email to send messages"
+                      : createMode
+                        ? "Create image"
+                        : "Send message"
+                  }
                   disabled={
-                    !draft.trim() &&
-                    pendingAttachments.length === 0
+                    authState === "unverified" ||
+                    creatingImage ||
+                    (createMode
+                      ? !draft.trim()
+                      : !draft.trim() && pendingAttachments.length === 0)
                   }
                 >
-                  <Icon name="send" size={17} />
+                  <Icon name={createMode ? "spark" : "send"} size={17} />
                 </button>
               )}
             </div>

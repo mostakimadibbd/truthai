@@ -1,0 +1,476 @@
+import { randomUUID } from "node:crypto";
+import { Timestamp } from "firebase-admin/firestore";
+import { NextRequest, NextResponse } from "next/server";
+import { guardMutationHeaders } from "@/lib/server/auth-guard";
+import { getBudgetStatus, recordBudget } from "@/lib/server/budget";
+import {
+  getCloudinaryPrivateDownloadUrl,
+  uploadGeneratedImage,
+} from "@/lib/server/cloudinary";
+import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
+import { limitDeniedResponse, limit as rateLimit } from "@/lib/server/limit";
+import { getFreeImageModels } from "@/lib/server/models";
+import { authenticateVerifiedUser } from "@/lib/server/request-auth";
+import { buildWatermarkPayload, embedWatermark } from "@/lib/server/watermark";
+
+// Image creation (Phase 7).
+//
+// POST { chatId, prompt, userMessageId, assistantMessageId } creates
+// one image in a chat:
+//  1. The live OpenRouter catalogue is checked for FREE
+//     image-generation models (output modality "image"). If none is
+//     available at that moment the route answers 503
+//     IMAGE_MODEL_UNAVAILABLE and the UI says so plainly — no result
+//     is ever faked and no paid model is ever called.
+//  2. The returned image is downloaded server-side, passed through
+//     the invisible LSB watermark (lib/server/watermark.ts), and the
+//     WATERMARKED PNG is stored in Cloudinary as an authenticated
+//     asset under xyro/generated/{uid}. The original is not kept.
+//  3. The picture is recorded as a normal upload document
+//     (kind: "generated") and attached to a new assistant message,
+//     so it renders in the chat thread, appears in Settings → Data
+//     files, and is deleted by the existing cascades.
+//
+// Limits: 10 creations per user per day (fail closed), on top of the
+// session + verified-email + Origin/header guards every app API
+// uses. Generation also pauses with the daily budget guard.
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MAX_BODY_BYTES = 8192;
+const MAX_PROMPT_LENGTH = 2000;
+const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
+const UPSTREAM_TIMEOUT_MS = 55_000;
+
+const IMAGE_UNAVAILABLE_MESSAGE =
+  "Image creation isn’t available right now because no free image model is currently available — please try again later.";
+
+function errorResponse(
+  status: number,
+  code: string,
+  message: string,
+  headers?: Record<string, string>,
+) {
+  return NextResponse.json(
+    { error: { code, message } },
+    { status, headers: { "Cache-Control": "no-store", ...headers } },
+  );
+}
+
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID_PATTERN.test(value);
+}
+
+/** Pull the first image reference out of an OpenRouter chat completion. */
+function findImageReference(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const choices = (payload as { choices?: unknown }).choices;
+  if (!Array.isArray(choices) || choices.length === 0) return null;
+  const message = (choices[0] as { message?: unknown })?.message;
+  if (typeof message !== "object" || message === null) return null;
+
+  const images = (message as { images?: unknown }).images;
+  if (Array.isArray(images)) {
+    for (const image of images) {
+      const url = (image as { image_url?: { url?: unknown } })?.image_url?.url;
+      if (typeof url === "string" && url.length > 0) return url;
+    }
+  }
+  const content = (message as { content?: unknown }).content;
+  if (Array.isArray(content)) {
+    for (const part of content) {
+      if (typeof part !== "object" || part === null) continue;
+      const imageUrl = (part as { image_url?: { url?: unknown } }).image_url?.url;
+      if (typeof imageUrl === "string" && imageUrl.length > 0) return imageUrl;
+      const inline = (part as { b64_json?: unknown }).b64_json;
+      if (typeof inline === "string" && inline.length > 0) {
+        return `data:image/png;base64,${inline}`;
+      }
+    }
+  }
+  if (typeof content === "string") {
+    const dataUrl = content.match(/data:image\/[a-z+.-]+;base64,[A-Za-z0-9+/=]+/);
+    if (dataUrl) return dataUrl[0];
+  }
+  return null;
+}
+
+// SSRF hardening for the model-returned URL (Phase 9 audit): the URL
+// comes from a model response that the caller's prompt can influence,
+// so it is untrusted input. Only https is allowed, redirects are
+// refused (a redirect could bounce the request to an internal target),
+// IP-literal hosts in private/loopback/link-local ranges and local
+// hostnames are rejected, and the body is read with a hard cap instead
+// of buffering an unbounded response into memory. Hostnames are not
+// DNS-resolved here, so a public hostname that resolves to a private
+// address (DNS rebinding) remains a documented residual risk in
+// SECURITY.md; the response bytes are additionally parsed as an image
+// by the watermark step and are never returned to the caller.
+function isBlockedImageHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host.endsWith(".local") || host.endsWith(".internal")) return true;
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 169 && b === 254) return true; // link-local / cloud metadata
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+    return false;
+  }
+  if (host.includes(":")) {
+    // IPv6 literal: only allow global unicast (2xxx); block ::1, fe80::/10,
+    // fc00::/7 and IPv4-mapped forms outright.
+    return !/^[23]/.test(host);
+  }
+  return false;
+}
+
+async function downloadImage(reference: string): Promise<Buffer> {
+  if (reference.startsWith("data:")) {
+    const comma = reference.indexOf(",");
+    const header = comma > 0 ? reference.slice(0, comma) : "";
+    if (!/^data:image\/[a-z+.-]+;base64$/.test(header)) {
+      throw new Error("The model returned an image we couldn’t read.");
+    }
+    const bytes = Buffer.from(reference.slice(comma + 1), "base64");
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_IMAGE_BYTES) {
+      throw new Error("The model returned an image of an unexpected size.");
+    }
+    return bytes;
+  }
+  if (reference.startsWith("https://")) {
+    let url: URL;
+    try {
+      url = new URL(reference);
+    } catch {
+      throw new Error("The model returned an image we couldn’t read.");
+    }
+    if (
+      url.protocol !== "https:" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      isBlockedImageHost(url.hostname)
+    ) {
+      throw new Error("The model returned an image we couldn’t read.");
+    }
+    const response = await fetch(url, {
+      cache: "no-store",
+      redirect: "error",
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!response.ok) {
+      throw new Error("The generated image couldn’t be downloaded.");
+    }
+    const declaredLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_IMAGE_BYTES) {
+      throw new Error("The model returned an image of an unexpected size.");
+    }
+    if (!response.body) {
+      throw new Error("The generated image couldn’t be downloaded.");
+    }
+    // Streamed read with a hard cap: never buffer more than
+    // MAX_IMAGE_BYTES + one chunk, however much the server sends.
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_IMAGE_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("The model returned an image of an unexpected size.");
+      }
+      chunks.push(value);
+    }
+    const bytes = Buffer.concat(chunks);
+    if (bytes.byteLength === 0) {
+      throw new Error("The model returned an image of an unexpected size.");
+    }
+    return bytes;
+  }
+  throw new Error("The model returned an image we couldn’t read.");
+}
+
+export async function POST(request: NextRequest) {
+  const guard = guardMutationHeaders(request);
+  if (guard) return guard;
+  const auth = await authenticateVerifiedUser(request);
+  if (!auth.ok) return errorResponse(auth.status, auth.code, auth.message);
+
+  const contentType = request.headers.get("content-type")?.split(";")[0].trim();
+  const contentLength = Number(request.headers.get("content-length"));
+  if (
+    contentType !== "application/json" ||
+    (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES)
+  ) {
+    return errorResponse(400, "INVALID_REQUEST", "The image request isn’t valid.");
+  }
+
+  let body: unknown;
+  try {
+    const raw = await request.text();
+    if (new TextEncoder().encode(raw).byteLength > MAX_BODY_BYTES) {
+      return errorResponse(400, "INVALID_REQUEST", "The image request is too large.");
+    }
+    body = JSON.parse(raw);
+  } catch {
+    return errorResponse(400, "INVALID_REQUEST", "The image request isn’t valid JSON.");
+  }
+
+  const fields = (typeof body === "object" && body !== null ? body : {}) as Record<
+    string,
+    unknown
+  >;
+  const { chatId, userMessageId, assistantMessageId } = fields;
+  const prompt = typeof fields.prompt === "string" ? fields.prompt.trim() : "";
+  if (
+    !isUuid(chatId) ||
+    !isUuid(userMessageId) ||
+    !isUuid(assistantMessageId) ||
+    userMessageId === assistantMessageId ||
+    prompt.length === 0 ||
+    prompt.length > MAX_PROMPT_LENGTH
+  ) {
+    return errorResponse(
+      400,
+      "INVALID_PROMPT",
+      `Describe the image in 1–${MAX_PROMPT_LENGTH} characters, in a valid conversation.`,
+    );
+  }
+
+  // Conservative creation limit: 10 per user per day, fail closed —
+  // each creation spends shared free-tier model + Cloudinary quota.
+  const limitResult = await rateLimit(
+    `images:generate:user:${auth.uid}`,
+    24 * 60 * 60 * 1000,
+    10,
+    "closed",
+  );
+  if (!limitResult.allowed) {
+    const denied = limitDeniedResponse(limitResult);
+    return errorResponse(
+      denied.status,
+      denied.code,
+      denied.status === 429
+        ? "You’ve reached today’s image creation limit (10 per day). Please try again tomorrow."
+        : denied.message,
+      denied.retryAfter ? { "Retry-After": String(denied.retryAfter) } : undefined,
+    );
+  }
+
+  const budget = await getBudgetStatus();
+  if (budget.state === "paused") {
+    return errorResponse(
+      503,
+      "BUDGET_PAUSED",
+      "Image creation is paused for today because the service has reached its daily capacity. Please come back tomorrow.",
+      { "Retry-After": "1800" },
+    );
+  }
+
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    return errorResponse(
+      503,
+      "IMAGE_NOT_CONFIGURED",
+      "Image creation isn’t configured yet. Add an OpenRouter API key on the server to enable it.",
+    );
+  }
+
+  // The honesty gate: only FREE image-generation models, checked
+  // against the live catalogue at request time.
+  const imageModels = await getFreeImageModels();
+  if (imageModels.length === 0) {
+    return errorResponse(503, "IMAGE_MODEL_UNAVAILABLE", IMAGE_UNAVAILABLE_MESSAGE);
+  }
+
+  let db: ReturnType<typeof getFirebaseAdminFirestore>;
+  try {
+    db = getFirebaseAdminFirestore();
+  } catch (error) {
+    console.error("Firebase storage is not configured for image creation.", error);
+    return errorResponse(503, "IMAGE_STORAGE_NOT_CONFIGURED", "Image storage isn’t configured for this deployment.");
+  }
+
+  const userRef = db.collection("users").doc(auth.uid);
+  const chatRef = userRef.collection("chats").doc(chatId);
+  const messagesRef = chatRef.collection("messages");
+  try {
+    const chatSnapshot = await chatRef.get();
+    if (!chatSnapshot.exists) {
+      return errorResponse(404, "CHAT_NOT_FOUND", "This conversation no longer exists.");
+    }
+    if ((await messagesRef.doc(assistantMessageId).get()).exists) {
+      return errorResponse(409, "MESSAGE_ALREADY_EXISTS", "This image has already been created.");
+    }
+
+    // Ask the model. Try up to two free image models when the first
+    // is busy/unavailable; a model that answers without an image is
+    // a failure, never a reason to fabricate one.
+    let imageReference: string | null = null;
+    let usedModel = "";
+    let lastStatus = 0;
+    for (const candidate of imageModels.slice(0, 2)) {
+      let response: Response;
+      try {
+        response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": request.nextUrl.origin,
+            "X-Title": "Xyro AI",
+          },
+          body: JSON.stringify({
+            model: candidate.id,
+            messages: [{ role: "user", content: prompt }],
+            modalities: ["image", "text"],
+          }),
+          signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+          cache: "no-store",
+        });
+      } catch {
+        return errorResponse(502, "MODEL_UNAVAILABLE", "The free image model service is temporarily unavailable.");
+      }
+      if (!response.ok) {
+        lastStatus = response.status;
+        await response.body?.cancel();
+        if (response.status === 429 || response.status >= 500) continue;
+        break;
+      }
+      const payload: unknown = await response.json().catch(() => null);
+      imageReference = findImageReference(payload);
+      if (imageReference) {
+        usedModel = candidate.id;
+        break;
+      }
+    }
+    if (!imageReference) {
+      if (lastStatus === 429) {
+        return errorResponse(429, "MODEL_BUSY", "Free image models are busy right now. Please wait a moment and try again.");
+      }
+      return errorResponse(
+        502,
+        "IMAGE_GENERATION_FAILED",
+        "The free image model didn’t return an image. Please try again, or rephrase the description.",
+      );
+    }
+
+    // Download → watermark → store. The watermark is applied BEFORE
+    // storage and the original bytes are discarded.
+    const generationId = randomUUID();
+    let watermarked: Buffer;
+    try {
+      const original = await downloadImage(imageReference);
+      watermarked = await embedWatermark(
+        original,
+        buildWatermarkPayload(generationId, auth.uid),
+      );
+    } catch (error) {
+      console.error("Generated image processing failed.", error);
+      return errorResponse(
+        502,
+        "IMAGE_PROCESSING_FAILED",
+        error instanceof Error ? error.message : "The generated image couldn’t be processed.",
+      );
+    }
+
+    let stored: { publicId: string; bytes: number };
+    try {
+      stored = await uploadGeneratedImage(watermarked, auth.uid, generationId);
+    } catch (error) {
+      console.error("Generated image storage failed.", error);
+      return errorResponse(503, "IMAGE_STORAGE_FAILED", "The generated image couldn’t be saved. Please try again.");
+    }
+
+    const assetId = randomUUID();
+    const name = `xyro-created-${generationId.slice(0, 8)}.png`;
+    const attachment = { id: assetId, name, mimeType: "image/png", size: stored.bytes };
+    const now = Timestamp.now();
+    const chatData = chatSnapshot.data() ?? {};
+    const existingTitle = typeof chatData.title === "string" ? chatData.title : "New chat";
+    const title =
+      existingTitle === "New chat"
+        ? prompt.slice(0, 60).replace(/\s+\S*$/, "").trim() || prompt.slice(0, 60)
+        : existingTitle;
+    const previousSearch = typeof chatData.searchText === "string" ? chatData.searchText : "";
+    const batch = db.batch();
+    batch.create(userRef.collection("uploads").doc(assetId), {
+      assetId,
+      chatId,
+      name,
+      mimeType: "image/png",
+      expectedBytes: stored.bytes,
+      bytes: stored.bytes,
+      format: "png",
+      resourceType: "image",
+      publicId: stored.publicId,
+      deliveryType: "authenticated",
+      status: "ready",
+      kind: "generated",
+      generationId,
+      model: usedModel,
+      prompt: prompt.slice(0, 500),
+      createdAt: now,
+      confirmedAt: now,
+    });
+    batch.create(messagesRef.doc(userMessageId), {
+      role: "user",
+      content: prompt,
+      attachmentIds: [],
+      attachments: [],
+      status: "complete",
+      createdAt: now,
+    });
+    batch.create(messagesRef.doc(assistantMessageId), {
+      role: "assistant",
+      content: "Here’s the image you described. It was created with a free model and carries an invisible Xyro AI watermark.",
+      attachmentIds: [assetId],
+      attachments: [attachment],
+      status: "complete",
+      inReplyTo: userMessageId,
+      kind: "image-generation",
+      generationId,
+      model: usedModel,
+      createdAt: Timestamp.fromMillis(Date.now() + 1),
+    });
+    batch.set(
+      chatRef,
+      {
+        title,
+        searchText: `${previousSearch}\n${prompt}`.slice(-5000),
+        lastMessagePreview: "Created an image",
+        updatedAt: now,
+      },
+      { merge: true },
+    );
+    await batch.commit();
+
+    await recordBudget({
+      firestoreWrites: 4,
+      firestoreReads: 2,
+      redisCommands: 4,
+    });
+
+    return NextResponse.json(
+      {
+        success: true,
+        assetId,
+        generationId,
+        model: usedModel,
+        messageId: assistantMessageId,
+        accessUrl: getCloudinaryPrivateDownloadUrl(stored.publicId, "png", "image"),
+      },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  } catch (error) {
+    console.error("Image creation failed.", error);
+    return errorResponse(503, "IMAGE_REQUEST_FAILED", "The image couldn’t be created or saved. Please try again.");
+  }
+}
