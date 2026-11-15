@@ -3110,3 +3110,10 @@ body:has(.chat-app) #main {
   .dev-stat-value { font-size: 20px; }
   .chat-composer { border-radius: 22px; }
 }
+
+/* Contrast fixes (audit): the pale gradient primary buttons must
+   keep dark text in BOTH themes — the extracted token used before
+   flips to near-white in the light theme — and the warning badge
+   uses the semantic danger pair instead of pale-on-pale. */
+.button-primary, .button-primary:hover:not(:disabled) { color: var(--on-accent); }
+.settings-badge-warn { color: var(--danger-text); border-color: var(--danger-line); background: var(--danger-bg); }
