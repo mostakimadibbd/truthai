@@ -3275,3 +3275,10 @@ body:has(.chat-app) #main {
 .chat-tool-button:hover { background: color-mix(in srgb, var(--panel) 80%, transparent); color: var(--text); }
 .chat-tool-button:disabled { opacity: 0.45; cursor: default; }
 .chat-tool-on { color: var(--accent-mid); border-color: color-mix(in srgb, var(--accent-mid) 55%, transparent); background: color-mix(in srgb, var(--accent-mid) 14%, transparent); }
+
+/* Usage tab: today's tokens per conversation (2026-11-16). */
+.usage-by-chat { display: grid; gap: 8px; width: 100%; }
+.usage-by-chat-row { display: grid; grid-template-columns: 1fr auto; gap: 2px 14px; align-items: baseline; padding: 9px 12px; border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--panel) 65%, transparent); }
+.usage-by-chat-title { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.usage-by-chat-meta { grid-column: 1; font-size: 12.5px; color: var(--muted-3); word-break: break-word; }
+.usage-by-chat-tokens { grid-row: 1; grid-column: 2; font-weight: 700; color: var(--text); white-space: nowrap; }

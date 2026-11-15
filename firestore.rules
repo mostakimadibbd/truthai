@@ -150,6 +150,13 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Per-conversation daily chat metering (Usage tab's
+    // "today by chat" breakdown; server-written).
+    match /users/{userId}/chatUsageByDay/{date}/chats/{chatId} {
+      allow read: if ownsUser(userId);
+      allow write: if false;
+    }
+
     // Platform analytics: per-request token ledger and the
     // per-minute / per-day rollups. Administrator-only data —
     // no client may read or write any of it; the admin console

@@ -193,6 +193,37 @@ export async function recordUsageEvent(input: UsageEventInput): Promise<void> {
         },
         { merge: true },
       );
+      // Per-chat daily rollup (owner request, 2026-11-16): Settings →
+      // Usage shows today's tokens broken down by conversation, with
+      // the model(s) each conversation used. Models are stored as
+      // VALUES (arrayUnion + lastModel), never as field names, so
+      // model ids containing "/" and "." are safe.
+      if (input.chatId) {
+        batch.set(
+          firestore
+            .collection("users")
+            .doc(input.uid)
+            .collection("chatUsageByDay")
+            .doc(day)
+            .collection("chats")
+            .doc(input.chatId),
+          {
+            chatId: input.chatId,
+            requests: FieldValue.increment(1),
+            promptTokens: FieldValue.increment(promptTokens),
+            completionTokens: FieldValue.increment(completionTokens),
+            totalTokens: FieldValue.increment(totalTokens),
+            ...(input.model
+              ? {
+                  models: FieldValue.arrayUnion(input.model),
+                  lastModel: input.model,
+                }
+              : {}),
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
+      }
     }
 
     await batch.commit();
@@ -346,6 +377,65 @@ export type ChatDailyUsage = {
   totalTokens: number;
   costUsd: number;
 };
+
+export type ChatTodayUsage = {
+  chatId: string;
+  title: string;
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  models: string[];
+};
+
+/**
+ * Today's chat tokens broken down per conversation (Usage tab),
+ * with each conversation's title and the model(s) it used. Reads
+ * the per-chat rollup written by recordUsageEvent; titles come
+ * from the chat docs themselves ("Deleted chat" when gone).
+ */
+export async function getTodayChatUsageByChat(
+  uid: string,
+): Promise<ChatTodayUsage[]> {
+  const firestore = db();
+  const day = analyticsDayKey(new Date());
+  const snapshot = await firestore
+    .collection("users")
+    .doc(uid)
+    .collection("chatUsageByDay")
+    .doc(day)
+    .collection("chats")
+    .orderBy("totalTokens", "desc")
+    .limit(20)
+    .get();
+  if (snapshot.empty) return [];
+  const num = (value: unknown) => (typeof value === "number" ? value : 0);
+  const titleSnapshots = await firestore.getAll(
+    ...snapshot.docs.map((doc) =>
+      firestore.collection("users").doc(uid).collection("chats").doc(doc.id),
+    ),
+  );
+  return snapshot.docs.map((doc, index) => {
+    const data = doc.data();
+    const titleData = titleSnapshots[index]?.data();
+    return {
+      chatId: doc.id,
+      title:
+        typeof titleData?.title === "string" && titleData.title
+          ? titleData.title
+          : titleSnapshots[index]?.exists
+            ? "Untitled chat"
+            : "Deleted chat",
+      requests: num(data.requests),
+      promptTokens: num(data.promptTokens),
+      completionTokens: num(data.completionTokens),
+      totalTokens: num(data.totalTokens),
+      models: Array.isArray(data.models)
+        ? data.models.filter((model): model is string => typeof model === "string")
+        : [],
+    };
+  });
+}
 
 /** The signed-in user's own chat metering for the Usage tab. */
 export async function getChatUsageRange(

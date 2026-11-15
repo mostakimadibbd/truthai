@@ -2524,12 +2524,22 @@ type TokenDay = {
   costUsd: number;
 };
 
+type ChatTodayUsage = {
+  chatId: string;
+  title: string;
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  models: string[];
+};
+
 type UsageData = {
   available: boolean;
   messages: { today: number; dayLimit: number; thisMinute: number; minuteLimit: number };
   uploads: { today: number; dayLimit: number; thisMinute: number; minuteLimit: number };
   resetAt: number | null;
-  tokens?: { chat: TokenDay[]; api: TokenDay[] };
+  tokens?: { chat: TokenDay[]; api: TokenDay[]; todayByChat?: ChatTodayUsage[] };
 };
 
 function UsageTab({ user }: { user: User }) {
@@ -2602,7 +2612,11 @@ function UsageTab({ user }: { user: User }) {
   );
 }
 
-function TokenUsageSection({ tokens }: { tokens: { chat: TokenDay[]; api: TokenDay[] } }) {
+function TokenUsageSection({
+  tokens,
+}: {
+  tokens: { chat: TokenDay[]; api: TokenDay[]; todayByChat?: ChatTodayUsage[] };
+}) {
   const days = tokens.chat.map((chatDay, index) => {
     const apiDay = tokens.api[index];
     return {
@@ -2661,6 +2675,37 @@ function TokenUsageSection({ tokens }: { tokens: { chat: TokenDay[]; api: TokenD
           {(apiToday?.totalTokens ?? 0).toLocaleString("en-US")}.
         </span>
       </div>
+      {tokens.todayByChat && tokens.todayByChat.length > 0 && (
+        <div className="settings-usage-row">
+          <span className="settings-label">Today by chat</span>
+          <div className="usage-by-chat">
+            {tokens.todayByChat.map((chat) => (
+              <div className="usage-by-chat-row" key={chat.chatId}>
+                <span className="usage-by-chat-title" title={chat.title}>
+                  {chat.title}
+                </span>
+                <span className="usage-by-chat-meta">
+                  {chat.models.length
+                    ? chat.models
+                        .map((model) =>
+                          model === "openrouter/free" ? "Auto (Free)" : model,
+                        )
+                        .join(", ")
+                    : "Model not recorded"}
+                  {" · "}
+                  {chat.requests} {chat.requests === 1 ? "reply" : "replies"}
+                </span>
+                <span className="usage-by-chat-tokens">
+                  {chat.totalTokens.toLocaleString("en-US")} tokens
+                </span>
+              </div>
+            ))}
+          </div>
+          <span className="settings-hint">
+            Counted from today (UTC), per conversation, from the same metering as the totals above.
+          </span>
+        </div>
+      )}
     </>
   );
 }

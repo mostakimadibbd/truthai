@@ -3,7 +3,7 @@ import { authErrorResponse } from "@/lib/server/auth-guard";
 import { authenticateSessionUser } from "@/lib/server/api-auth";
 import { getBudgetStatus } from "@/lib/server/budget";
 import { peekRateLimitUsage } from "@/lib/server/rate-limit";
-import { getChatUsageRange } from "@/lib/server/analytics";
+import { getChatUsageRange, getTodayChatUsageByChat } from "@/lib/server/analytics";
 import { getUsageRange } from "@/lib/server/developer";
 
 export const runtime = "nodejs";
@@ -26,12 +26,13 @@ export async function GET(request: NextRequest) {
     return authErrorResponse(auth.status, auth.code, auth.message);
   }
 
-  const [chat, uploads, budget, chatTokens, apiTokens] = await Promise.all([
+  const [chat, uploads, budget, chatTokens, apiTokens, todayByChat] = await Promise.all([
     peekRateLimitUsage(auth.uid, "chat"),
     peekRateLimitUsage(auth.uid, "upload"),
     getBudgetStatus(),
     getChatUsageRange(auth.uid, 7).catch(() => []),
     getUsageRange(auth.uid, 7).catch(() => []),
+    getTodayChatUsageByChat(auth.uid).catch(() => []),
   ]);
   const available = chat.state === "ok" && uploads.state === "ok";
   // The daily window is anchored at the first counted action of the
@@ -74,6 +75,7 @@ export async function GET(request: NextRequest) {
       tokens: {
         chat: chatTokens,
         api: apiTokens,
+        todayByChat,
       },
     },
     { headers: { "Cache-Control": "no-store" } },
