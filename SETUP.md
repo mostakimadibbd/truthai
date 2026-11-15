@@ -143,7 +143,7 @@ Required for the app to work:
 | `NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID` | Firebase web app config (stored; Analytics is not initialised) |
 | `FIREBASE_ADMIN_PROJECT_ID` | Service account |
 | `FIREBASE_ADMIN_CLIENT_EMAIL` | Service account |
-| `FIREBASE_ADMIN_PRIVATE_KEY` | Service account (newlines as `\n`) |
+| `FIREBASE_ADMIN_PRIVATE_KEY` | Service account `private_key` field (the server normalises quoted, escaped, base64 and single-line paste formats) |
 | `CLOUDINARY_CLOUD_NAME` | Cloudinary dashboard |
 | `CLOUDINARY_API_KEY` | Cloudinary dashboard |
 | `CLOUDINARY_API_SECRET` | Cloudinary dashboard |

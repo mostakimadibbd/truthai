@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
   browserPopupRedirectResolver,
   getRedirectResult,
@@ -119,6 +119,7 @@ export default function SignInForm({
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [turnstileToken, setTurnstileToken] = useState("");
   const [turnstileResetKey, setTurnstileResetKey] = useState(0);
+  const turnstileAnchorRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -162,6 +163,15 @@ export default function SignInForm({
     router.replace(next);
     router.refresh();
   }, [router]);
+
+  /** The widget sits under the form fields; bring it into view when a
+   * submit is attempted before it has been completed. */
+  function scrollToTurnstile() {
+    turnstileAnchorRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+  }
 
   function resetTurnstile() {
     // Turnstile tokens are single-use: reset the widget after every
@@ -279,6 +289,7 @@ export default function SignInForm({
     }
     if (!turnstileToken) {
       setError("Complete the security check before continuing.");
+      scrollToTurnstile();
       return;
     }
     if (mode === "sign-up" && !termsAccepted) {
@@ -385,6 +396,7 @@ export default function SignInForm({
     }
     if (!turnstileToken) {
       setError("Complete the security check before continuing with Google.");
+      scrollToTurnstile();
       return;
     }
     if (mode === "sign-up" && !termsAccepted) {
@@ -735,8 +747,8 @@ export default function SignInForm({
           </form>
         ) : (
           <>
-            <div className="auth-signup-security">
-              {mode === "sign-up" && (
+            {mode === "sign-up" && (
+              <div className="auth-signup-security">
                 <label className="auth-checkbox-row auth-consent-row">
                   <input
                     type="checkbox"
@@ -752,16 +764,8 @@ export default function SignInForm({
                     <Link href="/privacy">Privacy Policy</Link>.
                   </span>
                 </label>
-              )}
-              <TurnstileBoundary onRetry={resetTurnstile}>
-                <TurnstileWidget
-                  key={turnstileResetKey}
-                  action={formAction}
-                  resetKey={turnstileResetKey}
-                  onToken={setTurnstileToken}
-                />
-              </TurnstileBoundary>
-            </div>
+              </div>
+            )}
 
             <button
               className="button button-google"
@@ -842,6 +846,17 @@ export default function SignInForm({
                   Forgot password?
                 </button>
               )}
+
+              <div className="auth-signup-security" ref={turnstileAnchorRef}>
+                <TurnstileBoundary onRetry={resetTurnstile}>
+                  <TurnstileWidget
+                    key={turnstileResetKey}
+                    action={formAction}
+                    resetKey={turnstileResetKey}
+                    onToken={setTurnstileToken}
+                  />
+                </TurnstileBoundary>
+              </div>
 
               <button
                 className="button button-primary auth-submit"
