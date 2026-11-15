@@ -46,10 +46,8 @@ import { sortByConversationOrder } from "@/lib/message-order";
 import { usePreferences } from "@/lib/preferences-client";
 import { useTypewriter } from "@/lib/typewriter";
 import { isFirebaseConfigured, tryGetFirebaseAuth } from "@/lib/firebase/auth-client";
-import {
-  getFirebaseFirestore,
-  getFirebaseRealtimeDatabase,
-} from "@/lib/firebase/client";
+import { getFirebaseFirestore } from "@/lib/firebase/firestore-client";
+import { getFirebaseRealtimeDatabase } from "@/lib/firebase/database-client";
 
 type Attachment = {
   id: string;

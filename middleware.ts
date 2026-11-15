@@ -97,7 +97,7 @@ export async function middleware(request: NextRequest) {
     response.headers.set("X-Content-Type-Options", "nosniff");
     response.headers.set(
       "Permissions-Policy",
-      "camera=(), microphone=(), geolocation=(), interest-cohort=()",
+      "camera=(), microphone=(self), geolocation=(), interest-cohort=()",
     );
     response.headers.set("Content-Security-Policy", csp);
     return response;

@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "verify:firebase": "node scripts/verify-firebase.mjs"
+    "verify:firebase": "node scripts/verify-firebase.mjs",
+    "test": "node --experimental-strip-types --no-warnings --loader ./tests/alias-hook.mjs --test tests/*.test.mjs",
+    "test:smoke": "node tests/smoke.mjs"
   },
   "engines": {
     "node": "22.x"

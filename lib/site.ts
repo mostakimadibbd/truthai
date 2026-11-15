@@ -3,7 +3,11 @@ const previewUrl =
   process.env.VERCEL_ENV === "preview" && process.env.VERCEL_URL
     ? `https://${process.env.VERCEL_URL}`
     : undefined;
-const candidateUrl = configuredUrl || previewUrl || "https://xyro.ai";
+// Fallback is the actual production origin: with SITE_URL unset the
+// sitemap/canonical URLs previously pointed at a domain the product
+// doesn't run on (audit fix, 2026-11-16). Set SITE_URL in the host
+// when a custom domain is attached.
+const candidateUrl = configuredUrl || previewUrl || "https://truthai-six.vercel.app";
 const parsedUrl = new URL(candidateUrl);
 
 if (

@@ -2,11 +2,8 @@
 
 import { useEffect } from "react";
 import { onAuthStateChanged } from "firebase/auth";
-import {
-  getFirebaseAuth,
-  isFirebaseConfigured,
-  isFirebaseRealtimeDatabaseConfigured,
-} from "@/lib/firebase/client";
+import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/auth-client";
+import { isFirebaseRealtimeDatabaseConfigured } from "@/lib/firebase/app-client";
 import { trackUserPresence } from "@/lib/firebase/presence";
 
 export default function FirebasePresence() {

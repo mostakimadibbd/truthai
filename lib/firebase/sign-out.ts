@@ -2,7 +2,8 @@
 
 import { signOut } from "firebase/auth";
 import { clearIndexedDbPersistence, terminate } from "firebase/firestore";
-import { getFirebaseAuth, getFirebaseFirestore } from "./client";
+import { getFirebaseAuth } from "./auth-client";
+import { getFirebaseFirestore } from "./firestore-client";
 
 // Shared sign-out teardown used by the header menu, the chat sidebar
 // and the settings/account panel, always behind the confirmation

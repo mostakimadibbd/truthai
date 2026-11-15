@@ -11,7 +11,7 @@ import {
   set,
   type DatabaseReference,
 } from "firebase/database";
-import { getFirebaseRealtimeDatabase } from "./client";
+import { getFirebaseRealtimeDatabase } from "./database-client";
 
 type PresenceSession = {
   references: number;

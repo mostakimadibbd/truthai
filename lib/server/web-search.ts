@@ -57,6 +57,26 @@ function decodeBingUrl(href: string): string {
   return decodeEntities(href);
 }
 
+/** Parses Bing's results HTML into structured results (exported for tests). */
+export function parseBingResults(html: string, count = 6): WebSearchResult[] {
+  const blocks = html.match(/<li class="b_algo"[\s\S]*?<\/li>/g) ?? [];
+  const results: WebSearchResult[] = [];
+  for (const block of blocks) {
+    const link = /<h2>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/.exec(block);
+    if (!link) continue;
+    const url = decodeBingUrl(link[1]);
+    if (!/^https?:\/\//.test(url)) continue;
+    const snippetMatch = /<p[^>]*>([\s\S]*?)<\/p>/.exec(block);
+    results.push({
+      title: stripTags(link[2]).slice(0, 160) || url,
+      url,
+      snippet: snippetMatch ? stripTags(snippetMatch[1]).slice(0, 320) : "",
+    });
+    if (results.length >= count) break;
+  }
+  return results;
+}
+
 export async function searchWeb(
   query: string,
   count = 6,
@@ -73,23 +93,7 @@ export async function searchWeb(
       },
     );
     if (!response.ok) return [];
-    const html = await response.text();
-    const blocks = html.match(/<li class="b_algo"[\s\S]*?<\/li>/g) ?? [];
-    const results: WebSearchResult[] = [];
-    for (const block of blocks) {
-      const link = /<h2>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/.exec(block);
-      if (!link) continue;
-      const url = decodeBingUrl(link[1]);
-      if (!/^https?:\/\//.test(url)) continue;
-      const snippetMatch = /<p[^>]*>([\s\S]*?)<\/p>/.exec(block);
-      results.push({
-        title: stripTags(link[2]).slice(0, 160) || url,
-        url,
-        snippet: snippetMatch ? stripTags(snippetMatch[1]).slice(0, 320) : "",
-      });
-      if (results.length >= count) break;
-    }
-    return results;
+    return parseBingResults(await response.text(), count);
   } catch {
     return [];
   }

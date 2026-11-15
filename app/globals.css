@@ -2571,7 +2571,7 @@ body:has(.chat-app) #main {
 
 .account-signout-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 .account-signout-actions .auth-signout { margin-top: 22px; }
-.chat-signout-all { width: 100%; border: 0; background: transparent; text-align: left; cursor: pointer; font: inherit; }
+.chat-signout-all { width: 100%; border: 0; background: transparent; text-align: left; cursor: pointer; font-family: inherit; }
 
 /* ---- Phase 3 settings ---- */
 .settings-visually-hidden {
@@ -3282,3 +3282,16 @@ body:has(.chat-app) #main {
 .usage-by-chat-title { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .usage-by-chat-meta { grid-column: 1; font-size: 12.5px; color: var(--muted-3); word-break: break-word; }
 .usage-by-chat-tokens { grid-row: 1; grid-column: 2; font-weight: 700; color: var(--text); white-space: nowrap; }
+
+/* Composer contrast (audit fix, 2026-11-16): the composer now sits
+   on the semantic panel surface with a full-strength border and a
+   deeper shadow, so it reads clearly against the page backdrop in
+   both themes instead of washing into it. */
+.chat-composer {
+  background: var(--panel);
+  border-color: var(--line-2);
+  box-shadow: 0 12px 38px var(--v-rgb-0-0-0-19), 0 2px 10px var(--v-rgb-0-0-0-19);
+}
+.chat-composer-area {
+  background: linear-gradient(0deg, var(--page) 82%, var(--v-rgb-11-9-16-0));
+}

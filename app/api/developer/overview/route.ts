@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { authErrorResponse } from "@/lib/server/auth-guard";
 import { authenticateSessionUser } from "@/lib/server/api-auth";
 import {
+  checkWindowLimit,
+  rateLimitedResponse,
+} from "@/lib/server/auth-rate-limit";
+import {
   FREE_PLAN_DAILY_TOKEN_LIMIT,
   apiDateKey,
   getDailyUsage,
@@ -32,6 +36,21 @@ export async function GET(request: NextRequest) {
   const auth = await authenticateSessionUser(request);
   if (!auth.ok) {
     return authErrorResponse(auth.status, auth.code, auth.message);
+  }
+  // The overview fans out to many Firestore reads; cap dashboard
+  // polling per user (audit fix, 2026-11-16).
+  const rateLimit = await checkWindowLimit(
+    `xyro:developer:overview:user:${auth.uid}`,
+    60 * 1000,
+    120,
+  );
+  if (rateLimit.state !== "allowed") {
+    const limited = rateLimitedResponse(rateLimit);
+    return authErrorResponse(limited.status, limited.code, limited.message, {
+      ...(limited.retryAfter
+        ? { "Retry-After": String(limited.retryAfter) }
+        : {}),
+    });
   }
   try {
     const user = await getFirebaseAdminAuth().getUser(auth.uid);

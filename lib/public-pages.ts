@@ -177,7 +177,35 @@ export const articles: Record<string, Article> = {
       },
       {
         q: "Does Xyro AI have a public API?",
-        a: "Yes — an OpenAI-compatible API under /api/v1. Activate it in Settings → Developer to get a key; the free plan includes 100,000 tokens per day. The other endpoints under /api are the web app's own and require your signed-in session. The developers page has the details and the API terms govern use.",
+        a: "Yes — an OpenAI-compatible API under /api/v1. Activate it in Settings → Developer to get a key; the free plan includes 100,000 tokens per day. The other endpoints under /api are the web app's own and require your signed-in session. The developers page has the details, the API reference documents every endpoint and error, and the API terms govern use.",
+      },
+      {
+        q: "Can Xyro AI search the web for recent information?",
+        a: "Yes. Tap the globe button in the chat composer to turn on web search: your message is then sent as a search query to Bing, the top results are given to the model as context, and the reply cites them — the sources appear as numbered chips under the answer. Your message text is only sent as a query while the toggle is on. If you paste a link into a chat, Xyro AI fetches that page directly so the model can read it.",
+      },
+      {
+        q: "Can I listen to replies, or dictate instead of typing?",
+        a: "Yes. Every reply has a Read aloud action that speaks it using your browser's built-in text-to-speech voice, and the microphone button in the composer dictates your message using the browser's speech recognition — you'll need to allow microphone permission, and the transcript lands in the composer so you can edit it before sending. Both features run on your browser's own speech tools, so availability depends on the browser.",
+      },
+      {
+        q: "What are the password rules?",
+        a: "Passwords must be at least 10 characters and include a lowercase letter, an uppercase letter and a symbol. The sign-up form shows a live checklist that turns green as each rule is met, plus a strength meter, and asks you to type the password twice so a typo can't lock you out. Passwords are also screened against known data breaches before they're accepted.",
+      },
+      {
+        q: "Do I need the human check to sign in with Google?",
+        a: "No. Continue with Google never requires the Cloudflare human check — it opens Google's own sign-in popup, and the server verifies your Google identity directly. A brand-new Google account may see a one-time card asking you to accept the terms before the account is created; after that, Google sign-in goes straight into the app.",
+      },
+      {
+        q: "Can I see how many tokens each chat used?",
+        a: "Yes. Settings → Usage has a 'Today by chat' list showing every conversation you've used today (counted in UTC), with the model or models it used, its reply count and its token total — so a long conversation's cost is visible instead of disappearing into the daily total.",
+      },
+      {
+        q: "Can I pin a chat so it stays at the top?",
+        a: "Yes. Open the … menu on any chat in the sidebar and choose Pin. Pinned chats collect in a Pinned group at the top of the sidebar, above the usual recency groups; unpin from the same menu.",
+      },
+      {
+        q: "Why does creating an API key require a name?",
+        a: "So you can tell your keys apart. The name you give a key at creation labels it in the Developer dashboard, the per-request activity log and the access-point list — when something calls your API, you can see which key it was. Names are required; the key itself is shown only once.",
       },
     ],
   },
@@ -198,6 +226,30 @@ Object.assign(articles, {
       { title: "Troubleshooting sign-in", href: "/help-sign-in", blurb: "Verification, password resets, sessions, and the human check." },
     ],
     sections: [
+      {
+        title: "Turn on web search",
+        body: [
+          "In any chat, tap the globe button in the composer. While it's on, each message you send is also used as a search query (results come from Bing), the top results are given to the model as context, and the reply cites them — the sources appear as numbered chips under the answer, and tapping one opens the page. The toggle stays as you left it on that device. Tip: pasting a link into a message makes Xyro AI read that page directly, with or without search on.",
+        ],
+      },
+      {
+        title: "Use voice input and read aloud",
+        body: [
+          "Tap the microphone button in the composer and speak; allow microphone permission when the browser asks. Your words land in the composer as text, so you can fix anything before sending. To hear a reply instead, use the Read aloud action under any answer — it uses your browser's built-in voice, and tapping it again stops playback. Both features depend on the browser's own speech tools, so they may be unavailable in some browsers.",
+        ],
+      },
+      {
+        title: "Find tokens per chat",
+        body: [
+          "Open Settings → Usage and look for 'Today by chat'. Each conversation you've used today (the day is counted in UTC) gets a row with its title, the model or models it used, how many replies it produced, and its token total — handy for spotting which conversation is eating your day.",
+        ],
+      },
+      {
+        title: "Create a named API key",
+        body: [
+          "Open Settings → Developer and activate developer access if you haven't (your email must be verified). In the create-a-key section, give the key a name — it's required, and it's how the key is labelled in your dashboard, activity log and access points — then create it and copy it immediately: the full key is shown only once. The [API reference](/api-reference) documents the endpoints, limits and errors.",
+        ],
+      },
       {
         title: "Still stuck?",
         body: [
@@ -968,6 +1020,12 @@ Object.assign(articles, {
         ],
       },
       {
+        title: "Web search",
+        body: [
+          "When the web search toggle in the composer is on, the text of the message you send is sent to Bing as a search query, and the top results are passed to the model as context; the sources are shown under the reply. With the toggle off, no query is sent. Links you paste into a chat are fetched directly by Xyro AI's server — not through Bing — so the model can read the page. Bing is listed on the [subprocessors](/subprocessors) page.",
+        ],
+      },
+      {
         title: "The honest exception",
         body: [
           "Deletion inside Xyro AI covers Firebase and Cloudinary. Prompts and file content already sent to OpenRouter and a model provider to generate a reply are governed by that provider's retention policy and cannot be recalled by us — the strongest reason to keep sensitive information out of chats and uploads. See the [privacy notice](/privacy) and [subprocessors](/subprocessors).",
@@ -1027,6 +1085,69 @@ Object.assign(articles, {
         body: [
           "Separately from the public API, the web app talks to first-party endpoints under /api (chat, chats, uploads, settings, account, export, models, usage). Those require the signed session cookie plus a Firebase ID token for the same account, same-origin headers on mutations, and per-route rate limits — they are internal, may change without notice, and are not a contract.",
           "Two endpoints are intentionally public and safe to poll: /api/health, which returns configuration booleans only, and this website's public pages.",
+        ],
+      },
+    ],
+  },
+  "api-reference": {
+    title: "API reference",
+    intro:
+      "The complete reference for Xyro AI's public API: an OpenAI-compatible chat completions endpoint and a models list, authenticated with a key from Settings → Developer. The [developers page](/developers) is the quickstart; the [API terms](/api-terms) govern use.",
+    sections: [
+      {
+        title: "Authentication",
+        body: [
+          "Base URL: `https://truthai-six.vercel.app/api/v1`. Every request sends your key as a bearer token: `Authorization: Bearer xyro_sk_live_…`.",
+          "Create keys in [Settings → Developer](/settings/developer): developer access must be activated first (a short project questionnaire), your email must be verified, and you can hold up to 5 active keys. Each key requires a name — it labels the key in your dashboard, activity log and access points, so keys are easy to tell apart. A key is shown once, at creation; only its SHA-256 hash is stored server-side, so a lost key can't be recovered — revoke it and create a new one. Keep keys on your server, never in browser or mobile code.",
+        ],
+      },
+      {
+        title: "List models — GET /api/v1/models",
+        body: [
+          "Returns the free models your key can use right now, in the OpenAI list shape: an object with `object: \"list\"` and a `data` array of model objects (`id`, `object: \"model\"`, `owned_by`).",
+          "Each model also carries pricing fields taken from the OpenRouter catalogue — the price per million prompt and completion tokens. The models the API serves are free; the pricing fields describe the catalogue rate, and the free plan's daily token allowance (see Limits) is what actually meters your use.",
+        ],
+      },
+      {
+        title: "Create a chat completion — POST /api/v1/chat/completions",
+        body: [
+          "Sends a conversation to a free model and returns the reply in the OpenAI `chat.completion` shape. `Content-Type` must be `application/json` — anything else is rejected with 415.",
+          "- `model` (optional): a model id from GET /api/v1/models. Omit it to use Auto free routing (`openrouter/free`), which lets OpenRouter pick an available free model",
+          "- `messages` (required): an array of up to 50 messages, each `{ \"role\": \"system\" | \"user\" | \"assistant\", \"content\": \"…\" }` with a non-empty string content",
+          "- `max_tokens` (optional): an integer, up to 4096",
+          "- `temperature` (optional): a number from 0 to 2",
+          "- `stream`: streaming is not supported — send `false` or omit it; `stream: true` returns 400",
+          "Unknown top-level parameters are rejected by name with a 400 `unknown_parameter` error, so a typo fails loudly instead of being silently ignored.",
+        ],
+      },
+      {
+        title: "Example",
+        body: [
+          "`curl https://truthai-six.vercel.app/api/v1/chat/completions -H \"Authorization: Bearer xyro_sk_live_…\" -H \"Content-Type: application/json\" -d '{\"messages\": [{\"role\": \"user\", \"content\": \"Say hello in one short sentence.\"}], \"max_tokens\": 256}'`",
+          "The response is a standard chat completion object:",
+          "`{\"id\": \"chatcmpl-…\", \"object\": \"chat.completion\", \"created\": 1763000000, \"model\": \"openrouter/free\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"Hello — good to meet you.\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 12, \"completion_tokens\": 7, \"total_tokens\": 19}}`",
+        ],
+      },
+      {
+        title: "Errors",
+        body: [
+          "Errors use the OpenAI shape: `{ \"error\": { \"message\": \"…\", \"type\": \"…\", \"code\": \"…\" } }`. The codes you can meet:",
+          "- 401 `invalid_api_key` — the key is missing, malformed, revoked, or belongs to a deactivated account",
+          "- 400 `invalid_request` — the body fails validation (for example an empty message content, more than 50 messages, `max_tokens` over 4096, or `stream: true`)",
+          "- 400 `unknown_parameter` — an unsupported top-level field was sent; the message names it",
+          "- 415 — the `Content-Type` was not `application/json`",
+          "- 429 `rate_limit_exceeded` — more than 20 requests in a minute on one key",
+          "- 429 `daily_token_limit_exceeded` — the free plan's 100,000 tokens for the day (UTC) are used up",
+          "- 502 — the upstream model provider failed or returned something unusable; retrying, or letting Auto routing pick another free model, usually resolves it",
+        ],
+      },
+      {
+        title: "Limits",
+        body: [
+          "- 100,000 tokens per day per account (prompt + completion), resetting at midnight UTC",
+          "- 20 requests per minute per key",
+          "- Up to 5 active keys per account",
+          "Failed authentication attempts are throttled per IP, so repeated bad keys from one address start returning 429s. Usage, per-model totals and a per-request activity log (including the stored request input and response output) are visible in Settings → Developer — that logging is part of the deal and is disclosed in the [API terms](/api-terms).",
         ],
       },
     ],

@@ -6,6 +6,10 @@ import {
 } from "@/lib/server/auth-guard";
 import { authenticateSessionUser } from "@/lib/server/api-auth";
 import {
+  checkWindowLimit,
+  rateLimitedResponse,
+} from "@/lib/server/auth-rate-limit";
+import {
   createApiKey,
   getDeveloperProfile,
   listApiKeys,
@@ -33,6 +37,22 @@ export async function POST(request: NextRequest) {
   const auth = await authenticateSessionUser(request);
   if (!auth.ok) {
     return authErrorResponse(auth.status, auth.code, auth.message);
+  }
+
+  // Key management is a credential-minting surface: cap it per user
+  // (audit fix, 2026-11-16 — this route previously had no limiter).
+  const rateLimit = await checkWindowLimit(
+    `xyro:developer:keys:user:${auth.uid}`,
+    60 * 60 * 1000,
+    30,
+  );
+  if (rateLimit.state !== "allowed") {
+    const limited = rateLimitedResponse(rateLimit);
+    return authErrorResponse(limited.status, limited.code, limited.message, {
+      ...(limited.retryAfter
+        ? { "Retry-After": String(limited.retryAfter) }
+        : {}),
+    });
   }
 
   try {
