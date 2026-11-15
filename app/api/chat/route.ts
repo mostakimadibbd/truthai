@@ -33,6 +33,7 @@ import {
   OpenRouterAttemptsExhausted,
   fetchChatCompletionWithFallback,
 } from "@/lib/server/openrouter";
+import { recordUsageEvent } from "@/lib/server/analytics";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -136,7 +137,15 @@ function parseStoredMessage(
   return { id, role: value.role, content: value.content, attachmentIds, attachments };
 }
 
-function parseDelta(line: string): { text?: string; done?: boolean; error?: string } {
+type StreamDelta = {
+  text?: string;
+  done?: boolean;
+  error?: string;
+  usage?: { promptTokens: number; completionTokens: number };
+  model?: string;
+};
+
+function parseDelta(line: string): StreamDelta {
   if (!line.startsWith("data:")) return {};
   const payload = line.slice(5).trim();
   if (!payload) return {};
@@ -158,7 +167,28 @@ function parseDelta(line: string): { text?: string; done?: boolean; error?: stri
   ) {
     return { error: "The free model could not process this request. Try again or remove an attachment." };
   }
-  if (!("choices" in event) || !Array.isArray(event.choices)) return {};
+  // Usage + model ride along on the stream's chunks (the final
+  // chunk carries the totals when usage was requested); capture
+  // them independently of the text delta below.
+  const meta: StreamDelta = {};
+  if ("model" in event && typeof event.model === "string") {
+    meta.model = event.model;
+  }
+  if (
+    "usage" in event &&
+    typeof event.usage === "object" &&
+    event.usage !== null &&
+    "prompt_tokens" in event.usage &&
+    typeof event.usage.prompt_tokens === "number" &&
+    "completion_tokens" in event.usage &&
+    typeof event.usage.completion_tokens === "number"
+  ) {
+    meta.usage = {
+      promptTokens: event.usage.prompt_tokens,
+      completionTokens: event.usage.completion_tokens,
+    };
+  }
+  if (!("choices" in event) || !Array.isArray(event.choices)) return meta;
   const choice = event.choices[0];
   if (
     typeof choice !== "object" ||
@@ -168,9 +198,11 @@ function parseDelta(line: string): { text?: string; done?: boolean; error?: stri
     choice.delta === null ||
     !("content" in choice.delta)
   ) {
-    return {};
+    return meta;
   }
-  if (typeof choice.delta.content === "string") return { text: choice.delta.content };
+  if (typeof choice.delta.content === "string") {
+    return { ...meta, text: choice.delta.content };
+  }
   if (Array.isArray(choice.delta.content)) {
     const text = choice.delta.content.flatMap((part: unknown) =>
       typeof part === "object" &&
@@ -182,9 +214,9 @@ function parseDelta(line: string): { text?: string; done?: boolean; error?: stri
         ? [part.text]
         : [],
     ).join("");
-    return { text };
+    return { ...meta, text };
   }
-  return {};
+  return meta;
 }
 
 export async function POST(request: NextRequest) {
@@ -584,6 +616,13 @@ export async function POST(request: NextRequest) {
     let lastPublishedAt = 0;
     let streamDone = false;
     let streamSeq = 0;
+    // A holder object (not bare lets): the stream-line closure
+    // assigns these, and property reads are not narrowed away by
+    // the type checker the way closure-assigned variables are.
+    const streamMeta: {
+      usage: { promptTokens: number; completionTokens: number } | null;
+      model: string | null;
+    } = { usage: null, model: null };
     async function publishLive(force: boolean) {
       const currentTime = Date.now();
       if (!force && currentTime - lastPublishedAt < LIVE_UPDATE_INTERVAL_MS) return;
@@ -627,6 +666,7 @@ export async function POST(request: NextRequest) {
         referer: request.nextUrl.origin,
         title: "Xyro AI",
         connectTimeoutMs: 25_000,
+        includeUsage: true,
       });
       upstream = result.response;
     } catch (error) {
@@ -667,6 +707,8 @@ export async function POST(request: NextRequest) {
         throw new ChatRouteError(502, "MODEL_STREAM_FAILED", delta.error);
       }
       if (delta.done) streamDone = true;
+      if (delta.usage) streamMeta.usage = delta.usage;
+      if (delta.model) streamMeta.model = delta.model;
       if (delta.text) {
         responseText += delta.text;
         await publishLive(false);
@@ -749,6 +791,43 @@ export async function POST(request: NextRequest) {
       firestoreWrites: regenerate ? 6 : 5,
       firestoreReads: 2 + history.length + attachmentIds.length,
       redisCommands: 4,
+    });
+    // Meter the turn (admin analytics + the user's own chat usage):
+    // real streamed usage when the model reported it, otherwise a
+    // ~4 chars/token estimate flagged as estimated.
+    const meteredPromptTokens =
+      streamMeta.usage?.promptTokens ??
+      prepared.messages.reduce((sum, message) => {
+        const content: unknown = message.content;
+        if (typeof content === "string") {
+          return sum + Math.ceil(content.length / 4);
+        }
+        if (Array.isArray(content)) {
+          return (
+            sum +
+            content.reduce((inner, part) => {
+              if (typeof part === "object" && part !== null && "type" in part) {
+                if (part.type === "text" && "text" in part && typeof part.text === "string") {
+                  return inner + Math.ceil(part.text.length / 4);
+                }
+                if (part.type === "image_url") return inner + 1024;
+              }
+              return inner;
+            }, 0)
+          );
+        }
+        return sum;
+      }, 0);
+    const meteredCompletionTokens =
+      streamMeta.usage?.completionTokens ?? Math.ceil(responseText.length / 4);
+    await recordUsageEvent({
+      uid: auth.uid,
+      surface: "chat",
+      model: streamMeta.model ?? effectiveModel,
+      promptTokens: meteredPromptTokens,
+      completionTokens: meteredCompletionTokens,
+      chatId,
+      tokensEstimated: !streamMeta.usage,
     });
     return NextResponse.json(
       { success: true, responseId },

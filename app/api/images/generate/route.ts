@@ -10,6 +10,7 @@ import {
 import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
 import { limitDeniedResponse, limit as rateLimit } from "@/lib/server/limit";
 import { getFreeImageModels } from "@/lib/server/models";
+import { recordUsageEvent } from "@/lib/server/analytics";
 import { authenticateVerifiedUser } from "@/lib/server/request-auth";
 import { buildWatermarkPayload, embedWatermark } from "@/lib/server/watermark";
 
@@ -527,6 +528,14 @@ export async function POST(request: NextRequest) {
       firestoreWrites: 4,
       firestoreReads: 2,
       redisCommands: 4,
+    });
+    await recordUsageEvent({
+      uid: auth.uid,
+      surface: "image",
+      model: usedModel,
+      promptTokens: 0,
+      completionTokens: 0,
+      chatId,
     });
 
     return NextResponse.json(

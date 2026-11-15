@@ -3,6 +3,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import type { DeviceContext } from "@/lib/server/device";
 import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
 import { estimateCostUsd, getModelPricing } from "@/lib/server/models";
+import { recordUsageEvent } from "@/lib/server/analytics";
 
 /**
  * Developer platform data: activation profile, API keys, daily
@@ -769,6 +770,18 @@ export async function recordApiCall(
       { merge: true },
     );
     await batch.commit();
+
+    // Platform analytics (admin-only): the same call lands in the
+    // token ledger and the per-minute/daily rollups.
+    await recordUsageEvent({
+      uid,
+      surface: "api",
+      model: info.model,
+      promptTokens: info.promptTokens,
+      completionTokens: info.completionTokens,
+      status: info.status,
+      tokensEstimated: info.tokensEstimated,
+    });
   } catch (error) {
     console.error("Couldn’t record API usage.", error);
   }

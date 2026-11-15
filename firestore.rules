@@ -143,6 +143,36 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // The user's own chat metering (written by the server; the
+    // Usage tab reads it through the API).
+    match /users/{userId}/chatUsage/{date} {
+      allow read: if ownsUser(userId);
+      allow write: if false;
+    }
+
+    // Platform analytics: per-request token ledger and the
+    // per-minute / per-day rollups. Administrator-only data —
+    // no client may read or write any of it; the admin console
+    // reads it through the server (Admin SDK bypasses rules).
+    match /usageEvents/{eventId} {
+      allow read, write: if false;
+    }
+    match /analytics_minutes/{minute} {
+      allow read, write: if false;
+    }
+    match /analytics_days/{day} {
+      allow read, write: if false;
+    }
+    match /analytics_model_minutes/{document} {
+      allow read, write: if false;
+    }
+    match /analytics_model_days/{document} {
+      allow read, write: if false;
+    }
+    match /analytics_user_days/{document} {
+      allow read, write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

@@ -62,6 +62,8 @@ export type ChatCompletionArgs = {
   title: string;
   /** Per-attempt budget for response headers. Default 25s. */
   connectTimeoutMs?: number;
+  /** Ask OpenRouter to include token usage in the stream's final chunk. */
+  includeUsage?: boolean;
 };
 
 export async function fetchChatCompletionWithFallback(
@@ -108,6 +110,7 @@ export async function fetchChatCompletionWithFallback(
           ...(args.modalities !== undefined
             ? { modalities: args.modalities }
             : {}),
+          ...(args.includeUsage ? { usage: { include: true } } : {}),
         }),
         signal,
         cache: "no-store",

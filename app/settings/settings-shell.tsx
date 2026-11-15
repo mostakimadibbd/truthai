@@ -195,6 +195,11 @@ export default function SettingsShell({ tab }: { tab: SettingsTabId }) {
               {entry.label}
             </Link>
           ))}
+          {/* Visibility only — the console itself is gated
+              server-side on the admin allowlist. */}
+          {user?.email?.toLowerCase() === "mostakimbdyt@gmail.com" && (
+            <Link href="/admin">Admin console</Link>
+          )}
         </nav>
 
         <div className="settings-sections">
@@ -2480,11 +2485,21 @@ Content-Type: application/json
 
 /* ------------------------------- Usage ------------------------------- */
 
+type TokenDay = {
+  date: string;
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  costUsd: number;
+};
+
 type UsageData = {
   available: boolean;
   messages: { today: number; dayLimit: number; thisMinute: number; minuteLimit: number };
   uploads: { today: number; dayLimit: number; thisMinute: number; minuteLimit: number };
   resetAt: number | null;
+  tokens?: { chat: TokenDay[]; api: TokenDay[] };
 };
 
 function UsageTab({ user }: { user: User }) {
@@ -2550,7 +2565,73 @@ function UsageTab({ user }: { user: User }) {
           </p>
         </>
       )}
+      {usage?.tokens && (
+        <TokenUsageSection tokens={usage.tokens} />
+      )}
     </section>
+  );
+}
+
+function TokenUsageSection({ tokens }: { tokens: { chat: TokenDay[]; api: TokenDay[] } }) {
+  const days = tokens.chat.map((chatDay, index) => {
+    const apiDay = tokens.api[index];
+    return {
+      date: chatDay.date,
+      total: chatDay.totalTokens + (apiDay?.totalTokens ?? 0),
+    };
+  });
+  const maxDay = Math.max(1, ...days.map((day) => day.total));
+  const chatToday = tokens.chat[tokens.chat.length - 1];
+  const apiToday = tokens.api[tokens.api.length - 1];
+  const chatWeek = tokens.chat.reduce((sum, day) => sum + day.totalTokens, 0);
+  const apiWeek = tokens.api.reduce((sum, day) => sum + day.totalTokens, 0);
+  const costWeek =
+    tokens.chat.reduce((sum, day) => sum + day.costUsd, 0) +
+    tokens.api.reduce((sum, day) => sum + day.costUsd, 0);
+
+  return (
+    <>
+      <div className="settings-usage-row">
+        <span className="settings-label">Tokens — last 7 days</span>
+        <span className="settings-value">
+          {(chatWeek + apiWeek).toLocaleString("en-US")} total
+        </span>
+        <span className="settings-hint">
+          Chat {chatWeek.toLocaleString("en-US")} · API {apiWeek.toLocaleString("en-US")} ·
+          estimated cost {costWeek === 0 ? "$0.00" : `$${costWeek.toFixed(4)}`} (free models).
+        </span>
+      </div>
+      <div className="dev-chart" role="img" aria-label="Your total tokens per day for the last 7 days">
+        {days.map((day) => (
+          <div className="dev-chart-col" key={day.date} title={`${day.date}: ${day.total.toLocaleString("en-US")} tokens`}>
+            <span className="dev-chart-value">
+              {day.total > 0 ? new Intl.NumberFormat("en", { notation: "compact" }).format(day.total) : ""}
+            </span>
+            <div className="dev-chart-track">
+              <span style={{ height: `${Math.max(2, (day.total / maxDay) * 100)}%` }} />
+            </div>
+            <span className="dev-chart-date">
+              {new Date(`${day.date}T00:00:00Z`).toLocaleDateString("en-US", {
+                weekday: "short",
+                timeZone: "UTC",
+              })}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="settings-usage-row">
+        <span className="settings-label">Tokens today</span>
+        <span className="settings-value">
+          {((chatToday?.totalTokens ?? 0) + (apiToday?.totalTokens ?? 0)).toLocaleString("en-US")}
+        </span>
+        <span className="settings-hint">
+          Chat {(chatToday?.totalTokens ?? 0).toLocaleString("en-US")} (
+          {(chatToday?.promptTokens ?? 0).toLocaleString("en-US")} in /{" "}
+          {(chatToday?.completionTokens ?? 0).toLocaleString("en-US")} out) · API{" "}
+          {(apiToday?.totalTokens ?? 0).toLocaleString("en-US")}.
+        </span>
+      </div>
+    </>
   );
 }
 

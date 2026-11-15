@@ -507,3 +507,20 @@ saved to `users/{uid}/developerProfile/main`).
   now; generated-image/avatar uploads and signed download URLs
   need just cloud name + API key/secret. Previously a missing
   preset broke generated-image storage too.
+
+## Platform analytics (admin-only)
+
+Every metered AI call (chat turn, public API call, image creation)
+is recorded server-side into a token ledger (`usageEvents`, with
+millisecond timestamps) and per-minute / per-day rollups
+(`analytics_minutes`, `analytics_days`, per-model and per-user
+variants). The records carry token counts, the model used and the
+catalogue-price cost estimate — never message content — and they
+live outside the user's collections on purpose, so deleting a chat
+does not rewrite the platform's usage history. Firestore rules deny
+all client access to these collections; the only reader is
+`GET /api/admin/overview`, which requires a signed-in session whose
+account email is on the admin allowlist (`lib/server/admin.ts`,
+extensible via the `ADMIN_EMAILS` environment variable). Chat token
+counts come from the provider's streamed usage when reported and
+are otherwise ~4 chars/token estimates flagged `tokensEstimated`.

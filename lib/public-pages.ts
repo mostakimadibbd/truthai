@@ -935,6 +935,7 @@ Object.assign(articles, {
         title: "The honest exception",
         body: [
           "Deletion inside Xyro AI covers Firebase and Cloudinary. Prompts and file content already sent to OpenRouter and a model provider to generate a reply are governed by that provider's retention policy and cannot be recalled by us — the strongest reason to keep sensitive information out of chats and uploads. See the [privacy notice](/privacy) and [subprocessors](/subprocessors).",
+          "One more record outlives a deleted chat: the platform's operational metering. Every chat turn, API call and image creation is counted — tokens used, model, estimated cost — in aggregate analytics visible only to Xyro AI administrators. These records contain no message content; they exist so usage and cost can be accounted for honestly.",
         ],
       },
     ],
