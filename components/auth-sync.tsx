@@ -108,6 +108,7 @@ export default function AuthSync() {
   const router = useRouter();
   const pathname = usePathname();
   const [refreshNeeded, setRefreshNeeded] = useState(false);
+  const [refreshIsGoogle, setRefreshIsGoogle] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [refreshToken, setRefreshToken] = useState("");
   const userRef = useRef<User | null>(null);
@@ -183,6 +184,12 @@ export default function AuthSync() {
         if (AUTH_PAGE_PREFIXES.some((prefix) => pathnameRef.current.startsWith(prefix))) {
           return;
         }
+        // Google accounts renew without a Turnstile check (the
+        // server confirms the provider from the ID token); everyone
+        // else gets the interaction-only widget below.
+        setRefreshIsGoogle(
+          user.providerData.some((entry) => entry.providerId === "google.com"),
+        );
         setRefreshNeeded(true);
         return;
       }
@@ -306,7 +313,59 @@ export default function AuthSync() {
     };
   }, [endLocalSession, refreshNeeded, refreshToken]);
 
-  if (!refreshNeeded || isAuthPage) return null;
+  // Tokenless renewal for Google accounts: exchange the ID token
+  // for a fresh session cookie as soon as a refresh is needed — no
+  // widget, no UI.
+  useEffect(() => {
+    if (!refreshNeeded || !refreshIsGoogle) return;
+    let active = true;
+    void (async () => {
+      const user = userRef.current;
+      if (!user) {
+        if (active) setRefreshNeeded(false);
+        return;
+      }
+      try {
+        const idToken = await user.getIdToken();
+        const response = await fetch("/api/auth/session", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Requested-With": "xyro",
+          },
+          body: JSON.stringify({ idToken, action: "session_refresh" }),
+          cache: "no-store",
+        });
+        if (!active) return;
+        if (response.ok) {
+          setRefreshNeeded(false);
+          return;
+        }
+        const result: unknown = await response.json().catch(() => null);
+        const code =
+          typeof result === "object" &&
+          result !== null &&
+          "error" in result &&
+          typeof result.error === "object" &&
+          result.error !== null &&
+          "code" in result.error &&
+          typeof result.error.code === "string"
+            ? result.error.code
+            : "";
+        if (code === "SESSION_REVOKED" || code === "AUTH_INVALID") {
+          setRefreshNeeded(false);
+          await endLocalSession(true);
+        }
+      } catch {
+        // Network error: stay signed in; a later focus re-checks.
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [endLocalSession, refreshNeeded, refreshIsGoogle]);
+
+  if (!refreshNeeded || refreshIsGoogle || isAuthPage) return null;
 
   return (
     <div className="auth-sync-card" role="status">

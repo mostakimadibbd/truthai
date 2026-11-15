@@ -524,3 +524,18 @@ account email is on the admin allowlist (`lib/server/admin.ts`,
 extensible via the `ADMIN_EMAILS` environment variable). Chat token
 counts come from the provider's streamed usage when reported and
 are otherwise ~4 chars/token estimates flagged `tokensEstimated`.
+
+## Turnstile policy by sign-in method
+
+Turnstile gates the email/password paths (sign-in, account
+creation, password reset) and session renewal for password
+accounts. "Continue with Google" is exempt by design: the session
+route verifies the Firebase ID token first and reads the provider
+from the token itself (`firebase.sign_in_provider`); only when it
+is `google.com` is the Turnstile check skipped, because Google's
+OAuth is the human check for that path and a widget token cannot
+survive the full-page redirect mobile browsers use. The exemption
+cannot be claimed by a password token — the provider claim is
+inside the server-verified token — and the route's per-IP rate
+limit, token-freshness window, revocation check and terms gate
+apply to Google sign-ins unchanged.

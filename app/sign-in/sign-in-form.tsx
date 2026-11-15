@@ -129,10 +129,6 @@ export default function SignInForm({
   const [showReset, setShowReset] = useState(false);
   const [resetToken, setResetToken] = useState("");
   const [resetKey, setResetKey] = useState(0);
-  const [googleReturnUser, setGoogleReturnUser] = useState<User | null>(null);
-  const [googleTermsAccepted, setGoogleTermsAccepted] = useState(false);
-  const [googleToken, setGoogleToken] = useState("");
-  const [googleKey, setGoogleKey] = useState(0);
   const [resendCooldown, setResendCooldown] = useState(0);
   const configured = isFirebaseConfigured;
   const turnstileSiteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY?.trim() ?? "";
@@ -202,24 +198,52 @@ export default function SignInForm({
     void redirectResult
       .then(async (result) => {
         if (!result?.user || !active) return;
-        // The Turnstile token does not survive a redirect, so a Google
-        // redirect return must run the widget once more before the
-        // server will issue a session.
-        let flag: { termsAccepted?: boolean } | null = null;
+        // Google sign-ins need no Turnstile check (the server reads
+        // the provider from the verified ID token), so a redirect
+        // return finishes right here: exchange the token for a
+        // session and go straight into the app — no form, no second
+        // step. The only thing carried across the redirect is the
+        // sign-up terms flag.
+        let termsAccepted = false;
         try {
           const raw = sessionStorage.getItem(GOOGLE_REDIRECT_FLAG);
-          if (raw) flag = JSON.parse(raw) as { termsAccepted?: boolean };
+          if (raw) {
+            const flag = JSON.parse(raw) as { termsAccepted?: boolean };
+            termsAccepted = flag.termsAccepted === true;
+          }
           sessionStorage.removeItem(GOOGLE_REDIRECT_FLAG);
         } catch {
-          flag = null;
+          termsAccepted = false;
         }
-        // Whether or not the flag survived, a redirect return has no
-        // Turnstile token and no server session yet, so it always
-        // goes through the "one more step" widget before
-        // /api/auth/session is called.
-        setGoogleTermsAccepted(flag?.termsAccepted === true);
-        setGoogleReturnUser(result.user);
-        setNotice("One more step: verify you’re human to finish signing in.");
+        setBusy(true);
+        setNotice("Finishing sign-in…");
+        try {
+          const idToken = await result.user.getIdToken();
+          const deviceId = await getDeviceId();
+          const response = await authFetch("/api/auth/session", {
+            idToken,
+            action: formAction,
+            deviceId: deviceId || undefined,
+            ...(mode === "sign-up" ? { termsAccepted } : {}),
+          });
+          if (!response.ok) {
+            throw new Error(
+              await getApiErrorMessage(response, "We couldn’t finish signing in. Please try again."),
+            );
+          }
+          if (active) await completeSignIn(result.user);
+        } catch (sessionError) {
+          if (active) {
+            setNotice("");
+            setError(
+              sessionError instanceof Error
+                ? sessionError.message
+                : getAuthErrorMessage(sessionError),
+            );
+          }
+        } finally {
+          if (active) setBusy(false);
+        }
       })
       .catch((redirectError: unknown) => {
         if (active) setError(getAuthErrorMessage(redirectError));
@@ -247,41 +271,20 @@ export default function SignInForm({
     }
   }
 
-  async function establishGoogleSession(user: User, token: string, terms: boolean) {
+  async function establishGoogleSession(user: User, terms: boolean) {
     const idToken = await user.getIdToken();
     const deviceId = await getDeviceId();
     const response = await authFetch("/api/auth/session", {
       idToken,
-      turnstileToken: token,
       action: formAction,
       deviceId: deviceId || undefined,
       ...(mode === "sign-up" ? { termsAccepted: terms } : {}),
     });
     if (!response.ok) {
-      setError(await getApiErrorMessage(response, "The security check failed. Please try again."));
+      setError(await getApiErrorMessage(response, "We couldn’t finish signing in. Please try again."));
       return false;
     }
     return true;
-  }
-
-  async function handleGoogleReturnContinue() {
-    if (!googleReturnUser || !googleToken) return;
-    setBusy(true);
-    setError("");
-    setNotice("");
-    try {
-      const ok = await establishGoogleSession(googleReturnUser, googleToken, googleTermsAccepted);
-      if (!ok) return;
-      const user = googleReturnUser;
-      setGoogleReturnUser(null);
-      await completeSignIn(user);
-    } catch (sessionError) {
-      setError(getAuthErrorMessage(sessionError));
-    } finally {
-      setGoogleToken("");
-      setGoogleKey((key) => key + 1);
-      setBusy(false);
-    }
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -395,15 +398,10 @@ export default function SignInForm({
   }
 
   async function handleGoogleSignIn() {
-    if (!turnstileSiteKey) {
-      setError("Security verification isn’t configured. Please contact the site administrator.");
-      return;
-    }
-    if (!turnstileToken) {
-      setError("Complete the security check before continuing with Google.");
-      scrollToTurnstile();
-      return;
-    }
+    // No Turnstile for Google: the human check is Google's own
+    // sign-in, and the server confirms the provider from the
+    // verified ID token. The widget below the form guards only the
+    // email/password paths.
     if (mode === "sign-up" && !termsAccepted) {
       setError("Please agree to the Terms and Conditions and Privacy Policy to create an account.");
       return;
@@ -417,16 +415,16 @@ export default function SignInForm({
     provider.setCustomParameters({ prompt: "select_account" });
 
     if (shouldUseRedirect()) {
-      // The Turnstile token is lost during the redirect; the return
-      // step runs the widget again before calling /api/auth/session.
+      // Only the terms flag crosses the redirect; the return effect
+      // exchanges the Google result for a session immediately.
       try {
         sessionStorage.setItem(
           GOOGLE_REDIRECT_FLAG,
           JSON.stringify({ termsAccepted }),
         );
       } catch {
-        // Storage unavailable: the return step will ask for terms again
-        // via the generic flow.
+        // Storage unavailable: a brand-new sign-up may be asked for
+        // terms by the server; signing in is unaffected.
       }
       setBusy(true);
       try {
@@ -434,7 +432,6 @@ export default function SignInForm({
       } catch (redirectError) {
         setError(getAuthErrorMessage(redirectError));
         setBusy(false);
-        resetTurnstile();
       }
       return;
     }
@@ -446,14 +443,13 @@ export default function SignInForm({
       popupPromise = signInWithPopup(auth, provider, browserPopupRedirectResolver);
     } catch (popupError) {
       setError(getAuthErrorMessage(popupError));
-      resetTurnstile();
       return;
     }
 
     setBusy(true);
     try {
       const credential = await popupPromise;
-      const ok = await establishGoogleSession(credential.user, turnstileToken, termsAccepted);
+      const ok = await establishGoogleSession(credential.user, termsAccepted);
       if (!ok) return;
       await completeSignIn(credential.user);
     } catch (popupError) {
@@ -475,7 +471,6 @@ export default function SignInForm({
       }
       setError(getAuthErrorMessage(popupError));
     } finally {
-      resetTurnstile();
       setBusy(false);
     }
   }
@@ -637,41 +632,7 @@ export default function SignInForm({
           </ol>
         )}
 
-        {googleReturnUser && !verificationUser ? (
-          <div className="verification-card">
-            <span className="verification-icon" aria-hidden="true">✦</span>
-            <h3>One more step: verify you’re human</h3>
-            <p>
-              Google signed you in, but the security check doesn’t survive a
-              redirect. Complete it once more for <strong>{googleReturnUser.email}</strong> to
-              finish signing in.
-            </p>
-            <TurnstileBoundary onRetry={() => setGoogleKey((key) => key + 1)}>
-              <TurnstileWidget
-                key={googleKey}
-                action={formAction}
-                resetKey={googleKey}
-                onToken={setGoogleToken}
-              />
-            </TurnstileBoundary>
-            <button
-              className="button button-primary auth-submit"
-              type="button"
-              onClick={handleGoogleReturnContinue}
-              disabled={busy || !googleToken}
-            >
-              {busy ? "Please wait…" : "Verify and continue"}
-            </button>
-            <button
-              className="text-button"
-              type="button"
-              onClick={() => setGoogleReturnUser(null)}
-              disabled={busy}
-            >
-              Cancel
-            </button>
-          </div>
-        ) : verificationUser ? (
+        {verificationUser ? (
           <div className="verification-card">
             <span className="verification-icon" aria-hidden="true">✉</span>
             <h3>Verify your email</h3>

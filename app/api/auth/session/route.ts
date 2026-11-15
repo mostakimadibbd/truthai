@@ -27,8 +27,16 @@ type SessionAction = (typeof SESSION_ACTIONS)[number];
 
 // Session issuance for Google sign-in and silent renewals. The client
 // authenticates with Google through Firebase, then exchanges the fresh
-// ID token here together with a Turnstile token. Only then does the
-// server set the Turnstile-gated session cookie and upsert the profile.
+// ID token here for the session cookie + a server-side profile upsert.
+//
+// Turnstile policy: Google sign-ins do NOT need a Turnstile token —
+// the provider is read from the verified ID token itself
+// (firebase.sign_in_provider), and Google's own OAuth is the human
+// check for that path, so "Continue with Google" lands the user
+// straight in the app (including after a full-page redirect, where a
+// Turnstile token could not survive anyway). Any non-Google provider
+// reaching this route still needs a valid Turnstile token, and
+// email/password sign-in keeps its own fully-gated route.
 export async function POST(request: NextRequest) {
   const guarded = await guardAuthPost(request, MAX_BODY_BYTES);
   if (!guarded.ok) return guarded.response;
@@ -42,13 +50,12 @@ export async function POST(request: NextRequest) {
   if (
     idToken.length === 0 ||
     idToken.length > 10_000 ||
-    turnstileToken.length === 0 ||
     !SESSION_ACTIONS.includes(action as SessionAction)
   ) {
     return authErrorResponse(
       400,
       "INVALID_SESSION_REQUEST",
-      "The session request isn’t valid. Complete the security check and try again.",
+      "The session request isn’t valid. Please try again.",
     );
   }
 
@@ -77,20 +84,6 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  const verification = await verifyTurnstile(turnstileToken, {
-    expectedAction: action as SessionAction,
-    remoteIp,
-  });
-  if (verification.state === "misconfigured") {
-    return authErrorResponse(503, "TURNSTILE_NOT_CONFIGURED", "Account security verification isn’t configured.");
-  }
-  if (verification.state === "unavailable") {
-    return authErrorResponse(503, "TURNSTILE_UNAVAILABLE", "Security verification is temporarily unavailable.");
-  }
-  if (verification.state === "invalid") {
-    return authErrorResponse(403, "TURNSTILE_INVALID", verification.reason);
-  }
-
   let adminAuth: ReturnType<typeof getFirebaseAdminAuth>;
   try {
     adminAuth = getFirebaseAdminAuth();
@@ -104,6 +97,32 @@ export async function POST(request: NextRequest) {
     decoded = await adminAuth.verifyIdToken(idToken, true);
   } catch {
     return authErrorResponse(401, "AUTH_INVALID", "Your sign-in has expired. Sign in again.");
+  }
+
+  // The human check: skipped only when the verified token itself
+  // proves a Google sign-in. Everyone else needs Turnstile.
+  const signInProvider = decoded.firebase?.sign_in_provider ?? "";
+  if (signInProvider !== "google.com") {
+    if (turnstileToken.length === 0) {
+      return authErrorResponse(
+        400,
+        "INVALID_SESSION_REQUEST",
+        "The session request isn’t valid. Complete the security check and try again.",
+      );
+    }
+    const verification = await verifyTurnstile(turnstileToken, {
+      expectedAction: action as SessionAction,
+      remoteIp,
+    });
+    if (verification.state === "misconfigured") {
+      return authErrorResponse(503, "TURNSTILE_NOT_CONFIGURED", "Account security verification isn’t configured.");
+    }
+    if (verification.state === "unavailable") {
+      return authErrorResponse(503, "TURNSTILE_UNAVAILABLE", "Security verification is temporarily unavailable.");
+    }
+    if (verification.state === "invalid") {
+      return authErrorResponse(403, "TURNSTILE_INVALID", verification.reason);
+    }
   }
 
   // For interactive sign-ins the token must be fresh: auth_time within
