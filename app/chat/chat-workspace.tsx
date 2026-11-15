@@ -77,6 +77,7 @@ type Chat = {
   searchText?: string;
   lastMessagePreview?: string;
   persisted?: boolean;
+  pinned?: boolean;
 };
 
 type AuthState = "loading" | "not-configured" | "signed-out" | "unverified" | "ready";
@@ -359,6 +360,7 @@ export default function ChatWorkspace() {
   const [creatingImage, setCreatingImage] = useState(false);
   const [fileAccept, setFileAccept] = useState(ACCEPTED_FILE_TYPES);
   const [menuChatId, setMenuChatId] = useState<string | null>(null);
+  const [showScrollDown, setShowScrollDown] = useState(false);
   // Streaming target (Phase 5): non-null only while a response is in
   // flight. The Realtime Database listener exists only while this is
   // set, and it accepts chunks for exactly this responseId/messageId.
@@ -502,6 +504,7 @@ export default function ChatWorkspace() {
                 lastMessagePreview:
                   typeof data.lastMessagePreview === "string" ? data.lastMessagePreview : "",
                 persisted: true,
+                pinned: data.pinned === true,
               };
             });
             setChats((previous) => {
@@ -511,10 +514,15 @@ export default function ChatWorkspace() {
                 messages: previousById.get(chat.id)?.messages ?? [],
               }));
             });
+            // Land on a NEW chat, always (the ChatGPT/Gemini
+            // behaviour the owner asked for): a selection only
+            // survives while it still exists — a fresh load, a
+            // login, or a deleted active chat all fall back to the
+            // empty new-chat state, never to the latest old chat.
             setActiveChatId((current) =>
               current && loadedChats.some((chat) => chat.id === current)
                 ? current
-                : loadedChats[0]?.id ?? null,
+                : null,
             );
             setHistoryLoaded(true);
           },
@@ -1024,8 +1032,8 @@ export default function ChatWorkspace() {
     setChats((previous) => previous.filter((chat) => chat.id !== chatId));
     if (editingChatId === chatId) setEditingChatId(null);
     if (activeChatId === chatId) {
-      const nextChat = chats.find((chat) => chat.id !== chatId);
-      setActiveChatId(nextChat?.id ?? null);
+      // Deleting the open conversation returns to a new chat.
+      setActiveChatId(null);
     }
   }
 
@@ -1062,6 +1070,32 @@ export default function ChatWorkspace() {
     } catch (error) {
       updateChat(chatId, (chat) => ({ ...chat, title: previousTitle }));
       setNotice(error instanceof Error ? error.message : "The conversation name couldn’t be saved.");
+    }
+  }
+
+  async function togglePinChat(chat: Chat) {
+    if (!user) return;
+    const pinned = !chat.pinned;
+    updateChat(chat.id, (current) => ({ ...current, pinned }));
+    try {
+      await ensurePersistedChat(chat);
+      const idToken = await user.getIdToken();
+      const response = await fetch(`/api/chats/${encodeURIComponent(chat.id)}`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          "Content-Type": "application/json",
+          "X-Requested-With": "xyro",
+        },
+        body: JSON.stringify({ pinned }),
+      });
+      if (!response.ok) {
+        throw new Error(await getApiError(response, "The pin couldn’t be saved."));
+      }
+      updateChat(chat.id, (current) => ({ ...current, persisted: true, pinned }));
+    } catch (error) {
+      updateChat(chat.id, (current) => ({ ...current, pinned: !pinned }));
+      setNotice(error instanceof Error ? error.message : "The pin couldn’t be saved.");
     }
   }
 
@@ -1638,11 +1672,18 @@ export default function ChatWorkspace() {
     );
   }
 
-  const groupedChats = visibleChats.reduce<Record<string, Chat[]>>((groups, chat) => {
-    const group = getChatGroup(chat.updatedAt);
-    (groups[group] ??= []).push(chat);
-    return groups;
-  }, {});
+  const pinnedChats = visibleChats.filter((chat) => chat.pinned);
+  const groupedChats = visibleChats
+    .filter((chat) => !chat.pinned)
+    .reduce<Record<string, Chat[]>>((groups, chat) => {
+      const group = getChatGroup(chat.updatedAt);
+      (groups[group] ??= []).push(chat);
+      return groups;
+    }, {});
+  const chatGroups: [string, Chat[]][] = [
+    ...(pinnedChats.length ? [["Pinned", pinnedChats] as [string, Chat[]]] : []),
+    ...Object.entries(groupedChats),
+  ];
 
   return (
     <div className={`chat-app${sidebarCollapsed ? " chat-app-sidebar-collapsed" : ""}`}>
@@ -1713,7 +1754,7 @@ export default function ChatWorkspace() {
           </label>
         )}
         <nav className="chat-history" aria-label="Chat history">
-          {Object.entries(groupedChats).map(([group, groupChats]) => (
+          {chatGroups.map(([group, groupChats]) => (
             <section className="chat-history-group" key={group}>
               <h2>{group}</h2>
               {groupChats.map((chat) => (
@@ -1768,6 +1809,17 @@ export default function ChatWorkspace() {
                       </button>
                       {menuChatId === chat.id && (
                         <div className="chat-history-menu" role="menu">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenuChatId(null);
+                              void togglePinChat(chat);
+                            }}
+                          >
+                            <Icon name="spark" size={14} />
+                            {chat.pinned ? "Unpin" : "Pin"}
+                          </button>
                           <button
                             type="button"
                             role="menuitem"
@@ -1929,12 +1981,25 @@ export default function ChatWorkspace() {
         <div
           ref={conversationRef}
           className={`chat-conversation${activeMessages.length ? " chat-conversation-has-messages" : ""}`}
+          onScroll={(event) => {
+            const element = event.currentTarget;
+            setShowScrollDown(
+              element.scrollHeight - element.scrollTop - element.clientHeight > 240,
+            );
+          }}
         >
           {activeMessages.length === 0 ? (
             <section className="chat-empty-state">
               <span className="chat-empty-mark"><Icon name="spark" size={25} /></span>
               <p className="chat-empty-eyebrow">Your workspace, ready when you are</p>
-              <h1>What can I help you with{user?.displayName ? `, ${user.displayName.split(" ")[0]}` : " today"}?</h1>
+              <h1>
+                What can I help you with
+                {user?.displayName ? (
+                  <>, <span className="gradient-text">{user.displayName.split(" ")[0]}</span>?</>
+                ) : (
+                  " today?"
+                )}
+              </h1>
               <p className="chat-empty-description">
                 Ask a question, work through an idea, or get a first draft. Choose a prompt or start with your own.
               </p>
@@ -1964,7 +2029,10 @@ export default function ChatWorkspace() {
           ) : (
             <section className="chat-message-list" aria-label="Conversation">
               {activeMessages.map((message) => (
-                <article className={`chat-message chat-message-${message.role}`} key={message.id}>
+                <article
+                  className={`chat-message chat-message-${message.role}${message.status === "generating" ? " chat-message-streaming" : ""}`}
+                  key={message.id}
+                >
                   <div className="chat-message-body">
                     {message.attachments.length > 0 && (
                       <div className="chat-message-attachments">
@@ -2043,6 +2111,22 @@ export default function ChatWorkspace() {
         </div>
 
         <div className="chat-composer-area">
+          {showScrollDown && activeMessages.length > 0 && (
+            <button
+              type="button"
+              className="chat-scroll-bottom"
+              aria-label="Scroll to the latest message"
+              onClick={() => {
+                conversationRef.current?.scrollTo({
+                  top: conversationRef.current.scrollHeight,
+                  behavior: "smooth",
+                });
+                setShowScrollDown(false);
+              }}
+            >
+              ↓
+            </button>
+          )}
           {notice && <p className="chat-notice" role="status">{notice}</p>}
           {createMode && (
             <div className="chat-create-mode" role="status">
@@ -2122,8 +2206,8 @@ export default function ChatWorkspace() {
                   void submitDraft();
                 }
               }}
-              placeholder={createMode ? "Describe the image you want to create…" : "Message Xyro AI…"}
-              aria-label={createMode ? "Describe an image to create" : "Message Xyro AI"}
+              placeholder={createMode ? "Describe the image you want to create…" : "Ask anything…"}
+              aria-label={createMode ? "Describe an image to create" : "Ask anything"}
               maxLength={MESSAGE_MAX_LENGTH}
               rows={1}
               disabled={sending || creatingImage}

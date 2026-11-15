@@ -65,12 +65,20 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     return errorResponse(400, "INVALID_REQUEST", "The chat request isn’t valid JSON.");
   }
 
-  const title =
-    typeof body === "object" && body !== null && "title" in body && typeof body.title === "string"
-      ? body.title.trim()
-      : "";
-  if (!title || title.length > 60) {
+  // Two kinds of chat metadata edits share this route: a rename
+  // ({ title }) and pin/unpin ({ pinned }). At least one valid field
+  // is required. Pinning does NOT touch updatedAt — a pinned chat
+  // keeps its place in the date groups when unpinned later.
+  const record =
+    typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
+  const hasTitle = typeof record.title === "string";
+  const title = hasTitle ? (record.title as string).trim() : "";
+  if (hasTitle && (!title || title.length > 60)) {
     return errorResponse(400, "INVALID_TITLE", "Chat names must be 1 to 60 characters.");
+  }
+  const hasPinned = typeof record.pinned === "boolean";
+  if (!hasTitle && !hasPinned) {
+    return errorResponse(400, "INVALID_REQUEST", "Send a title or a pinned flag to update.");
   }
 
   try {
@@ -83,7 +91,15 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     if (!chatSnapshot.exists) {
       return errorResponse(404, "CHAT_NOT_FOUND", "This conversation no longer exists.");
     }
-    await chatRef.update({ title, updatedAt: FieldValue.serverTimestamp() });
+    const update: Record<string, unknown> = {};
+    if (hasTitle) {
+      update.title = title;
+      update.updatedAt = FieldValue.serverTimestamp();
+    }
+    if (hasPinned) {
+      update.pinned = record.pinned === true;
+    }
+    await chatRef.update(update);
     await recordBudget({ firestoreWrites: 1, firestoreReads: 1, redisCommands: 4 });
     return NextResponse.json({ success: true }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {

@@ -3117,3 +3117,108 @@ body:has(.chat-app) #main {
    uses the semantic danger pair instead of pale-on-pale. */
 .button-primary, .button-primary:hover:not(:disabled) { color: var(--on-accent); }
 .settings-badge-warn { color: var(--danger-text); border-color: var(--danger-line); background: var(--danger-bg); }
+
+/* ==========================================================================
+   Chat experience polish — Gemini/ChatGPT-class reading comfort:
+   richer markdown typography, calmer code and tables, a streaming
+   cursor, card-style suggestions, and a floating scroll-to-bottom.
+   ========================================================================== */
+
+.chat-markdown { font-size: 15.5px; line-height: 1.75; color: var(--text); overflow-wrap: break-word; }
+.chat-markdown > *:first-child { margin-top: 0; }
+.chat-markdown > *:last-child { margin-bottom: 0; }
+.chat-markdown p { margin: 0 0 14px; }
+.chat-markdown h1, .chat-markdown h2, .chat-markdown h3, .chat-markdown h4 {
+  margin: 22px 0 10px; line-height: 1.3; letter-spacing: -0.01em; color: var(--text-strong);
+}
+.chat-markdown h1 { font-size: 22px; }
+.chat-markdown h2 { font-size: 19px; }
+.chat-markdown h3 { font-size: 16.5px; }
+.chat-markdown h4 { font-size: 15px; }
+.chat-markdown ul, .chat-markdown ol { margin: 0 0 14px; padding-left: 24px; }
+.chat-markdown li { margin: 4px 0; }
+.chat-markdown li > ul, .chat-markdown li > ol { margin: 4px 0 6px; }
+.chat-markdown blockquote {
+  margin: 0 0 14px; padding: 2px 0 2px 14px;
+  border-left: 3px solid var(--accent-line); color: var(--muted-3);
+}
+.chat-markdown hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
+.chat-markdown a { color: var(--accent-1); text-decoration: underline; text-underline-offset: 3px; }
+.chat-markdown strong { color: var(--text-strong); }
+
+.chat-inline-code {
+  padding: 2px 6px; border-radius: 7px; font-size: 0.86em;
+  background: color-mix(in srgb, var(--surface-accent) 75%, transparent);
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.chat-code-block {
+  margin: 0 0 16px; border-radius: 14px; overflow: hidden;
+  border: 1px solid var(--line); background: var(--bg-input);
+}
+.chat-code-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 12px; font-size: 12px; color: var(--muted-3);
+  background: color-mix(in srgb, var(--surface-accent) 55%, transparent);
+  border-bottom: 1px solid var(--line);
+}
+.chat-code-header button { color: var(--muted-3); font-size: 12px; }
+.chat-code-header button:hover { color: var(--text); }
+.chat-code-block pre { margin: 0; padding: 14px 16px; overflow-x: auto; }
+.chat-code-block code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13.5px; line-height: 1.6;
+}
+
+.chat-table-wrap { overflow-x: auto; margin: 0 0 16px; border: 1px solid var(--line); border-radius: 12px; }
+.chat-table-wrap table { border-collapse: collapse; width: 100%; font-size: 14px; }
+.chat-table-wrap th, .chat-table-wrap td { padding: 8px 12px; text-align: left; border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent); }
+.chat-table-wrap th { background: color-mix(in srgb, var(--surface-accent) 55%, transparent); color: var(--text-strong); font-weight: 600; }
+.chat-table-wrap tr:last-child td { border-bottom: 0; }
+
+/* Streaming cursor: a soft pulsing dot trailing the live reply. */
+.chat-message-streaming .chat-markdown::after {
+  content: ""; display: inline-block; width: 9px; height: 9px; margin-left: 5px;
+  border-radius: 50%; background: var(--accent-mid); vertical-align: baseline;
+  animation: chat-stream-pulse 1s ease-in-out infinite;
+}
+@keyframes chat-stream-pulse { 0%, 100% { opacity: 0.25; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) {
+  .chat-message-streaming .chat-markdown::after { animation: none; }
+}
+
+/* Message actions: quiet until you look at them. */
+.chat-message-actions { opacity: 0.55; transition: opacity 150ms ease; }
+.chat-message:hover .chat-message-actions, .chat-message-actions:focus-within { opacity: 1; }
+@media (hover: none) { .chat-message-actions { opacity: 0.85; } }
+
+/* Empty state: calmer greeting, suggestion cards. */
+.chat-empty-state h1 { letter-spacing: -0.02em; }
+.chat-empty-mark {
+  box-shadow: var(--shadow-card);
+  background: linear-gradient(140deg, color-mix(in srgb, var(--accent-1) 26%, transparent), color-mix(in srgb, var(--accent-2) 20%, transparent));
+}
+.chat-suggestions { display: grid; grid-template-columns: 1fr; gap: 10px; width: min(680px, 100%); }
+@media (min-width: 640px) { .chat-suggestions { grid-template-columns: 1fr 1fr; } }
+.chat-suggestions button {
+  border-radius: 16px; padding: 14px 16px; text-align: left; line-height: 1.45;
+  box-shadow: var(--shadow-card); transition: transform 150ms ease, border-color 150ms ease;
+}
+.chat-suggestions button:hover { transform: translateY(-2px); }
+
+/* Composer: circular accent send, floating scroll-to-bottom. */
+.chat-send-button { border-radius: 50%; }
+.chat-composer-area { position: relative; }
+.chat-scroll-bottom {
+  position: absolute; top: -54px; right: 18px; z-index: 6;
+  width: 38px; height: 38px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 17px; line-height: 1;
+  color: var(--text); background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border: 1px solid var(--line); box-shadow: var(--shadow-pop);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  transition: transform 150ms ease, border-color 150ms ease;
+}
+.chat-scroll-bottom:hover { transform: translateY(2px); border-color: var(--accent-line); }
+
+/* User bubbles: softer, more modern shape. */
+.chat-message-bubble { border-radius: 20px 20px 6px 20px; line-height: 1.6; }
