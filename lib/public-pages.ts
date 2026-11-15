@@ -177,7 +177,7 @@ export const articles: Record<string, Article> = {
       },
       {
         q: "Does Xyro AI have a public API?",
-        a: "No. The endpoints under /api are the web app's own and require your signed-in session. The developers page explains what exists and the API terms that govern automated access.",
+        a: "Yes — an OpenAI-compatible API under /api/v1. Activate it in Settings → Developer to get a key; the free plan includes 100,000 tokens per day. The other endpoints under /api are the web app's own and require your signed-in session. The developers page has the details and the API terms govern use.",
       },
     ],
   },
@@ -414,6 +414,7 @@ Object.assign(articles, {
           "- Files: Cloudinary holds your uploads as private, authenticated assets",
           "- Sessions: Firestore holds a record per signed-in session (device label, approximate city/country from request headers, last active time); Upstash Redis holds rate-limit counters and session-revocation keys",
           "- Device security: at sign-in your browser computes a device fingerprint (from browser and screen characteristics) and sends only its SHA-256 hash; Firestore stores that hash with your sessions, a per-account device list (first/last seen, sign-in count) and a security activity feed, and your IP address is stored only as a keyed hash — never in plain text. This powers the device list and new-device badges in Settings → Security and helps detect abusive sign-ups; it is never used for advertising or cross-site tracking",
+          "- Developer API (only if you activate it): Firestore stores your activation answers (project name, use case, builder type, language, optional website), your API keys as SHA-256 hashes (the full key is shown once and never stored), daily token-usage totals, and a per-request log with the model used, token counts and a request fingerprint (browser/device label and keyed IP hash) — visible to you in Settings → Developer",
         ],
       },
       {
@@ -765,27 +766,27 @@ Object.assign(articles, {
       "Xyro AI does not offer a public API. These terms govern the product's own endpoints and any automated access to the service.",
     sections: [
       {
-        title: "No public API",
+        title: "The public API",
         body: [
-          "There are no API keys, no developer accounts, and no supported way for third-party software to call Xyro AI. The endpoints under /api exist solely to serve the Xyro AI web app. The [developers page](/developers) describes the situation in full.",
+          "Xyro AI offers a public API under /api/v1 for account holders who activate developer access in [Settings → Developer](/settings/developer). API keys are the only supported credential for programmatic access. The free plan includes 100,000 tokens per day; keys can be revoked at any time and revoked keys fail immediately. The remaining endpoints under /api exist solely to serve the Xyro AI web app and are not part of the public API. The [developers page](/developers) documents the endpoints.",
         ],
       },
       {
         title: "Authentication is personal",
         body: [
-          "Every product endpoint requires a signed server session cookie issued to a signed-in person after a Turnstile human check, plus a Firebase ID token for the same account. Sharing, selling, pooling or scripting sessions — including your own — is prohibited. Sessions are revocable at any time, and revoked sessions fail immediately.",
+          "Every web-app endpoint requires a signed server session cookie issued to a signed-in person after a Turnstile human check, plus a Firebase ID token for the same account. Sharing, selling, pooling or scripting sessions — including your own — is prohibited. API keys are likewise personal to the account that created them: do not share, sell or pool keys, and keep them secret — anyone holding a key can spend that account's daily allowance.",
         ],
       },
       {
         title: "Automated access",
         body: [
-          "Bots, scrapers and automated clients may not create accounts, sign in, send chat messages, upload files or otherwise drive the service, except for ordinary search-engine indexing of public pages as allowed by robots.txt. Rate limits are enforced per account and per IP, and mutation endpoints require same-origin browser headers by design.",
+          "Bots, scrapers and automated clients may not create accounts, sign in, send chat messages, upload files or otherwise drive the web app, except for ordinary search-engine indexing of public pages as allowed by robots.txt. Automated calls to the public API under /api/v1 with your own API key are the supported exception. Rate limits are enforced per account, per key and per IP, and web-app mutation endpoints require same-origin browser headers by design.",
         ],
       },
       {
         title: "Enforcement",
         body: [
-          "Automated or abusive access may be rate-limited, blocked or have its accounts terminated under the [terms](/terms) and [acceptable use policy](/acceptable-use). If you have a legitimate integration need, describe it via the [contact page](/contact) — if a public API ever launches, it will be announced on the [developers page](/developers) with its own terms.",
+          "Automated or abusive access may be rate-limited, blocked or have its accounts terminated under the [terms](/terms) and [acceptable use policy](/acceptable-use). API keys may be revoked and developer access withdrawn for abuse, including attempts to evade the daily token limit by creating multiple accounts.",
         ],
       },
     ],
@@ -955,25 +956,28 @@ Object.assign(articles, {
   developers: {
     title: "Developers",
     intro:
-      "The honest headline: Xyro AI has no public API. This page explains what does exist, so nobody builds on an assumption.",
+      "Xyro AI has a public, OpenAI-compatible API. Activate it in Settings → Developer, get a key, and call the same free models the app uses — 100,000 tokens a day on the free plan.",
     sections: [
       {
-        title: "No public API (yet)",
+        title: "Getting started",
         body: [
-          "There are no API keys, no developer console and no supported third-party integrations. If that changes, it will be announced here and in the [changelog](/changelog), with documentation and dedicated [API terms](/api-terms).",
+          "Sign in, open [Settings → Developer](/settings/developer) and choose **Activate developer access**. After a few questions about your project you get an API key (shown once — store it safely). The Developer tab is your console: usage dashboard, key management, per-request activity logs and copy-paste quickstarts for cURL, JavaScript and Python.",
+          "Base URL: `https://truthai-six.vercel.app/api/v1`. Send the key as `Authorization: Bearer xyro_sk_live_…`. Keep keys on your server — never ship them in browser or mobile code.",
+        ],
+      },
+      {
+        title: "Endpoints",
+        body: [
+          "`POST /api/v1/chat/completions` — OpenAI-shaped: send `model` (optional; defaults to Auto free) and `messages`, get back a `chat.completion` with `choices` and `usage`. Up to 50 messages and `max_tokens` up to 4096 per call; streaming is not supported yet.",
+          "`GET /api/v1/models` — the free models your key can use right now, in the OpenAI list shape.",
+          "Errors use the OpenAI error shape (`error.message`, `error.type`, `error.code`). The free plan allows 100,000 tokens per day (prompt + completion, resetting at midnight UTC) and 20 requests per minute per key; hitting the daily cap returns `daily_token_limit_exceeded`. The governing terms are the [API terms](/api-terms) and [acceptable use policy](/acceptable-use).",
         ],
       },
       {
         title: "How the product's own API behaves",
         body: [
-          "The web app talks to first-party endpoints under /api (chat, chats, uploads, settings, account, export, models, usage). At a high level: every call requires the signed session cookie plus a Firebase ID token for the same account; mutations additionally require same-origin headers; each route is rate-limited; chat is capped per minute and per day; and a daily budget guard can queue or pause chat near the free-tier ceiling. These endpoints are internal and may change without notice — they are not a contract, and automated use is prohibited by the [API terms](/api-terms).",
+          "Separately from the public API, the web app talks to first-party endpoints under /api (chat, chats, uploads, settings, account, export, models, usage). Those require the signed session cookie plus a Firebase ID token for the same account, same-origin headers on mutations, and per-route rate limits — they are internal, may change without notice, and are not a contract.",
           "Two endpoints are intentionally public and safe to poll: /api/health, which returns configuration booleans only, and this website's public pages.",
-        ],
-      },
-      {
-        title: "Building on the models instead",
-        body: [
-          "The models Xyro AI uses come from OpenRouter's public platform. If you want programmatic access to the same free models for your own project, OpenRouter offers its own API and terms — that's the supported route, entirely separate from Xyro AI accounts and data.",
         ],
       },
     ],

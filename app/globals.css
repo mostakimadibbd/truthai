@@ -2602,6 +2602,18 @@ body:has(.chat-app) #main {
 .settings-switch-row { display: flex; justify-content: space-between; align-items: center; gap: 18px; cursor: pointer; }
 .settings-switch-row .settings-hint { display: block; margin-top: 3px; }
 .settings-switch-row input[type="checkbox"] { width: 22px; height: 22px; flex: 0 0 auto; accent-color: var(--accent-mid); cursor: pointer; }
+.dev-usage-total { font-size: 26px; font-weight: 650; margin: 6px 0 8px; }
+.dev-usage-total .settings-hint { font-size: 14px; font-weight: 400; }
+.dev-progress { height: 8px; border-radius: 999px; background: var(--surface-soft); border: 1px solid var(--line-strong); overflow: hidden; margin: 4px 0 8px; }
+.dev-progress > span { display: block; height: 100%; background: var(--accent-mid); border-radius: 999px; }
+.dev-day-bar { display: block; width: 110px; height: 6px; border-radius: 999px; background: var(--surface-soft); overflow: hidden; flex: 0 0 auto; }
+.dev-day-bar > span { display: block; height: 100%; background: var(--accent-mid); }
+.dev-form { display: grid; gap: 7px; margin: 12px 0 4px; text-align: left; }
+.dev-form input[type="text"], .dev-form select { width: 100%; }
+.dev-terms { display: flex; gap: 9px; align-items: flex-start; font-size: 14px; margin-top: 6px; cursor: pointer; }
+.dev-terms input[type="checkbox"] { width: 18px; height: 18px; margin-top: 2px; flex: 0 0 auto; accent-color: var(--accent-mid); }
+.dev-copy-link { background: none; border: none; padding: 0; cursor: pointer; color: inherit; font: inherit; }
+.dev-copy-link:hover code { text-decoration: underline; }
 .settings-badge { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line-strong); }
 .settings-badge-ok { color: var(--mint); border-color: var(--success-line); background: var(--v-14231a); }
 .settings-badge-warn { color: var(--accent-1); border-color: var(--v-5a3a4e); background: var(--v-271722); }

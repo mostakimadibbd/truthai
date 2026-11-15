@@ -415,3 +415,38 @@ browser updates or privacy settings change (which simply looks
 like a new device). It complements — never replaces — Turnstile,
 per-IP/per-account rate limits and server-side sessions, and it is
 never the sole basis for denying access.
+
+## Developer API — keys, metering and request fingerprints
+
+Settings → Developer activates API access (verified accounts only)
+after an onboarding popup (project name, use case, builder type,
+primary language, optional website, API-terms acceptance — all
+saved to `users/{uid}/developerProfile/main`).
+
+- **Keys** look like `xyro_sk_live_…` (32 random characters). Only
+  the SHA-256 hash is stored: per-user records in
+  `users/{uid}/apiKeys/{keyId}` and a server-only lookup in the
+  top-level `apiKeys/{keyHash}` collection (clients have no access
+  at all). The full key is shown exactly once at creation; at most
+  5 active keys per account; revocation deletes the lookup in the
+  same batch, so a revoked key dies immediately.
+- **Endpoints**: `POST /api/v1/chat/completions` and
+  `GET /api/v1/models`, OpenAI-shaped, CORS-open (the key is the
+  credential), backed by the same free OpenRouter models as the
+  app. No session cookie or browser origin guard applies — these
+  routes authenticate purely by key, and separately require the
+  owning account to be enabled and email-verified.
+- **Limits**: free plan 100,000 tokens/day per account, enforced
+  from the Firestore daily rollup (`users/{uid}/apiUsage/{date}`,
+  resets midnight UTC) before each call; 20 requests/minute per
+  key via the Redis limiter; ≤50 messages and max_tokens ≤4096 per
+  request.
+- **Request fingerprints**: every authenticated call appends an
+  event to `users/{uid}/apiEvents` with the key prefix, model,
+  token counts, status, parsed user agent / device label and the
+  client IP as an HMAC hash (never raw), plus coarse Vercel geo —
+  the same treatment as login telemetry, so key misuse from an
+  unexpected place is visible in Settings → Developer.
+- Token counts come from the upstream usage block when present;
+  otherwise they are estimated at ~4 characters/token and the
+  event is flagged `tokensEstimated`.

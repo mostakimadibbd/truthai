@@ -7,6 +7,7 @@ export const SETTINGS_TABS = [
   { id: "personalization", label: "Personalization" },
   { id: "data", label: "Data controls" },
   { id: "security", label: "Security" },
+  { id: "developer", label: "Developer" },
   { id: "usage", label: "Usage" },
   { id: "account", label: "Account" },
 ] as const;

@@ -249,6 +249,7 @@ export default function SettingsShell({ tab }: { tab: SettingsTabId }) {
                   onSignOutAll={() => setSignOutVariant("all")}
                 />
               )}
+              {tab === "developer" && <DeveloperTab user={user} onToast={showToast} />}
               {tab === "usage" && <UsageTab user={user} />}
               {tab === "account" && (
                 <AccountTab
@@ -1321,6 +1322,693 @@ function SecurityTab({
         onCancel={() => setRevokeOthersOpen(false)}
         onConfirm={() => void revokeOthers()}
       />
+    </section>
+  );
+}
+
+/* ----------------------------- Developer ----------------------------- */
+
+type DeveloperProfileInfo = {
+  projectName: string;
+  useCase: string;
+  builderType: string;
+  language: string;
+  website: string | null;
+  plan: string;
+  createdAt: number;
+};
+
+type ApiKeyInfo = {
+  keyId: string;
+  name: string;
+  displayPrefix: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+  revoked: boolean;
+};
+
+type DailyUsageInfo = {
+  date: string;
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};
+
+type DeveloperEventInfo = {
+  id: string;
+  createdAt: number;
+  keyPrefix: string | null;
+  endpoint: string;
+  model: string | null;
+  status: string;
+  httpStatus: number;
+  totalTokens: number;
+  deviceLabel: string | null;
+};
+
+type DeveloperOverview = {
+  activated: boolean;
+  emailVerified: boolean;
+  profile?: DeveloperProfileInfo;
+  keys?: ApiKeyInfo[];
+  limit?: number;
+  usage?: { today: DailyUsageInfo; last7Days: DailyUsageInfo[] };
+  recentEvents?: DeveloperEventInfo[];
+};
+
+const API_USE_CASE_OPTIONS: [string, string][] = [
+  ["chatbot", "Chatbot"],
+  ["ai-assistant", "AI assistant / copilot"],
+  ["website-integration", "Website integration"],
+  ["mobile-app", "Mobile app"],
+  ["automation", "Automation / workflow"],
+  ["content-generation", "Content generation"],
+  ["customer-support", "Customer support"],
+  ["research", "Research / learning"],
+  ["other", "Something else"],
+];
+
+const API_BUILDER_OPTIONS: [string, string][] = [
+  ["individual", "Individual developer"],
+  ["hobbyist", "Hobbyist"],
+  ["student", "Student"],
+  ["startup", "Startup"],
+  ["company", "Company / team"],
+  ["agency", "Agency / client work"],
+];
+
+const API_LANGUAGE_OPTIONS: [string, string][] = [
+  ["javascript", "JavaScript / TypeScript"],
+  ["python", "Python"],
+  ["curl", "cURL / HTTP"],
+  ["other", "Another language"],
+];
+
+function optionLabel(options: [string, string][], value: string): string {
+  return options.find(([id]) => id === value)?.[1] ?? value;
+}
+
+function DeveloperTab({
+  user,
+  onToast,
+}: {
+  user: User;
+  onToast: (message: string) => void;
+}) {
+  const [overview, setOverview] = useState<DeveloperOverview | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const [baseUrl, setBaseUrl] = useState("https://truthai-six.vercel.app/api/v1");
+
+  // Activation popup state.
+  const [activateOpen, setActivateOpen] = useState(false);
+  const [projectName, setProjectName] = useState("");
+  const [useCase, setUseCase] = useState("chatbot");
+  const [builderType, setBuilderType] = useState("individual");
+  const [language, setLanguage] = useState("javascript");
+  const [website, setWebsite] = useState("");
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [activating, setActivating] = useState(false);
+  const [activateError, setActivateError] = useState("");
+
+  // Shown exactly once: after activation and after key creation.
+  const [freshKey, setFreshKey] = useState<string | null>(null);
+
+  // Key management state.
+  const [newKeyName, setNewKeyName] = useState("");
+  const [keyBusy, setKeyBusy] = useState(false);
+  const [revokeKeyTarget, setRevokeKeyTarget] = useState<ApiKeyInfo | null>(null);
+
+  // Quickstart language tab (defaults to the activation answer).
+  const [sampleTab, setSampleTab] = useState("javascript");
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setBaseUrl(`${window.location.origin}/api/v1`);
+    }
+  }, []);
+
+  const loadOverview = useCallback(async () => {
+    try {
+      const response = await settingsApi(user, "/api/developer/overview", { method: "GET" });
+      if (!response.ok) {
+        throw new Error(await getApiErrorMessage(response, "Developer details couldn’t be loaded."));
+      }
+      const data = (await response.json()) as DeveloperOverview;
+      setOverview(data);
+      if (data.profile?.language) setSampleTab(data.profile.language);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "Developer details couldn’t be loaded.");
+    }
+  }, [user]);
+
+  useEffect(() => {
+    void loadOverview();
+  }, [loadOverview]);
+
+  async function copyText(text: string, message: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      onToast(message);
+    } catch {
+      onToast("Copy failed — select the text and copy it manually.");
+    }
+  }
+
+  async function activate() {
+    setActivating(true);
+    setActivateError("");
+    try {
+      const response = await settingsApi(user, "/api/developer/activate", {
+        method: "POST",
+        body: {
+          projectName: projectName.trim(),
+          useCase,
+          builderType,
+          language,
+          website: website.trim(),
+          termsAccepted,
+        },
+      });
+      const data = (await response.json().catch(() => null)) as
+        | { apiKey?: string; error?: { message?: string } }
+        | null;
+      if (!response.ok || !data?.apiKey) {
+        throw new Error(data?.error?.message ?? "Activation failed. Please try again.");
+      }
+      setFreshKey(data.apiKey);
+      await loadOverview();
+    } catch (error) {
+      setActivateError(error instanceof Error ? error.message : "Activation failed. Please try again.");
+    } finally {
+      setActivating(false);
+    }
+  }
+
+  async function createKey() {
+    setKeyBusy(true);
+    try {
+      const response = await settingsApi(user, "/api/developer/keys", {
+        method: "POST",
+        body: { action: "create", name: newKeyName.trim() },
+      });
+      const data = (await response.json().catch(() => null)) as
+        | { apiKey?: string; error?: { message?: string } }
+        | null;
+      if (!response.ok || !data?.apiKey) {
+        throw new Error(data?.error?.message ?? "The key couldn’t be created.");
+      }
+      setFreshKey(data.apiKey);
+      setNewKeyName("");
+      await loadOverview();
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : "The key couldn’t be created.");
+    } finally {
+      setKeyBusy(false);
+    }
+  }
+
+  async function revokeKey(target: ApiKeyInfo) {
+    setKeyBusy(true);
+    try {
+      const response = await settingsApi(user, "/api/developer/keys", {
+        method: "POST",
+        body: { action: "revoke", keyId: target.keyId },
+      });
+      if (!response.ok) {
+        throw new Error(await getApiErrorMessage(response, "The key couldn’t be revoked."));
+      }
+      setRevokeKeyTarget(null);
+      await loadOverview();
+      onToast("API key revoked.");
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : "The key couldn’t be revoked.");
+    } finally {
+      setKeyBusy(false);
+    }
+  }
+
+  const samples: Record<string, string> = {
+    curl: `curl ${baseUrl}/chat/completions \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "openrouter/free",
+    "messages": [
+      {"role": "user", "content": "Hello from my app!"}
+    ]
+  }'`,
+    javascript: `const response = await fetch("${baseUrl}/chat/completions", {
+  method: "POST",
+  headers: {
+    "Authorization": "Bearer YOUR_API_KEY",
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    model: "openrouter/free",
+    messages: [{ role: "user", content: "Hello from my app!" }],
+  }),
+});
+
+const data = await response.json();
+console.log(data.choices[0].message.content);`,
+    python: `import requests
+
+response = requests.post(
+    "${baseUrl}/chat/completions",
+    headers={"Authorization": "Bearer YOUR_API_KEY"},
+    json={
+        "model": "openrouter/free",
+        "messages": [{"role": "user", "content": "Hello from my app!"}],
+    },
+)
+data = response.json()
+print(data["choices"][0]["message"]["content"])`,
+    other: `POST ${baseUrl}/chat/completions
+Authorization: Bearer YOUR_API_KEY
+Content-Type: application/json
+
+{
+  "model": "openrouter/free",
+  "messages": [{ "role": "user", "content": "Hello from my app!" }]
+}`,
+  };
+
+  const limit = overview?.limit ?? 100_000;
+  const today = overview?.usage?.today;
+  const usedPercent = today ? Math.min(100, (today.totalTokens / limit) * 100) : 0;
+  const activeKeys = (overview?.keys ?? []).filter((key) => !key.revoked);
+
+  return (
+    <section className="settings-panel" aria-labelledby="settings-developer-heading">
+      <h2 id="settings-developer-heading">Developer</h2>
+      <p>
+        Build on Xyro AI with an OpenAI-compatible API, powered by the same free models
+        as the app. Keys, usage and request logs are stored on your account and metered
+        against the free plan.
+      </p>
+
+      {overview === null && !loadError && (
+        <p className="settings-hint" role="status">Loading developer details…</p>
+      )}
+      {loadError && <div className="auth-alert" role="alert">{loadError}</div>}
+
+      {overview !== null && !overview.activated && (
+        <div className="settings-field">
+          <span className="settings-label">API access</span>
+          <p className="settings-hint">
+            The free plan includes <strong>100,000 tokens per day</strong>, access to every
+            free model, and a usage dashboard with per-request logs. Answer a few questions
+            to activate — your first API key is issued right away.
+          </p>
+          {overview.emailVerified ? (
+            <div className="settings-inline">
+              <button type="button" className="button button-primary" onClick={() => setActivateOpen(true)}>
+                Activate developer access
+              </button>
+            </div>
+          ) : (
+            <p className="settings-hint">
+              Verify your email address first — developer access needs a verified account,
+              the same rule as sending messages. Use the verification banner in your
+              workspace, then come back here.
+            </p>
+          )}
+        </div>
+      )}
+
+      {overview !== null && overview.activated && overview.profile && (
+        <>
+          <div className="settings-field">
+            <span className="settings-label">
+              Plan <span className="settings-badge settings-badge-ok">Free plan</span>
+            </span>
+            <p className="settings-hint">
+              {overview.profile.projectName} · {optionLabel(API_USE_CASE_OPTIONS, overview.profile.useCase)}
+              {" · "}Active since {formatDate(overview.profile.createdAt)}
+            </p>
+            {today && (
+              <>
+                <p className="dev-usage-total">
+                  {today.totalTokens.toLocaleString("en-US")}
+                  <span className="settings-hint"> of {limit.toLocaleString("en-US")} tokens used today</span>
+                </p>
+                <div
+                  className="dev-progress"
+                  role="progressbar"
+                  aria-valuenow={Math.round(usedPercent)}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-label="Daily token usage"
+                >
+                  <span style={{ width: `${usedPercent}%` }} />
+                </div>
+                <p className="settings-hint">
+                  {today.requests.toLocaleString("en-US")} requests ·{" "}
+                  {today.promptTokens.toLocaleString("en-US")} prompt tokens ·{" "}
+                  {today.completionTokens.toLocaleString("en-US")} completion tokens ·
+                  resets at midnight UTC
+                </p>
+              </>
+            )}
+            {overview.usage && overview.usage.last7Days.length > 0 && (
+              <ul className="settings-session-list">
+                {[...overview.usage.last7Days].reverse().map((day) => (
+                  <li key={day.date}>
+                    <span className="settings-session-device">{day.date}</span>
+                    <span className="settings-file-meta">
+                      {day.totalTokens.toLocaleString("en-US")} tokens ·{" "}
+                      {day.requests.toLocaleString("en-US")} requests
+                    </span>
+                    <span className="dev-day-bar" aria-hidden="true">
+                      <span style={{ width: `${Math.min(100, (day.totalTokens / limit) * 100)}%` }} />
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="settings-field">
+            <span className="settings-label">API keys</span>
+            <p className="settings-hint">
+              Keys are shown in full only once, when they are created. Only a hash of each
+              key is stored, so a lost key can’t be recovered — revoke it and create a new one.
+            </p>
+            <ul className="settings-session-list">
+              {(overview.keys ?? []).map((key) => (
+                <li key={key.keyId}>
+                  <span className="settings-session-device">
+                    {key.name}
+                    {key.revoked ? (
+                      <span className="settings-badge">Revoked</span>
+                    ) : (
+                      <span className="settings-badge settings-badge-ok">Active</span>
+                    )}
+                  </span>
+                  <span className="settings-file-meta">
+                    <code>{key.displayPrefix}</code>
+                    {" · "}Created {formatDate(key.createdAt)}
+                    {" · "}{key.lastUsedAt ? `Last used ${formatDate(key.lastUsedAt)}` : "Never used"}
+                  </span>
+                  {!key.revoked && (
+                    <button
+                      type="button"
+                      className="button button-outline"
+                      onClick={() => setRevokeKeyTarget(key)}
+                    >
+                      Revoke
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <div className="settings-inline">
+              <input
+                type="text"
+                value={newKeyName}
+                onChange={(event) => setNewKeyName(event.target.value)}
+                placeholder="Key name (e.g. Production)"
+                maxLength={60}
+                aria-label="New key name"
+              />
+              <button
+                type="button"
+                className="button button-primary"
+                disabled={keyBusy || activeKeys.length >= 5}
+                onClick={() => void createKey()}
+              >
+                Create new key
+              </button>
+            </div>
+            {activeKeys.length >= 5 && (
+              <p className="settings-hint">You have the maximum of 5 active keys. Revoke one to create another.</p>
+            )}
+          </div>
+
+          <div className="settings-field">
+            <span className="settings-label">Quickstart</span>
+            <p className="settings-hint">
+              The API is OpenAI-compatible: send your key as a Bearer token and post
+              messages. Replace <code>YOUR_API_KEY</code> with a key from above, and keep
+              keys on your server — never ship them in browser or mobile code.
+            </p>
+            <p className="settings-hint">
+              Base URL{" "}
+              <button type="button" className="dev-copy-link" onClick={() => void copyText(baseUrl, "Base URL copied.")}>
+                <code>{baseUrl}</code> ⧉
+              </button>
+            </p>
+            <div className="settings-inline" role="tablist" aria-label="Code sample language">
+              {API_LANGUAGE_OPTIONS.map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  aria-selected={sampleTab === id}
+                  className={`button ${sampleTab === id ? "button-primary" : "button-outline"}`}
+                  onClick={() => setSampleTab(id)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="chat-code-block">
+              <div className="chat-code-header">
+                <span>{optionLabel(API_LANGUAGE_OPTIONS, sampleTab)}</span>
+                <button
+                  type="button"
+                  onClick={() => void copyText(samples[sampleTab] ?? "", "Code sample copied.")}
+                >
+                  Copy
+                </button>
+              </div>
+              <pre><code>{samples[sampleTab]}</code></pre>
+            </div>
+          </div>
+
+          <div className="settings-field">
+            <span className="settings-label">Endpoints and limits</span>
+            <ul className="settings-session-list">
+              <li>
+                <span className="settings-session-device"><code>POST /chat/completions</code></span>
+                <span className="settings-file-meta">
+                  Body: model (optional, defaults to Auto free), messages (1–50 of role
+                  system/user/assistant), max_tokens (1–4096). Returns an OpenAI-shaped
+                  chat.completion with usage. Streaming is not supported yet.
+                </span>
+              </li>
+              <li>
+                <span className="settings-session-device"><code>GET /models</code></span>
+                <span className="settings-file-meta">
+                  Lists the free models your key can use right now.
+                </span>
+              </li>
+              <li>
+                <span className="settings-session-device">Free plan limits</span>
+                <span className="settings-file-meta">
+                  {limit.toLocaleString("en-US")} tokens per day (prompt + completion,
+                  resets midnight UTC) · 20 requests per minute per key · up to 5 active
+                  keys. Errors use the OpenAI shape: an error object with message, type
+                  and code — daily_token_limit_exceeded means the daily cap is reached.
+                </span>
+              </li>
+            </ul>
+            <p className="settings-hint">
+              Full terms: <a href="/api-terms" target="_blank" rel="noreferrer">API terms</a>
+              {" · "}
+              <a href="/acceptable-use" target="_blank" rel="noreferrer">Acceptable use</a>
+              {" · "}
+              <a href="/developers" target="_blank" rel="noreferrer">Developer page</a>
+            </p>
+          </div>
+
+          <div className="settings-field">
+            <span className="settings-label">Recent API activity</span>
+            <p className="settings-hint">
+              Every API call is logged with its request fingerprint — device, browser and
+              a hashed IP — so you can spot keys being used from unexpected places.
+            </p>
+            {(overview.recentEvents ?? []).length === 0 && (
+              <p className="settings-hint">No API calls yet. Make your first request with the quickstart above.</p>
+            )}
+            {(overview.recentEvents ?? []).length > 0 && (
+              <ul className="settings-session-list">
+                {(overview.recentEvents ?? []).map((event) => (
+                  <li key={event.id}>
+                    <span className="settings-session-device">
+                      {event.model ?? event.endpoint}
+                      {event.status === "success" && <span className="settings-badge settings-badge-ok">Success</span>}
+                      {event.status === "error" && <span className="settings-badge settings-badge-warn">Error {event.httpStatus}</span>}
+                      {event.status === "rejected" && <span className="settings-badge settings-badge-warn">Limit reached</span>}
+                    </span>
+                    <span className="settings-file-meta">
+                      {event.totalTokens.toLocaleString("en-US")} tokens
+                      {" · "}{event.deviceLabel ?? "Unknown device"}
+                      {" · "}{formatDate(event.createdAt)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </>
+      )}
+
+      {activateOpen && (
+        <div className="signout-overlay">
+          <div className="signout-dialog" role="dialog" aria-modal="true" aria-labelledby="dev-activate-heading">
+            {freshKey ? (
+              <>
+                <h3 id="dev-activate-heading">Developer access is active</h3>
+                <p>
+                  Here is your first API key. Copy it now and store it somewhere safe —
+                  it is shown only once and can’t be recovered later.
+                </p>
+                <div className="chat-code-block">
+                  <pre><code>{freshKey}</code></pre>
+                </div>
+                <div className="signout-dialog-actions">
+                  <button type="button" className="button button-outline" onClick={() => void copyText(freshKey, "API key copied.")}>
+                    Copy key
+                  </button>
+                  <button
+                    type="button"
+                    className="button button-primary"
+                    onClick={() => {
+                      setFreshKey(null);
+                      setActivateOpen(false);
+                    }}
+                  >
+                    Done — show my dashboard
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h3 id="dev-activate-heading">Activate developer access</h3>
+                <p>Tell us a little about your project. Your answers are saved to your account and help us keep the free API sustainable.</p>
+                <div className="dev-form">
+                  <label className="settings-label" htmlFor="dev-project-name">Project name</label>
+                  <input
+                    id="dev-project-name"
+                    type="text"
+                    value={projectName}
+                    onChange={(event) => setProjectName(event.target.value)}
+                    placeholder="e.g. My support chatbot"
+                    maxLength={60}
+                  />
+                  <label className="settings-label" htmlFor="dev-use-case">What are you building?</label>
+                  <select id="dev-use-case" value={useCase} onChange={(event) => setUseCase(event.target.value)}>
+                    {API_USE_CASE_OPTIONS.map(([id, label]) => (
+                      <option key={id} value={id}>{label}</option>
+                    ))}
+                  </select>
+                  <label className="settings-label" htmlFor="dev-builder-type">What best describes you?</label>
+                  <select id="dev-builder-type" value={builderType} onChange={(event) => setBuilderType(event.target.value)}>
+                    {API_BUILDER_OPTIONS.map(([id, label]) => (
+                      <option key={id} value={id}>{label}</option>
+                    ))}
+                  </select>
+                  <label className="settings-label" htmlFor="dev-language">Primary language</label>
+                  <select id="dev-language" value={language} onChange={(event) => setLanguage(event.target.value)}>
+                    {API_LANGUAGE_OPTIONS.map(([id, label]) => (
+                      <option key={id} value={id}>{label}</option>
+                    ))}
+                  </select>
+                  <label className="settings-label" htmlFor="dev-website">Website or repository (optional)</label>
+                  <input
+                    id="dev-website"
+                    type="text"
+                    value={website}
+                    onChange={(event) => setWebsite(event.target.value)}
+                    placeholder="https://…"
+                    maxLength={200}
+                  />
+                  <label className="dev-terms">
+                    <input
+                      type="checkbox"
+                      checked={termsAccepted}
+                      onChange={(event) => setTermsAccepted(event.target.checked)}
+                    />
+                    <span>
+                      I agree to the{" "}
+                      <a href="/api-terms" target="_blank" rel="noreferrer">API terms</a>
+                      {" "}and{" "}
+                      <a href="/acceptable-use" target="_blank" rel="noreferrer">acceptable use policy</a>.
+                    </span>
+                  </label>
+                </div>
+                {activateError && <div className="auth-alert" role="alert">{activateError}</div>}
+                <div className="signout-dialog-actions">
+                  <button
+                    type="button"
+                    className="button button-outline"
+                    onClick={() => setActivateOpen(false)}
+                    disabled={activating}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="button button-primary"
+                    onClick={() => void activate()}
+                    disabled={activating || projectName.trim().length < 2 || !termsAccepted}
+                  >
+                    {activating ? "Activating…" : "Activate and get my key"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {freshKey && !activateOpen && (
+        <div className="signout-overlay">
+          <div className="signout-dialog" role="dialog" aria-modal="true" aria-labelledby="dev-key-heading">
+            <h3 id="dev-key-heading">Your new API key</h3>
+            <p>Copy it now and store it somewhere safe — it is shown only once.</p>
+            <div className="chat-code-block">
+              <pre><code>{freshKey}</code></pre>
+            </div>
+            <div className="signout-dialog-actions">
+              <button type="button" className="button button-outline" onClick={() => void copyText(freshKey, "API key copied.")}>
+                Copy key
+              </button>
+              <button type="button" className="button button-primary" onClick={() => setFreshKey(null)}>
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {revokeKeyTarget && (
+        <div className="signout-overlay">
+          <div className="signout-dialog" role="dialog" aria-modal="true" aria-labelledby="dev-revoke-heading">
+            <h3 id="dev-revoke-heading">Revoke this API key?</h3>
+            <p>
+              <strong>{revokeKeyTarget.name}</strong> (<code>{revokeKeyTarget.displayPrefix}</code>) will stop
+              working immediately. Anything still using it will start receiving
+              authentication errors.
+            </p>
+            <div className="signout-dialog-actions">
+              <button type="button" className="button button-outline" onClick={() => setRevokeKeyTarget(null)} disabled={keyBusy}>
+                Keep key
+              </button>
+              <button
+                type="button"
+                className="button button-danger"
+                onClick={() => void revokeKey(revokeKeyTarget)}
+                disabled={keyBusy}
+              >
+                {keyBusy ? "Revoking…" : "Revoke key"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

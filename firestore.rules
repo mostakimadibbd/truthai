@@ -108,6 +108,33 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Developer platform: activation profile, API key records (hash
+    // only — the full key is never stored), daily usage rollups and
+    // per-request fingerprint events. All written by the server;
+    // owners may read their own data for display fallback.
+    match /users/{userId}/developerProfile/{document} {
+      allow read: if ownsUser(userId);
+      allow write: if false;
+    }
+    match /users/{userId}/apiKeys/{keyId} {
+      allow read: if ownsUser(userId);
+      allow write: if false;
+    }
+    match /users/{userId}/apiUsage/{date} {
+      allow read: if ownsUser(userId);
+      allow write: if false;
+    }
+    match /users/{userId}/apiEvents/{eventId} {
+      allow read: if ownsUser(userId);
+      allow write: if false;
+    }
+
+    // API key auth lookup (key hash -> owner): server-only, never
+    // readable or writable by clients.
+    match /apiKeys/{keyHash} {
+      allow read, write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }
