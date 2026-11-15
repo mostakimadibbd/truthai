@@ -37,6 +37,7 @@ import { recordUsageEvent } from "@/lib/server/analytics";
 import {
   buildWebContext,
   extractUrls,
+  hasSearchIntent,
   type WebSource,
 } from "@/lib/server/web-search";
 
@@ -365,6 +366,12 @@ export async function POST(request: NextRequest) {
   const assistantRef = messagesRef.doc(assistantMessageId);
   let responseText = "";
   let webSources: WebSource[] = [];
+  // Live-stream phase shown in the client ("Searching the web…"
+  // while the search chain runs, "Thinking" otherwise).
+  let streamPhase: "searching" | "thinking" = "thinking";
+  // Set when a web block was spliced into the model messages; the
+  // pre-web snapshot lets a rejected request retry without it.
+  let webContextInjected = false;
   let locked = false;
   let assistantCreated = false;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -563,31 +570,85 @@ export async function POST(request: NextRequest) {
       prepared.messages.splice(1, 0, { role: "system", content: instructions });
     }
 
-    // Web search + link reading (2026-11-16): when the composer’s web
-    // toggle is on, search the live web for the message; any links in
-    // the message are fetched and read either way. Results ride as a
-    // system block after the instructions, and the sources are stored
-    // on the assistant message so the UI can show them. Search is
-    // best-effort — any failure just means no web context this turn.
-    const webSearchEnabled = body.webSearch === true;
+    // Web search + link reading (2026-11-16, smart-search round):
+    // search runs when the composer's toggle is on OR the message
+    // itself asks for live data (search/research/latest/news/price…)
+    // — the "smart think" trigger — and any links in the message are
+    // read either way. While the chain runs, the live stream shows
+    // "Searching the web…" in the client. Every attempt is logged to
+    // searchEvents (owner requirement: all logs in the DB). Results
+    // ride as a capped system block; if a search was attempted but
+    // came back empty, the model gets an honesty note instead of
+    // improvising around a search that never happened.
+    let messagesBeforeWeb: typeof prepared.messages | null = null;
+    const toggleSearch = body.webSearch === true;
     const effectiveUserText = regenerate
       ? ([...history].reverse().find((message) => message.role === "user")?.content ?? "")
       : content;
-    if (webSearchEnabled || extractUrls(effectiveUserText).length > 0) {
+    const autoSearch = !toggleSearch && hasSearchIntent(effectiveUserText);
+    const searchTrigger: "toggle" | "auto" | "link" | null =
+      toggleSearch
+        ? "toggle"
+        : autoSearch
+          ? "auto"
+          : extractUrls(effectiveUserText).length > 0
+            ? "link"
+            : null;
+    if (searchTrigger) {
+      streamPhase = "searching";
+      void streamRef
+        .set({
+          responseId,
+          messageId: assistantMessageId,
+          status: "generating",
+          text: "",
+          phase: streamPhase,
+          seq: 0,
+          updatedAt: Date.now(),
+        })
+        .catch(() => undefined);
       try {
         const web = await buildWebContext({
-          searchEnabled: webSearchEnabled,
+          searchEnabled: searchTrigger !== "link",
           message: effectiveUserText,
         });
+        // All search activity is saved (best-effort; never blocks).
+        void db
+          .collection("searchEvents")
+          .add({
+            uid: auth.uid,
+            chatId,
+            query: web.query,
+            trigger: searchTrigger,
+            provider: web.provider,
+            resultCount: web.resultCount,
+            sources: web.sources.slice(0, 6),
+            ts: Date.now(),
+            createdAt: Timestamp.now(),
+          })
+          .catch(() => undefined);
+        messagesBeforeWeb = [...prepared.messages];
         if (web.context) {
           prepared.messages.splice(instructions ? 2 : 1, 0, {
             role: "system",
             content: web.context,
           });
           webSources = web.sources;
+          webContextInjected = true;
+        } else if (searchTrigger !== "link") {
+          // Search was attempted and returned nothing: tell the
+          // model plainly instead of letting it improvise.
+          prepared.messages.splice(instructions ? 2 : 1, 0, {
+            role: "system",
+            content:
+              "LIVE SEARCH NOTE: a web search was attempted for this message but returned no results (the search service may be briefly unavailable). If the user needs current information, say plainly that live search didn't return results this time, then answer from your own knowledge and note it may be out of date. Do not claim you searched or invent current facts.",
+          });
+          webContextInjected = true;
         }
       } catch (error) {
         console.error("Web context failed; continuing without it.", error);
+      } finally {
+        streamPhase = "thinking";
       }
     }
 
@@ -667,6 +728,7 @@ export async function POST(request: NextRequest) {
         messageId: assistantMessageId,
         status: "generating",
         text: responseText,
+        phase: streamPhase,
         seq: streamSeq,
         updatedAt: currentTime,
       });
@@ -689,12 +751,11 @@ export async function POST(request: NextRequest) {
     // not enough. Each attempt has a connect timeout only, so a
     // long streamed reply is never killed mid-generation.
     const attempts = modelAttemptOrder(effectiveModel);
-    let upstream: Response;
-    try {
+    const acquireUpstream = async (messages: typeof prepared.messages) => {
       const result = await fetchChatCompletionWithFallback({
         apiKey,
         attempts,
-        messages: prepared.messages,
+        messages,
         stream: true,
         maxTokens: 4096,
         signal: request.signal,
@@ -703,8 +764,38 @@ export async function POST(request: NextRequest) {
         connectTimeoutMs: 25_000,
         includeUsage: true,
       });
-      upstream = result.response;
+      return result.response;
+    };
+    let upstream: Response | null = null;
+    let acquireError: unknown = null;
+    try {
+      upstream = await acquireUpstream(prepared.messages);
     } catch (error) {
+      acquireError = error;
+    }
+    // If the model chain rejected a request that carried the web
+    // block (an oversized context is the usual cause), retry once
+    // without it — a plain answer beats a dead error.
+    if (
+      webContextInjected &&
+      messagesBeforeWeb &&
+      !request.signal.aborted &&
+      (acquireError !== null || (upstream !== null && !upstream.ok))
+    ) {
+      if (upstream && !upstream.ok) {
+        await upstream.body?.cancel().catch(() => undefined);
+      }
+      console.error("Model request with web context failed; retrying without it.");
+      upstream = null;
+      acquireError = null;
+      try {
+        upstream = await acquireUpstream(messagesBeforeWeb);
+      } catch (error) {
+        acquireError = error;
+      }
+    }
+    if (acquireError !== null) {
+      const error = acquireError;
       if (request.signal.aborted) {
         throw new ChatRouteError(499, "RESPONSE_STOPPED", "Response stopped.");
       }
@@ -721,8 +812,8 @@ export async function POST(request: NextRequest) {
       }
       throw new ChatRouteError(502, "MODEL_UNAVAILABLE", "The free model service is temporarily unavailable.");
     }
-    if (!upstream.ok) {
-      await upstream.body?.cancel().catch(() => undefined);
+    if (!upstream || !upstream.ok) {
+      if (upstream) await upstream.body?.cancel().catch(() => undefined);
       throw new ChatRouteError(
         502,
         "MODEL_REQUEST_FAILED",

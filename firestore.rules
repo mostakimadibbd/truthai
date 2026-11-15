@@ -164,6 +164,11 @@ service cloud.firestore {
     match /usageEvents/{eventId} {
       allow read, write: if false;
     }
+    // Web-search activity log (query, trigger, provider, result
+    // count, sources). Server-written only; no client access.
+    match /searchEvents/{eventId} {
+      allow read, write: if false;
+    }
     match /analytics_minutes/{minute} {
       allow read, write: if false;
     }

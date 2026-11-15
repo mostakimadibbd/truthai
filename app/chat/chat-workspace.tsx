@@ -344,6 +344,7 @@ export default function ChatWorkspace() {
     }
   });
   const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const [streamPhase, setStreamPhase] = useState<"searching" | "thinking">("thinking");
   const [listening, setListening] = useState(false);
   const recognitionRef = useRef<{ stop: () => void } | null>(null);
   const [notice, setNotice] = useState("");
@@ -823,6 +824,9 @@ export default function ChatWorkspace() {
           if (typeof stream.seq === "number") {
             if (stream.seq <= streamSeqRef.current) return;
             streamSeqRef.current = stream.seq;
+          }
+          if (stream.phase === "searching" || stream.phase === "thinking") {
+            setStreamPhase(stream.phase);
           }
           lastChunkAtRef.current = Date.now();
           const text = stream.text;
@@ -1398,6 +1402,7 @@ export default function ChatWorkspace() {
       // or below the last applied one, are ignored by the listener.
       streamSeqRef.current = 0;
       lastChunkAtRef.current = Date.now();
+      setStreamPhase("thinking");
       setStreamTarget({
         chatId: persistedChatId,
         responseId,
@@ -2187,7 +2192,7 @@ export default function ChatWorkspace() {
                             active={message.status === "generating"}
                           />
                         ) : sending ? (
-                          <span className="chat-thinking" role="status"><i /><i /><i /> Thinking</span>
+                          <span className="chat-thinking" role="status"><i /><i /><i /> {streamPhase === "searching" ? "Searching the web…" : "Thinking"}</span>
                         ) : null}
                       </div>
                     )}

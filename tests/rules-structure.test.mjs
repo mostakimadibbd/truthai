@@ -15,6 +15,7 @@ const databaseRules = readFileSync(
 test("server-only collections deny all client access", () => {
   for (const collection of [
     "usageEvents",
+    "searchEvents",
     "analytics_minutes",
     "analytics_days",
     "deviceSignals",

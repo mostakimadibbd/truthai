@@ -181,7 +181,7 @@ export const articles: Record<string, Article> = {
       },
       {
         q: "Can Xyro AI search the web for recent information?",
-        a: "Yes. Tap the globe button in the chat composer to turn on web search: your message is then sent as a search query to Bing, the top results are given to the model as context, and the reply cites them — the sources appear as numbered chips under the answer. Your message text is only sent as a query while the toggle is on. If you paste a link into a chat, Xyro AI fetches that page directly so the model can read it.",
+        a: "Yes. Web search turns on in two ways: tap the globe button in the composer, or simply ask for something live — the latest news, a price, a score, research — and Xyro AI searches automatically (you'll see “Searching the web…” while it happens). The top results from Bing, Google News or DuckDuckGo are given to the model as context, and the reply cites them — the sources appear as numbered chips under the answer. If you paste a link into a chat, Xyro AI fetches that page directly so the model can read it.",
       },
       {
         q: "Can I listen to replies, or dictate instead of typing?",
@@ -229,7 +229,7 @@ Object.assign(articles, {
       {
         title: "Turn on web search",
         body: [
-          "In any chat, tap the globe button in the composer. While it's on, each message you send is also used as a search query (results come from Bing), the top results are given to the model as context, and the reply cites them — the sources appear as numbered chips under the answer, and tapping one opens the page. The toggle stays as you left it on that device. Tip: pasting a link into a message makes Xyro AI read that page directly, with or without search on.",
+          "In any chat, tap the globe button in the composer to search with every message — or just ask for current information (latest news, prices, scores, research) and search starts on its own. You'll see “Searching the web…” while it runs. The top results are given to the model as context, and the reply cites them — the sources appear as numbered chips under the answer, and tapping one opens the page. Research-style asks also read the top results in full. Tip: pasting a link into a message makes Xyro AI read that page directly, with or without search on.",
         ],
       },
       {
@@ -933,9 +933,9 @@ Object.assign(articles, {
         ],
       },
       {
-        title: "Microsoft Bing (web search)",
+        title: "Web search providers (Bing, Google News, DuckDuckGo)",
         body: [
-          "Purpose: live web results in chat. When you turn on the web search toggle in the composer, the text of your message is sent as a search query to Bing's public results page, and the top results are used as context for the reply (the sources are shown under the answer). When the toggle is off, no query is sent. Links you paste into a chat are fetched directly by Xyro AI's server, not through Bing.",
+          "Purpose: live web results in chat. When web search runs — because you turned on the search toggle in the composer, or because your message asks for current information (news, prices, scores, research) — the text of your message is sent as a search query to one of several public search sources (Microsoft Bing, Google News, DuckDuckGo), and the top results are used as context for the reply; the sources are shown under the answer. Timeless questions are never sent. Links you paste into a chat are fetched directly by Xyro AI's server, not through a search provider.",
         ],
       },
       {
@@ -1022,7 +1022,7 @@ Object.assign(articles, {
       {
         title: "Web search",
         body: [
-          "When the web search toggle in the composer is on, the text of the message you send is sent to Bing as a search query, and the top results are passed to the model as context; the sources are shown under the reply. With the toggle off, no query is sent. Links you paste into a chat are fetched directly by Xyro AI's server — not through Bing — so the model can read the page. Bing is listed on the [subprocessors](/subprocessors) page.",
+          "When web search runs — the toggle in the composer is on, or your message asks for current information such as news, prices, scores or research — the text of the message is sent as a search query to a public search source (Microsoft Bing, Google News or DuckDuckGo), and the top results are passed to the model as context; the sources are shown under the reply. Timeless questions are not sent anywhere. Each search is logged in Xyro AI's database (the query, what triggered it, which source answered, how many results came back, and the sources shown) so the feature's reliability can be monitored and abuse investigated; the log is not readable from any client account. Links you paste into a chat are fetched directly by Xyro AI's server so the model can read the page. The search providers are listed on the [subprocessors](/subprocessors) page.",
         ],
       },
       {

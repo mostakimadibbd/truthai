@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractUrls, parseBingResults } from "../lib/server/web-search.ts";
+import {
+  cleanSearchQuery,
+  extractUrls,
+  hasSearchIntent,
+  parseBingResults,
+  parseDdgInstant,
+  parseRssResults,
+} from "../lib/server/web-search.ts";
 
 test("extractUrls dedupes, trims trailing punctuation, and caps", () => {
   assert.deepEqual(
@@ -29,4 +36,47 @@ test("parseBingResults decodes redirect targets and snippets", () => {
 
 test("parseBingResults returns [] for a challenge or empty page", () => {
   assert.deepEqual(parseBingResults("<html><body>captcha</body></html>"), []);
+});
+
+test("parseRssResults reads Bing/Google News items with entities decoded", () => {
+  const xml = `<?xml version="1.0"?><rss><channel>
+    <item><title>Big &amp; Bold Launch</title><link>https://example.com/a</link><description><![CDATA[Something <b>new</b> shipped]]></description></item>
+    <item><title>Second Story</title><link>https://example.org/b</link><description>Plain text</description></item>
+    <item><title>No link here</title><description>skip me</description></item>
+  </channel></rss>`;
+  const results = parseRssResults(xml);
+  assert.equal(results.length, 2);
+  assert.equal(results[0].title, "Big & Bold Launch");
+  assert.equal(results[0].url, "https://example.com/a");
+  assert.match(results[0].snippet, /Something new shipped/);
+});
+
+test("parseDdgInstant uses the abstract and flattens related topics", () => {
+  const results = parseDdgInstant({
+    AbstractText: "An abstract that is comfortably longer than twenty characters.",
+    AbstractURL: "https://en.wikipedia.org/wiki/Example",
+    AbstractSource: "Wikipedia",
+    RelatedTopics: [
+      { Text: "Topic one", FirstURL: "https://duckduckgo.com/1" },
+      { Topics: [{ Text: "Nested topic", FirstURL: "https://duckduckgo.com/2" }] },
+      { Text: "No URL" },
+    ],
+  });
+  assert.equal(results[0].title, "Wikipedia");
+  assert.equal(results.length, 3);
+});
+
+test("hasSearchIntent catches live-data asks and skips timeless ones", () => {
+  assert.equal(hasSearchIntent("What is the latest iPhone price?"), true);
+  assert.equal(hasSearchIntent("Search for today's cricket score"), true);
+  assert.equal(hasSearchIntent("Research the best laptops this year"), true);
+  assert.equal(hasSearchIntent("Write a poem about the sea"), false);
+  assert.equal(hasSearchIntent("Explain recursion with an example"), false);
+  assert.equal(hasSearchIntent("hi"), false);
+});
+
+test("cleanSearchQuery strips imperatives and links", () => {
+  assert.equal(cleanSearchQuery("Search for the latest AI news"), "the latest AI news");
+  assert.equal(cleanSearchQuery("Please research electric cars online"), "electric cars");
+  assert.match(cleanSearchQuery("What happened https://example.com/x today"), /What happened\s+today/);
 });
