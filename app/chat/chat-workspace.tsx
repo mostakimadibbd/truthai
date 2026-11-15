@@ -1954,7 +1954,7 @@ export default function ChatWorkspace() {
               <strong>Verify your email</strong>
               <span>
                 You can browse your chats, but sending is off until you
-                verify {user?.email ?? "your email address"}.
+                verify{" "}{user?.email ?? "your email address"}.
               </span>
             </p>
             <div className="verify-banner-actions">

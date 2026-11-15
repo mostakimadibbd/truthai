@@ -48,14 +48,18 @@ export async function POST(request: NextRequest) {
     const action = stringField(guarded.body, "action") ?? "";
     if (action === "create") {
       const name = (stringField(guarded.body, "name") ?? "").trim();
+      if (!name) {
+        return authErrorResponse(
+          400,
+          "INVALID_NAME",
+          "Give the key a name first — it’s how you’ll tell your keys apart.",
+        );
+      }
       if (name.length > 60) {
         return authErrorResponse(400, "INVALID_NAME", "Key names can be at most 60 characters.");
       }
       try {
-        const { record, fullKey } = await createApiKey(
-          auth.uid,
-          name || "API key",
-        );
+        const { record, fullKey } = await createApiKey(auth.uid, name);
         return json({ keyRecord: record, apiKey: fullKey });
       } catch (error) {
         if (error instanceof Error && error.message === "KEY_LIMIT") {

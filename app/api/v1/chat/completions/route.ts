@@ -295,6 +295,7 @@ export async function POST(request: NextRequest) {
     await recordApiCall(identity.uid, {
       keyId: identity.keyId,
       keyPrefix: identity.displayPrefix,
+      keyName: identity.keyName,
       endpoint: "chat/completions",
       model: requestedModel,
       status: "rejected",
@@ -346,6 +347,7 @@ export async function POST(request: NextRequest) {
       await recordApiCall(identity.uid, {
         keyId: identity.keyId,
         keyPrefix: identity.displayPrefix,
+      keyName: identity.keyName,
         endpoint: "chat/completions",
         model: attempts[attempts.length - 1],
         status: "error",
@@ -376,6 +378,7 @@ export async function POST(request: NextRequest) {
     await recordApiCall(identity.uid, {
       keyId: identity.keyId,
       keyPrefix: identity.displayPrefix,
+      keyName: identity.keyName,
       endpoint: "chat/completions",
       model: usedAttemptModel,
       status: "error",
@@ -409,6 +412,7 @@ export async function POST(request: NextRequest) {
     await recordApiCall(identity.uid, {
       keyId: identity.keyId,
       keyPrefix: identity.displayPrefix,
+      keyName: identity.keyName,
       endpoint: "chat/completions",
       model: usedAttemptModel,
       status: "error",
@@ -446,6 +450,7 @@ export async function POST(request: NextRequest) {
   await recordApiCall(identity.uid, {
     keyId: identity.keyId,
     keyPrefix: identity.displayPrefix,
+      keyName: identity.keyName,
     endpoint: "chat/completions",
     model: usedModel,
     status: "success",

@@ -1369,6 +1369,7 @@ type DeveloperEventInfo = {
   id: string;
   createdAt: number;
   keyPrefix: string | null;
+  keyName?: string | null;
   endpoint: string;
   model: string | null;
   status: string;
@@ -1407,6 +1408,7 @@ type AccessPointInfo = {
   city: string | null;
   country: string | null;
   keyPrefix: string | null;
+  keyName?: string | null;
   requests: number;
   firstSeenAt: number;
   lastSeenAt: number;
@@ -2076,6 +2078,12 @@ Content-Type: application/json
                 </li>
               ))}
             </ul>
+            <span className="settings-label">Create a new key</span>
+            <p className="settings-hint">
+              First give the key a name — it’s how you’ll tell your keys apart
+              in usage, activity and access points (for example “Production” or
+              “My laptop”).
+            </p>
             <div className="settings-inline">
               <input
                 type="text"
@@ -2088,12 +2096,15 @@ Content-Type: application/json
               <button
                 type="button"
                 className="button button-primary"
-                disabled={keyBusy || activeKeys.length >= 5}
+                disabled={keyBusy || activeKeys.length >= 5 || !newKeyName.trim()}
                 onClick={() => void createKey()}
               >
                 Create new key
               </button>
             </div>
+            {!newKeyName.trim() && activeKeys.length < 5 && (
+              <p className="settings-hint">Enter a name above to create the key.</p>
+            )}
             {activeKeys.length >= 5 && (
               <p className="settings-hint">You have the maximum of 5 active keys. Revoke one to create another.</p>
             )}
@@ -2197,6 +2208,7 @@ Content-Type: application/json
                       <span className="settings-file-meta">
                         {event.totalTokens.toLocaleString("en-US")} tokens
                         {" · "}{formatUsd(event.costUsd ?? 0)}
+                        {event.keyName ? ` · key “${event.keyName}”` : ""}
                         {" · "}{event.deviceLabel ?? "Unknown device"}
                         {" · "}{formatDate(event.createdAt)}
                       </span>
@@ -2259,7 +2271,11 @@ Content-Type: application/json
                     <span className="settings-file-meta">
                       {[point.city, point.country].filter(Boolean).join(", ") || "Location unknown"}
                       {" · "}{point.requests.toLocaleString("en-US")} requests
-                      {point.keyPrefix ? ` · key ${point.keyPrefix}` : ""}
+                      {point.keyName
+                        ? ` · key “${point.keyName}”`
+                        : point.keyPrefix
+                          ? ` · key ${point.keyPrefix}`
+                          : ""}
                       {" · "}first seen {formatDate(point.firstSeenAt)}
                       {" · "}last seen {formatDate(point.lastSeenAt)}
                     </span>

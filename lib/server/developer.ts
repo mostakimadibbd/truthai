@@ -109,6 +109,7 @@ export type ApiEventRecord = {
   id: string;
   createdAt: number;
   keyPrefix: string | null;
+  keyName: string | null;
   endpoint: string;
   model: string | null;
   status: string;
@@ -139,6 +140,7 @@ export type ApiAccessPoint = {
   city: string | null;
   country: string | null;
   keyPrefix: string | null;
+  keyName: string | null;
   requests: number;
   firstSeenAt: number;
   lastSeenAt: number;
@@ -437,7 +439,7 @@ export async function revokeApiKey(
  */
 export async function authenticateApiKey(
   authorization: string | null,
-): Promise<{ uid: string; keyId: string; displayPrefix: string } | null> {
+): Promise<{ uid: string; keyId: string; displayPrefix: string; keyName: string } | null> {
   if (!authorization || !authorization.startsWith("Bearer ")) return null;
   const key = authorization.slice("Bearer ".length).trim();
   if (!key.startsWith(API_KEY_PREFIX) || key.length > 80) return null;
@@ -467,6 +469,7 @@ export async function authenticateApiKey(
       typeof data.displayPrefix === "string"
         ? data.displayPrefix
         : "xyro_sk_live_…",
+    keyName: typeof data.name === "string" ? data.name : "API key",
   };
 }
 
@@ -539,6 +542,7 @@ export async function listApiEvents(
       id: doc.id,
       createdAt: toMillis(data.createdAt),
       keyPrefix: typeof data.keyPrefix === "string" ? data.keyPrefix : null,
+      keyName: typeof data.keyName === "string" ? data.keyName : null,
       endpoint: typeof data.endpoint === "string" ? data.endpoint : "",
       model: typeof data.model === "string" ? data.model : null,
       status: typeof data.status === "string" ? data.status : "success",
@@ -613,6 +617,7 @@ export async function listApiAccessPoints(
       city: typeof data.city === "string" ? data.city : null,
       country: typeof data.country === "string" ? data.country : null,
       keyPrefix: typeof data.keyPrefix === "string" ? data.keyPrefix : null,
+      keyName: typeof data.keyName === "string" ? data.keyName : null,
       requests: typeof data.requests === "number" ? data.requests : 0,
       firstSeenAt: toMillis(data.firstSeenAt),
       lastSeenAt: toMillis(data.lastSeenAt),
@@ -646,6 +651,7 @@ export async function recordApiCall(
   info: {
     keyId: string;
     keyPrefix: string;
+    keyName: string;
     endpoint: string;
     model: string | null;
     status: "success" | "error" | "rejected";
@@ -708,6 +714,7 @@ export async function recordApiCall(
     batch.set(eventsCollection(uid).doc(), {
       keyId: info.keyId,
       keyPrefix: info.keyPrefix,
+      keyName: info.keyName,
       endpoint: info.endpoint,
       model: info.model,
       status: info.status,
@@ -761,6 +768,7 @@ export async function recordApiCall(
         country: info.country,
         keyId: info.keyId,
         keyPrefix: info.keyPrefix,
+        keyName: info.keyName,
         requests: FieldValue.increment(1),
         lastSeenAt: FieldValue.serverTimestamp(),
         ...(accessPointSnap && !accessPointSnap.exists
