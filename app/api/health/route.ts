@@ -73,8 +73,14 @@ export async function GET() {
         ".iam.gserviceaccount.com",
       ) ?? false,
   };
+  // Upload signing needs a fourth Cloudinary value the presence check
+  // above does not cover; a missing preset surfaces to users as
+  // "Private file uploads aren't configured for this deployment."
+  const cloudinaryChecks = {
+    uploadPresetPresent: present(process.env.CLOUDINARY_UPLOAD_PRESET),
+  };
   return NextResponse.json(
-    { ok: true, integrations, adminChecks },
+    { ok: true, integrations, adminChecks, cloudinaryChecks },
     { headers: { "Cache-Control": "no-store" } },
   );
 }
