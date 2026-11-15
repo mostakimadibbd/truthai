@@ -9,11 +9,17 @@
  *    long streamed reply is never killed by the connect budget;
  *  - 429/5xx and network errors move to the next model after a
  *    short backoff (honouring Retry-After, capped);
- *  - a non-retryable HTTP status (e.g. 400) is returned to the
- *    caller immediately for mapping;
+ *  - per-model rejections (400 invalid for this provider, 404 no
+ *    endpoint, 413/422 too large / unprocessable) ALSO move to the
+ *    next model — one strict or small-context free model must not
+ *    kill a request the next model would happily answer (this was
+ *    the production "The model couldn't process this request"
+ *    failure: the chain used to return the first 400 immediately);
+ *  - account-level statuses (401/403/402) are returned to the
+ *    caller immediately — every model would fail the same way;
  *  - when every attempt fails retryably, an
- *    OpenRouterAttemptsExhausted error carries the last status so
- *    the caller can answer 429-vs-502 correctly.
+ *    OpenRouterAttemptsExhausted error carries the last status and
+ *    the last upstream error body so the failure is diagnosable.
  */
 
 export function sleep(ms: number): Promise<void> {
@@ -39,12 +45,18 @@ export function retryDelayMs(
 export class OpenRouterAttemptsExhausted extends Error {
   readonly lastStatus: number | null;
   readonly retryAfter: string | null;
+  readonly lastErrorBody: string | null;
 
-  constructor(lastStatus: number | null, retryAfter: string | null) {
+  constructor(
+    lastStatus: number | null,
+    retryAfter: string | null,
+    lastErrorBody: string | null = null,
+  ) {
     super("Every OpenRouter model attempt failed.");
     this.name = "OpenRouterAttemptsExhausted";
     this.lastStatus = lastStatus;
     this.retryAfter = retryAfter;
+    this.lastErrorBody = lastErrorBody;
   }
 }
 
@@ -72,6 +84,7 @@ export async function fetchChatCompletionWithFallback(
   const connectTimeoutMs = args.connectTimeoutMs ?? 25_000;
   let lastStatus: number | null = null;
   let lastRetryAfter: string | null = null;
+  let lastErrorBody: string | null = null;
 
   for (let index = 0; index < args.attempts.length; index += 1) {
     const model = args.attempts[index];
@@ -120,11 +133,12 @@ export async function fetchChatCompletionWithFallback(
       if (args.signal?.aborted) throw error;
       // Network error or connect timeout: try the next model.
       lastStatus = null;
+      lastErrorBody = error instanceof Error ? error.message.slice(0, 500) : null;
       if (index < args.attempts.length - 1) {
         await sleep(retryDelayMs(index, null));
         continue;
       }
-      throw new OpenRouterAttemptsExhausted(null, null);
+      throw new OpenRouterAttemptsExhausted(null, null, lastErrorBody);
     }
     clearTimeout(connectTimer);
 
@@ -132,19 +146,35 @@ export async function fetchChatCompletionWithFallback(
       return { response, model };
     }
 
-    const retryable = response.status === 429 || response.status >= 500;
+    const retryable =
+      response.status === 429 ||
+      response.status >= 500 ||
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 413 ||
+      response.status === 422;
     if (!retryable) {
       return { response, model };
     }
     lastStatus = response.status;
     lastRetryAfter = response.headers.get("retry-after");
-    await response.body?.cancel().catch(() => undefined);
+    // Read the upstream error body before discarding it: it says
+    // exactly why the model refused (context length, invalid
+    // message, no endpoints) and is the only way these failures
+    // are diagnosable from logs.
+    lastErrorBody = await response
+      .text()
+      .then((text) => text.slice(0, 500))
+      .catch(() => null);
+    console.error(
+      `OpenRouter attempt failed: model=${model} status=${response.status} body=${lastErrorBody ?? ""}`,
+    );
     if (index < args.attempts.length - 1) {
       await sleep(retryDelayMs(index, lastRetryAfter));
       continue;
     }
-    throw new OpenRouterAttemptsExhausted(lastStatus, lastRetryAfter);
+    throw new OpenRouterAttemptsExhausted(lastStatus, lastRetryAfter, lastErrorBody);
   }
 
-  throw new OpenRouterAttemptsExhausted(lastStatus, lastRetryAfter);
+  throw new OpenRouterAttemptsExhausted(lastStatus, lastRetryAfter, lastErrorBody);
 }

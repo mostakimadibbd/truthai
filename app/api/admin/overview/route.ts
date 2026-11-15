@@ -44,7 +44,7 @@ export async function GET(request: NextRequest) {
     }
 
     const today = analyticsDayKey();
-    const [totals, minutes, models, topUsers, recentEvents, recentSearches] =
+    const [totals, minutes, models, topUsers, recentEvents, recentSearches, recentErrors] =
       await Promise.all([
         getAnalyticsDayTotals(today),
         getAnalyticsMinuteSeries(60),
@@ -68,6 +68,26 @@ export async function GET(request: NextRequest) {
                 provider: typeof data.provider === "string" ? data.provider : null,
                 resultCount:
                   typeof data.resultCount === "number" ? data.resultCount : 0,
+                ts: typeof data.ts === "number" ? data.ts : 0,
+              };
+            }),
+          )
+          .catch(() => []),
+        // Recent model failures (chatErrors): upstream status and
+        // error body for every rejected model request.
+        getFirebaseAdminFirestore()
+          .collection("chatErrors")
+          .orderBy("ts", "desc")
+          .limit(20)
+          .get()
+          .then((snapshot) =>
+            snapshot.docs.map((doc) => {
+              const data = doc.data();
+              return {
+                status: typeof data.status === "number" ? data.status : null,
+                model: typeof data.model === "string" ? data.model : null,
+                webInjected: data.webInjected === true,
+                error: typeof data.error === "string" ? data.error.slice(0, 240) : null,
                 ts: typeof data.ts === "number" ? data.ts : 0,
               };
             }),
@@ -107,6 +127,7 @@ export async function GET(request: NextRequest) {
         email: emailByUid.get(entry.uid) ?? null,
       })),
       recentSearches,
+      recentErrors,
     });
   } catch (error) {
     console.error("Couldn’t load admin overview.", error);

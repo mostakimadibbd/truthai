@@ -169,6 +169,11 @@ service cloud.firestore {
     match /searchEvents/{eventId} {
       allow read, write: if false;
     }
+    // Model-failure log (upstream status + error body, model,
+    // surface). Server-written only; no client access.
+    match /chatErrors/{eventId} {
+      allow read, write: if false;
+    }
     match /analytics_minutes/{minute} {
       allow read, write: if false;
     }

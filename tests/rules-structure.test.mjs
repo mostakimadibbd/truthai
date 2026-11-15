@@ -16,6 +16,7 @@ test("server-only collections deny all client access", () => {
   for (const collection of [
     "usageEvents",
     "searchEvents",
+    "chatErrors",
     "analytics_minutes",
     "analytics_days",
     "deviceSignals",

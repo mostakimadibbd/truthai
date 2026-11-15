@@ -171,10 +171,28 @@ export function parseRssResults(xml: string, count = 6): WebSearchResult[] {
     if (!title || !link) continue;
     const url = decodeXml(link);
     if (!/^https?:\/\//.test(url)) continue;
+    // Publication date, when the feed carries one: models reason
+    // far better about "today's news" when each result is dated.
+    const pubDateRaw = /<pubDate>([\s\S]*?)<\/pubDate>/.exec(item)?.[1];
+    let datePrefix = "";
+    if (pubDateRaw) {
+      const parsed = new Date(decodeXml(pubDateRaw));
+      if (!Number.isNaN(parsed.getTime())) {
+        datePrefix = `(${parsed.toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+          timeZone: "UTC",
+        })}) `;
+      }
+    }
     results.push({
       title: stripTags(decodeXml(title)).slice(0, 160),
       url,
-      snippet: description ? stripTags(decodeXml(description)).slice(0, 320) : "",
+      snippet: (
+        datePrefix +
+        (description ? stripTags(decodeXml(description)) : "")
+      ).slice(0, 320),
     });
     if (results.length >= count) break;
   }
@@ -513,6 +531,40 @@ async function assertPublicHost(hostname: string): Promise<void> {
   }
 }
 
+/**
+ * Follows a URL's redirect chain (SSRF-checked per hop) and returns
+ * the final URL. Used to turn aggregator links (news.google.com)
+ * into the real publisher URL so source chips show the actual site
+ * and the model cites real addresses. Best-effort: any failure
+ * returns the original URL.
+ */
+export async function resolveRedirectUrl(url: string): Promise<string> {
+  let current = url;
+  try {
+    for (let hop = 0; hop < 4; hop += 1) {
+      const parsed = new URL(current);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return url;
+      await assertPublicHost(parsed.hostname);
+      const response = await fetch(current, {
+        headers: { "User-Agent": BROWSER_UA },
+        redirect: "manual",
+        signal: AbortSignal.timeout(4000),
+        cache: "no-store",
+      });
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        if (!location) return current;
+        current = new URL(location, current).toString();
+        continue;
+      }
+      return current;
+    }
+    return current;
+  } catch {
+    return url;
+  }
+}
+
 export async function fetchPageText(
   url: string,
   maxChars = 4000,
@@ -595,15 +647,43 @@ export async function buildWebContext(options: {
     Promise.all(urls.map(async (url) => ({ url, text: await fetchPageText(url) }))),
   ]);
 
-  const results = outcome.results;
+  let results = outcome.results;
   if (results.length) {
+    // Resolve aggregator redirect links (news.google.com) to the
+    // real publisher URLs — parallel and best-effort — then dedupe
+    // again, since two aggregator links can land on one article.
+    const resolved = await Promise.all(
+      results.map(async (result) => {
+        try {
+          if (new URL(result.url).hostname.endsWith("news.google.com")) {
+            return { ...result, url: await resolveRedirectUrl(result.url) };
+          }
+        } catch {
+          // Keep the original URL.
+        }
+        return result;
+      }),
+    );
+    const seenResolved = new Set<string>();
+    results = resolved.filter((result) => {
+      if (seenResolved.has(result.url)) return false;
+      seenResolved.add(result.url);
+      return true;
+    });
+
     const lines = results.map((result, index) => {
       sources.push({ title: result.title, url: result.url });
       return `[${index + 1}] ${result.title}\n${result.url}\n${result.snippet}`;
     });
     sections.push(`WEB SEARCH RESULTS (retrieved just now):\n${lines.join("\n\n")}`);
 
-    if (research) {
+    // Read the top results in full when the ask is research-style
+    // OR the snippets are headline-thin (news feeds return little
+    // more than titles; a model given only headlines hedges).
+    const averageSnippet =
+      results.reduce((sum, result) => sum + result.snippet.length, 0) /
+      results.length;
+    if (research || averageSnippet < 140) {
       const deep = await Promise.all(
         results
           .slice(0, 2)

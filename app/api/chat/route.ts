@@ -629,11 +629,12 @@ export async function POST(request: NextRequest) {
           })
           .catch(() => undefined);
         messagesBeforeWeb = [...prepared.messages];
-        // The web block goes immediately BEFORE the final user
-        // message, not up with the system prompts: models attend to
-        // recent context most, and an early block was being ignored
-        // in favor of the model's trained "I can't browse" prior.
-        const insertAt = Math.max(1, prepared.messages.length - 1);
+        // The web block rides with the system prompts at the top:
+        // some free-model providers reject a system message in the
+        // middle of the conversation, and the top placement is the
+        // one verified working in production. The block's own
+        // TOOL RESULT framing carries the anti-refusal weight.
+        const insertAt = instructions ? 2 : 1;
         if (web.context) {
           prepared.messages.splice(insertAt, 0, {
             role: "system",
@@ -803,12 +804,32 @@ export async function POST(request: NextRequest) {
         acquireError = error;
       }
     }
+    // Model failures are logged to chatErrors with the upstream
+    // status and error body, so a failure the user reports can be
+    // diagnosed from data instead of guessed at (best-effort).
+    const logChatError = (status: number | null, body: string | null) => {
+      void db
+        .collection("chatErrors")
+        .add({
+          uid: auth.uid,
+          chatId,
+          surface: "chat",
+          status,
+          model: effectiveModel,
+          webInjected: webContextInjected,
+          error: body,
+          ts: Date.now(),
+          createdAt: Timestamp.now(),
+        })
+        .catch(() => undefined);
+    };
     if (acquireError !== null) {
       const error = acquireError;
       if (request.signal.aborted) {
         throw new ChatRouteError(499, "RESPONSE_STOPPED", "Response stopped.");
       }
       if (error instanceof OpenRouterAttemptsExhausted) {
+        logChatError(error.lastStatus, error.lastErrorBody);
         const busy = error.lastStatus === 429;
         throw new ChatRouteError(
           busy ? 429 : 503,
@@ -822,11 +843,21 @@ export async function POST(request: NextRequest) {
       throw new ChatRouteError(502, "MODEL_UNAVAILABLE", "The free model service is temporarily unavailable.");
     }
     if (!upstream || !upstream.ok) {
-      if (upstream) await upstream.body?.cancel().catch(() => undefined);
+      let errorBody: string | null = null;
+      if (upstream) {
+        errorBody = await upstream
+          .text()
+          .then((text) => text.slice(0, 500))
+          .catch(() => null);
+        console.error(
+          `Chat model request failed: status=${upstream.status} body=${errorBody ?? ""}`,
+        );
+      }
+      logChatError(upstream?.status ?? null, errorBody);
       throw new ChatRouteError(
         502,
         "MODEL_REQUEST_FAILED",
-        "The model couldn’t process this request. Try again or remove an attachment.",
+        "The model couldn’t process this request. Please try again — if it keeps happening, try a different model or start a new chat.",
       );
     }
     if (!upstream.body) {

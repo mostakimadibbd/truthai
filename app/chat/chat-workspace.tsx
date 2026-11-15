@@ -1505,9 +1505,14 @@ export default function ChatWorkspace() {
       } else {
         setDraft(content);
         setNotice(
-          sendError instanceof Error
-            ? sendError.message
-            : "The assistant couldn’t respond. Please try again.",
+          sendError instanceof Error &&
+            /load failed|failed to fetch|networkerror|network request failed/i.test(
+              sendError.message,
+            )
+            ? "Connection problem — the request didn’t complete. Check your connection and tap send again; your message is back in the box."
+            : sendError instanceof Error
+              ? sendError.message
+              : "The assistant couldn’t respond. Please try again.",
         );
       }
     } finally {
@@ -2206,12 +2211,23 @@ export default function ChatWorkspace() {
                             href={source.url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            title={source.url}
+                            title={source.title}
                           >
                             <span className="chat-source-index">{index + 1}</span>
                             {(() => {
                               try {
-                                return new URL(source.url).hostname.replace(/^www\./, "");
+                                const host = new URL(source.url).hostname.replace(/^www\./, "");
+                                // Aggregator links: show the publisher
+                                // from the "Headline - Publisher" title
+                                // instead of a wall of identical domains.
+                                if (host === "news.google.com") {
+                                  const parts = source.title.split(" - ");
+                                  if (parts.length > 1) {
+                                    return parts[parts.length - 1].slice(0, 40);
+                                  }
+                                  return "Google News";
+                                }
+                                return host;
                               } catch {
                                 return source.title.slice(0, 40);
                               }

@@ -53,6 +53,14 @@ type SearchEntry = {
   ts: number;
 };
 
+type ErrorEntry = {
+  status: number | null;
+  model: string | null;
+  webInjected: boolean;
+  error: string | null;
+  ts: number;
+};
+
 type AdminOverview = {
   today: string;
   totals: Totals;
@@ -61,6 +69,7 @@ type AdminOverview = {
   topUsers: TopUser[];
   recentEvents: LedgerEntry[];
   recentSearches?: SearchEntry[];
+  recentErrors?: ErrorEntry[];
 };
 
 function formatUsd(amount: number): string {
@@ -269,6 +278,36 @@ export default function AdminShell() {
                 </div>
               )}
             </div>
+
+            {data.recentErrors && data.recentErrors.length > 0 && (
+              <div className="dev-card">
+                <span className="settings-label">Model failures — latest</span>
+                <p className="settings-hint">
+                  Requests the model chain rejected, with the upstream status and
+                  the provider&apos;s own error text — the first place to look when
+                  a user reports &quot;the model couldn&apos;t process this request&quot;.
+                </p>
+                <ul className="settings-session-list">
+                  {data.recentErrors.map((entry, index) => (
+                    <li key={`${entry.ts}-${index}`}>
+                      <span className="settings-session-device">
+                        {entry.model ?? "unknown model"}
+                        <span className="settings-badge settings-badge-warn">
+                          {entry.status ?? "network"}
+                        </span>
+                        {entry.webInjected && (
+                          <span className="settings-badge">with web results</span>
+                        )}
+                      </span>
+                      <span className="settings-file-meta">
+                        {entry.error ?? "No error body returned."}
+                        {" · "}{formatTime(entry.ts)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
             <div className="dev-card">
               <span className="settings-label">Web searches — latest activity</span>
