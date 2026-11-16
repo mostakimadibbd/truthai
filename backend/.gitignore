@@ -1,0 +1,4 @@
+app/libwatermark.so
+__pycache__/
+.venv/
+*.pyc

@@ -1,0 +1,133 @@
+"""Request authentication — the same rules as the Next.js app.
+
+A job submission must carry ALL of:
+  1. the shared service token (proves the caller is our own Next.js
+     proxy, not the public internet) — compared in constant time;
+  2. the user's `__Host-xyro_session` cookie: an HS256 JWT signed
+     with SESSION_SECRET whose subject is the uid and whose `sid`
+     claim is not revoked in Upstash Redis (`revoked:{sid}`);
+  3. a Firebase ID token in the Authorization header whose uid
+     matches the session's uid.
+
+The service never trusts the proxy's word for who the user is; it
+re-verifies the user's own credentials on every call.
+"""
+from __future__ import annotations
+
+import hashlib
+import hmac
+
+import httpx
+import jwt
+
+from .config import settings
+
+SESSION_COOKIE_NAME = "__Host-xyro_session"
+
+
+def check_service_token(provided: str | None) -> bool:
+    if not settings.service_token or not provided:
+        return False
+    return hmac.compare_digest(provided, settings.service_token)
+
+
+async def _session_revoked(sid: str) -> bool:
+    if not (settings.upstash_rest_url and settings.upstash_rest_token):
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            response = await client.post(
+                f"{settings.upstash_rest_url}/get/{_revocation_key(sid)}",
+                headers={"Authorization": f"Bearer {settings.upstash_rest_token}"},
+            )
+            response.raise_for_status()
+            return response.json().get("result") is not None
+    except Exception:
+        # Revocation store unreachable: mirror the TS behaviour of
+        # the session layer — the JWT's own expiry still bounds the
+        # session, and other guards remain in force.
+        return False
+
+
+def _revocation_key(sid: str) -> str:
+    return f"revoked:{sid}"
+
+
+def verify_session_cookie(cookie_value: str | None) -> dict | None:
+    if not cookie_value or not settings.session_secret:
+        return None
+    try:
+        claims = jwt.decode(
+            cookie_value,
+            settings.session_secret,
+            algorithms=["HS256"],
+            options={"require": ["exp", "sub"]},
+        )
+    except jwt.PyJWTError:
+        return None
+    uid = claims.get("sub")
+    sid = claims.get("sid")
+    if not isinstance(uid, str) or not isinstance(sid, str):
+        return None
+    # The TS session layer also enforces an absolute expiry
+    # (absExp, ms epoch) beyond the sliding exp claim.
+    import time
+
+    abs_exp = claims.get("absExp")
+    if isinstance(abs_exp, (int, float)) and time.time() * 1000 > abs_exp:
+        return None
+    return {"uid": uid, "sid": sid}
+
+
+def verify_id_token(id_token: str | None) -> str | None:
+    if not id_token:
+        return None
+    try:
+        from firebase_admin import auth as firebase_auth
+
+        from .firebase import firebase_app
+
+        firebase_app()
+        decoded = firebase_auth.verify_id_token(id_token)
+        uid = decoded.get("uid")
+        return uid if isinstance(uid, str) else None
+    except Exception:
+        return None
+
+
+async def authenticate(
+    service_token: str | None,
+    cookie_header: str | None,
+    authorization: str | None,
+) -> dict | None:
+    """Return {"uid", "sid"} when every check passes, else None."""
+    if not check_service_token(service_token):
+        return None
+    session_cookie = _cookie_value(cookie_header, SESSION_COOKIE_NAME)
+    session = verify_session_cookie(session_cookie)
+    if session is None:
+        return None
+    if await _session_revoked(session["sid"]):
+        return None
+    bearer = None
+    if authorization and authorization.startswith("Bearer "):
+        bearer = authorization[len("Bearer "):].strip()
+    token_uid = verify_id_token(bearer)
+    if token_uid is None or token_uid != session["uid"]:
+        return None
+    return session
+
+
+def _cookie_value(cookie_header: str | None, name: str) -> str | None:
+    if not cookie_header:
+        return None
+    for part in cookie_header.split(";"):
+        if "=" in part:
+            key, value = part.split("=", 1)
+            if key.strip() == name:
+                return value.strip()
+    return None
+
+
+def hash_key_part(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()[:32]

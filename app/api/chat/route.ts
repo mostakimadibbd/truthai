@@ -10,6 +10,10 @@ import {
   getFirebaseAdminFirestore,
 } from "@/lib/server/firebase-admin";
 import { guardMutationHeaders } from "@/lib/server/auth-guard";
+import {
+  backendDelegationEnabled,
+  tryDelegateChatTurn,
+} from "@/lib/server/backend-delegate";
 import { getBudgetStatus, recordBudget } from "@/lib/server/budget";
 import { authenticateVerifiedUser } from "@/lib/server/request-auth";
 import { checkRateLimit } from "@/lib/server/rate-limit";
@@ -349,6 +353,34 @@ export async function POST(request: NextRequest) {
       "You’re in a short queue — today’s capacity is nearly full. Your message will be retried shortly.",
       { "Retry-After": "30" },
     );
+  }
+
+  // Optional Python backend delegation: plain-text turns (no
+  // attachments, no web search — toggle, intent or links — and no
+  // regeneration) may run on the persistent backend service,
+  // where the turn survives the user closing the tab. All
+  // pre-flight gates above (auth, model, rate limit, budget)
+  // apply identically; the service re-verifies the session and
+  // re-checks the model itself. Any delegation failure falls back
+  // to local execution below.
+  if (
+    backendDelegationEnabled() &&
+    !regenerate &&
+    attachmentIds.length === 0 &&
+    body.webSearch !== true &&
+    !hasSearchIntent(content) &&
+    extractUrls(content).length === 0
+  ) {
+    const delegated = await tryDelegateChatTurn({
+      request,
+      chatId,
+      responseId,
+      userMessageId,
+      assistantMessageId,
+      content,
+      model: requestedModel,
+    });
+    if (delegated) return delegated;
   }
 
   let db: ReturnType<typeof getFirebaseAdminFirestore>;
