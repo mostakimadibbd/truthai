@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authErrorResponse } from "@/lib/server/auth-guard";
-import { authenticateSessionUser } from "@/lib/server/api-auth";
-import { isAdminEmail } from "@/lib/server/admin";
+import { authenticateAdmin, getBackendStatus } from "@/lib/server/admin";
 import {
   analyticsDayKey,
   getAnalyticsDayTotals,
@@ -23,28 +22,21 @@ function json(data: unknown) {
 
 // GET: the administrator console's data — today's platform totals,
 // the last 60 minutes of token flow, today's per-model split, the
-// top users by tokens (emails resolved for display), and the most
-// recent entries of the token ledger. Gated on the signed-in
-// account's email being on the admin allowlist; everyone else gets
-// a plain 403 and no data.
+// top users by tokens (emails resolved for display), the most
+// recent entries of the token ledger, and the backend service's
+// status (state only — its address is a server secret and is
+// never returned). Gated on the signed-in account being an
+// administrator (database flag or bootstrap allowlist); everyone
+// else gets a plain 403 and no data.
 export async function GET(request: NextRequest) {
-  const auth = await authenticateSessionUser(request);
-  if (!auth.ok) {
-    return authErrorResponse(auth.status, auth.code, auth.message);
+  const admin = await authenticateAdmin(request);
+  if (!admin.ok) {
+    return authErrorResponse(admin.status, admin.code, admin.message);
   }
   try {
     const adminAuth = getFirebaseAdminAuth();
-    const user = await adminAuth.getUser(auth.uid);
-    if (!isAdminEmail(user.email)) {
-      return authErrorResponse(
-        403,
-        "ADMIN_ONLY",
-        "This area is available to Xyro AI administrators only.",
-      );
-    }
-
     const today = analyticsDayKey();
-    const [totals, minutes, models, topUsers, recentEvents, recentSearches, recentErrors] =
+    const [totals, minutes, models, topUsers, recentEvents, recentSearches, recentErrors, backend] =
       await Promise.all([
         getAnalyticsDayTotals(today),
         getAnalyticsMinuteSeries(60),
@@ -93,6 +85,7 @@ export async function GET(request: NextRequest) {
             }),
           )
           .catch(() => []),
+        getBackendStatus(),
       ]);
 
     // Resolve display emails for the top users and the ledger's
@@ -115,6 +108,7 @@ export async function GET(request: NextRequest) {
 
     return json({
       today,
+      backend,
       totals,
       minutes,
       models,

@@ -560,3 +560,30 @@ apply to Google sign-ins unchanged.
   terms check in /api/auth/session applies only when the account is
   new AND has no profile yet, on every action including
   session_refresh — closing the earlier silent-renewal bypass.
+
+## Admin control plane (2026-11-16, later)
+
+- Admin authority is database-driven: the `admin` field on the
+  user's own profile document (users/{uid}) is the source of
+  truth, checked server-side on every admin request
+  (lib/server/admin.ts: authenticateAdmin → isAdminUser). The
+  email allowlist (ADMIN_EMAILS + the bootstrap owner email)
+  remains only as a recovery path so the owner can never be
+  locked out before the first flag exists.
+- Self-promotion is impossible by construction: Firestore rules
+  deny ALL client writes to profile documents, so the admin flag
+  can be written only by the server (an existing admin via
+  /api/admin/users, or the project owner in the Firebase
+  Console).
+- Admin controls: promote/demote (writes the flag),
+  disable/enable (Firebase Auth disabled state). An admin cannot
+  demote or disable their own account. Every action is recorded
+  in the adminActions audit collection (rules: no client
+  access) and the route is rate-limited per admin.
+- The Python backend's address (BACKEND_URL) and its service
+  token are server-only environment values. They are never sent
+  to a browser: the admin console receives only the service's
+  STATE (configured / reachable / mode / integrations-ok) from a
+  server-side probe. The backend's own /health endpoint likewise
+  returns only {ok} publicly; the detailed integration view
+  requires the service token.

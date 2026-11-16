@@ -39,7 +39,16 @@ def _error(status: int, code: str, message: str) -> JSONResponse:
 
 
 @app.get("/health")
-async def health() -> dict:
+async def health(
+    x_service_token: str | None = Header(default=None),
+) -> dict:
+    if not auth.check_service_token(x_service_token):
+        # Public view: enough for an uptime check, nothing about
+        # which integrations are configured or how the service
+        # runs. The detailed view requires the service token —
+        # this service's address and configuration are not public
+        # information, and it is reachable only by the main app.
+        return {"ok": True, "service": "xyro-backend"}
     checks = settings.health()
     return {
         "ok": True,

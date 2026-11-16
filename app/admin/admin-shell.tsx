@@ -61,8 +61,31 @@ type ErrorEntry = {
   ts: number;
 };
 
+type BackendStatus = {
+  configured: boolean;
+  reachable: boolean;
+  executionMode: string | null;
+  watermarkEngine: string | null;
+  integrationsOk: boolean | null;
+};
+
+type AdminUserRow = {
+  uid: string;
+  email: string | null;
+  displayName: string | null;
+  emailVerified: boolean;
+  disabled: boolean;
+  admin: boolean;
+  createdAt: number | null;
+  lastSignInAt: number | null;
+  requestsToday: number;
+  totalTokensToday: number;
+  costUsdToday: number;
+};
+
 type AdminOverview = {
   today: string;
+  backend?: BackendStatus;
   totals: Totals;
   minutes: MinutePoint[];
   models: ModelTotal[];
@@ -95,6 +118,14 @@ export default function AdminShell() {
   const [state, setState] = useState<"loading" | "ready" | "forbidden" | "error">("loading");
   const [errorMessage, setErrorMessage] = useState("");
   const [lastLoadedAt, setLastLoadedAt] = useState<number | null>(null);
+  const [users, setUsers] = useState<AdminUserRow[]>([]);
+  const [actingUid, setActingUid] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<{
+    uid: string;
+    action: "promote" | "demote" | "disable" | "enable";
+    label: string;
+  } | null>(null);
+  const [actionError, setActionError] = useState("");
 
   useEffect(() => {
     const auth = tryGetFirebaseAuth();
@@ -133,9 +164,46 @@ export default function AdminShell() {
     }
   }, [user]);
 
+  const loadUsers = useCallback(async () => {
+    if (!user) return;
+    try {
+      const response = await settingsApi(user, "/api/admin/users", { method: "GET" });
+      if (!response.ok) return;
+      const payload = (await response.json()) as { users: AdminUserRow[] };
+      setUsers(payload.users);
+    } catch {
+      // The directory is best-effort beside the overview.
+    }
+  }, [user]);
+
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (state === "ready") void loadUsers();
+  }, [loadUsers, state]);
+
+  const runAction = useCallback(async () => {
+    if (!user || !pendingAction) return;
+    setActingUid(pendingAction.uid);
+    setActionError("");
+    try {
+      const response = await settingsApi(user, "/api/admin/users", {
+        method: "PATCH",
+        body: { uid: pendingAction.uid, action: pendingAction.action },
+      });
+      if (!response.ok) {
+        throw new Error(await getApiErrorMessage(response, "That action couldn’t be completed."));
+      }
+      setPendingAction(null);
+      await loadUsers();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "That action couldn’t be completed.");
+    } finally {
+      setActingUid(null);
+    }
+  }, [user, pendingAction, loadUsers]);
 
   useEffect(() => {
     if (state !== "ready") return;
@@ -166,7 +234,14 @@ export default function AdminShell() {
             {lastLoadedAt && (
               <span className="settings-hint">Updated {formatTime(lastLoadedAt)} · auto-refresh 30s</span>
             )}
-            <button type="button" className="button button-outline" onClick={() => void load()}>
+            <button
+              type="button"
+              className="button button-outline"
+              onClick={() => {
+                void load();
+                void loadUsers();
+              }}
+            >
               Refresh
             </button>
             <Link className="button button-outline" href="/settings/profile">Settings</Link>
@@ -179,7 +254,8 @@ export default function AdminShell() {
             <h3>Administrator access only</h3>
             <p className="settings-hint">
               This console is restricted to Xyro AI administrators. Your account
-              isn’t on the admin allowlist, so no platform data is shown.
+              isn’t marked as an admin in the database, so no platform data is
+              shown.
             </p>
           </div>
         )}
@@ -214,6 +290,53 @@ export default function AdminShell() {
                 <span className="dev-stat-sub">{100 - promptShare}% completion tokens</span>
               </div>
             </div>
+
+            {data.backend && (
+              <div className="dev-card">
+                <span className="settings-label">Backend service</span>
+                <div className="dev-defs">
+                  <div>
+                    <span>Status</span>
+                    <strong>
+                      {!data.backend.configured
+                        ? "Not connected — chats run on the built-in path"
+                        : data.backend.reachable
+                          ? "Online"
+                          : "Configured but unreachable — chats fall back to the built-in path"}
+                    </strong>
+                  </div>
+                  {data.backend.configured && data.backend.reachable && (
+                    <>
+                      <div>
+                        <span>Mode</span>
+                        <strong>
+                          {data.backend.executionMode === "sync"
+                            ? "Serverless (synchronous)"
+                            : data.backend.executionMode === "async"
+                              ? "Persistent (durable jobs)"
+                              : "Unknown"}
+                          {data.backend.watermarkEngine
+                            ? ` · watermark engine: ${data.backend.watermarkEngine}`
+                            : ""}
+                        </strong>
+                      </div>
+                      <div>
+                        <span>Integrations</span>
+                        <strong>
+                          {data.backend.integrationsOk
+                            ? "All connected"
+                            : "Some integrations are not configured — check the service"}
+                        </strong>
+                      </div>
+                    </>
+                  )}
+                </div>
+                <p className="settings-hint">
+                  The backend&apos;s address is a server secret: it is never shown
+                  here or sent to any browser — only its state is.
+                </p>
+              </div>
+            )}
 
             <div className="dev-card">
               <span className="settings-label">Token flow — last 60 minutes (UTC {data.today})</span>
@@ -276,6 +399,143 @@ export default function AdminShell() {
                     </div>
                   ))}
                 </div>
+              )}
+            </div>
+
+            <div className="dev-card">
+              <span className="settings-label">Users — access & control</span>
+              <p className="settings-hint">
+                Every account, its access state and today&apos;s token use. Admin
+                power comes from the <code>admin</code> field on the user&apos;s
+                database record — only an admin can change it, and every change
+                is written to the audit trail. You can&apos;t demote or disable
+                your own account.
+              </p>
+              {actionError && <div className="auth-alert" role="alert">{actionError}</div>}
+              {pendingAction && (
+                <div className="settings-inline" role="group" aria-label="Confirm action">
+                  <span className="settings-hint">{pendingAction.label}</span>
+                  <button
+                    type="button"
+                    className="button button-primary"
+                    disabled={actingUid !== null}
+                    onClick={() => void runAction()}
+                  >
+                    Confirm
+                  </button>
+                  <button
+                    type="button"
+                    className="button button-outline"
+                    disabled={actingUid !== null}
+                    onClick={() => setPendingAction(null)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+              {users.length === 0 && (
+                <p className="settings-hint">No accounts found.</p>
+              )}
+              {users.length > 0 && (
+                <ul className="settings-session-list">
+                  {users.map((entry) => {
+                    const isSelf = user?.uid === entry.uid;
+                    return (
+                      <li key={entry.uid}>
+                        <span className="settings-session-device">
+                          {entry.displayName || entry.email || entry.uid}
+                          {entry.admin && <span className="settings-badge">Admin</span>}
+                          {isSelf && <span className="settings-badge">You</span>}
+                          {entry.disabled && (
+                            <span className="settings-badge settings-badge-warn">Disabled</span>
+                          )}
+                          {!entry.emailVerified && (
+                            <span className="settings-badge">Unverified</span>
+                          )}
+                        </span>
+                        <span className="settings-file-meta">
+                          {entry.email ?? entry.uid}
+                          {" · "}
+                          {entry.totalTokensToday.toLocaleString("en-US")} tokens today
+                          {" · "}{entry.requestsToday} requests
+                          {entry.createdAt
+                            ? ` · joined ${new Date(entry.createdAt).toLocaleDateString("en-GB")}`
+                            : ""}
+                          {entry.lastSignInAt
+                            ? ` · last sign-in ${new Date(entry.lastSignInAt).toLocaleDateString("en-GB")}`
+                            : ""}
+                        </span>
+                        <span className="settings-inline">
+                          {!entry.admin ? (
+                            <button
+                              type="button"
+                              className="button button-outline"
+                              disabled={actingUid !== null}
+                              onClick={() =>
+                                setPendingAction({
+                                  uid: entry.uid,
+                                  action: "promote",
+                                  label: `Make ${entry.email ?? entry.uid} an admin? They will get full control of the app.`,
+                                })
+                              }
+                            >
+                              Make admin
+                            </button>
+                          ) : (
+                            !isSelf && (
+                              <button
+                                type="button"
+                                className="button button-outline"
+                                disabled={actingUid !== null}
+                                onClick={() =>
+                                  setPendingAction({
+                                    uid: entry.uid,
+                                    action: "demote",
+                                    label: `Remove admin power from ${entry.email ?? entry.uid}?`,
+                                  })
+                                }
+                              >
+                                Remove admin
+                              </button>
+                            )
+                          )}
+                          {!isSelf &&
+                            (!entry.disabled ? (
+                              <button
+                                type="button"
+                                className="button button-outline"
+                                disabled={actingUid !== null}
+                                onClick={() =>
+                                  setPendingAction({
+                                    uid: entry.uid,
+                                    action: "disable",
+                                    label: `Disable ${entry.email ?? entry.uid}? They will no longer be able to sign in.`,
+                                  })
+                                }
+                              >
+                                Disable
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                className="button button-outline"
+                                disabled={actingUid !== null}
+                                onClick={() =>
+                                  setPendingAction({
+                                    uid: entry.uid,
+                                    action: "enable",
+                                    label: `Re-enable ${entry.email ?? entry.uid} so they can sign in again?`,
+                                  })
+                                }
+                              >
+                                Enable
+                              </button>
+                            ))}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
               )}
             </div>
 

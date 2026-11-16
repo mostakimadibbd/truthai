@@ -179,6 +179,11 @@ service cloud.firestore {
     match /chatJobs/{jobId} {
       allow read, write: if false;
     }
+    // Admin audit trail (promote/demote/disable/enable actions,
+    // written by /api/admin/users). Server-only; no client access.
+    match /adminActions/{actionId} {
+      allow read, write: if false;
+    }
     match /analytics_minutes/{minute} {
       allow read, write: if false;
     }
