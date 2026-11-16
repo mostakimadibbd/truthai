@@ -41,14 +41,7 @@ import {
 
 import { SETTINGS_TABS, type SettingsTabId } from "@/lib/settings-tabs";
 
-type ProfileView = {
-  displayName: string;
-  photoURL: string;
-  email: string;
-  /** The database admin flag on the user's own profile document.
-   * Visibility only — the console re-checks it server-side. */
-  admin: boolean;
-};
+type ProfileView = { displayName: string; photoURL: string; email: string };
 
 const APP_VERSION = "0.1.0";
 
@@ -121,7 +114,6 @@ export default function SettingsShell({ tab }: { tab: SettingsTabId }) {
               typeof data?.displayName === "string" ? data.displayName : "",
             photoURL: typeof data?.photoURL === "string" ? data.photoURL : "",
             email: typeof data?.email === "string" ? data.email : (currentUser.email ?? ""),
-            admin: data?.admin === true,
           });
         },
         () => setAuthState("error"),
@@ -204,13 +196,6 @@ export default function SettingsShell({ tab }: { tab: SettingsTabId }) {
               {entry.label}
             </Link>
           ))}
-          {/* Visibility only — the console itself is gated
-              server-side on the database admin flag (with the
-              bootstrap allowlist as recovery). */}
-          {(profile?.admin === true ||
-            user?.email?.toLowerCase() === "mostakimbdyt@gmail.com") && (
-            <Link href="/admin">Admin console</Link>
-          )}
         </nav>
 
         <div className="settings-sections">

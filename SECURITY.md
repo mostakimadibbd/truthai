@@ -561,29 +561,37 @@ apply to Google sign-ins unchanged.
   new AND has no profile yet, on every action including
   session_refresh — closing the earlier silent-renewal bypass.
 
-## Admin control plane (2026-11-16, later)
+## Admin control plane (2026-11-17) — separate panel, backend-enforced
 
-- Admin authority is database-driven: the `admin` field on the
-  user's own profile document (users/{uid}) is the source of
-  truth, checked server-side on every admin request
-  (lib/server/admin.ts: authenticateAdmin → isAdminUser). The
-  email allowlist (ADMIN_EMAILS + the bootstrap owner email)
-  remains only as a recovery path so the owner can never be
-  locked out before the first flag exists.
+- There is NO admin surface in the public app: the former /admin
+  page and /api/admin/* routes are 404 stubs, Settings carries
+  no admin link, and nothing in the product's UI reveals that a
+  panel exists. Structural tests (tests/admin.test.mjs) pin
+  this.
+- Administration lives in a separate app (admin-panel/ in this
+  repo, deployed as its own project, linked from nowhere) whose
+  server proxies to the Python backend's admin API
+  (/v1/admin/*). The panel holds no data of its own.
+- The backend admin API requires THREE credentials on every
+  call: the shared service token, a dedicated ADMIN_API_SECRET
+  that exists only on the backend and the panel (so the main
+  app's credentials alone can never open an admin endpoint),
+  and the signed-in administrator's Firebase ID token, verified
+  server-side. Authorization is the database flag
+  users/{uid}.admin === true, checked on the backend; the email
+  allowlist remains only as the owner's bootstrap/recovery
+  path. Failed attempts are throttled per client IP.
 - Self-promotion is impossible by construction: Firestore rules
-  deny ALL client writes to profile documents, so the admin flag
-  can be written only by the server (an existing admin via
-  /api/admin/users, or the project owner in the Firebase
-  Console).
-- Admin controls: promote/demote (writes the flag),
-  disable/enable (Firebase Auth disabled state). An admin cannot
-  demote or disable their own account. Every action is recorded
-  in the adminActions audit collection (rules: no client
-  access) and the route is rate-limited per admin.
-- The Python backend's address (BACKEND_URL) and its service
-  token are server-only environment values. They are never sent
-  to a browser: the admin console receives only the service's
-  STATE (configured / reachable / mode / integrations-ok) from a
-  server-side probe. The backend's own /health endpoint likewise
-  returns only {ok} publicly; the detailed integration view
-  requires the service token.
+  deny ALL client writes to profile documents, so the admin
+  flag can be written only by a server (an existing admin via
+  the panel, or the project owner in the Firebase Console).
+- Admin controls: promote/demote (writes the flag) and
+  disable/enable (Firebase Auth state). An admin cannot demote
+  or disable their own account. Every action is recorded in
+  the adminActions audit collection (rules: no client access).
+- BACKEND_URL and both secrets are server-only environment
+  values on every deployment; the backend's address is never
+  sent to any browser (the panel's own API routes are the only
+  callers, server-to-server over HTTPS). The backend /health
+  endpoint returns only {ok} publicly; details require the
+  service token.

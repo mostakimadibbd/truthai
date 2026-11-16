@@ -39,6 +39,11 @@ class Settings:
 
     # Backend-only
     service_token: str = os.environ.get("BACKEND_SERVICE_TOKEN", "")
+    # Admin API (used only by the separate admin panel): a second,
+    # independent secret so the main app's service token alone can
+    # never open the admin endpoints. Fail-closed when unset.
+    admin_api_secret: str = os.environ.get("ADMIN_API_SECRET", "")
+    admin_emails: str = os.environ.get("ADMIN_EMAILS", "")
     # Execution mode: "async" (default) returns 202 and runs the
     # job in-process — the mode that survives anything, on a
     # persistent host. "sync" executes the job inside the submit

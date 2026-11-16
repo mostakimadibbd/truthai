@@ -1,35 +1,28 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isAdminEmail, isAdminRecord } from "../lib/server/admin.ts";
+import { readFileSync } from "node:fs";
 
-test("database admin flag is the source of truth", () => {
-  assert.equal(isAdminRecord({ admin: true }), true);
-  assert.equal(isAdminRecord({ admin: false }), false);
-  assert.equal(isAdminRecord({}), false);
-  assert.equal(isAdminRecord({ admin: "true" }), false); // string is not enough
-  assert.equal(isAdminRecord({ admin: 1 }), false);
-  assert.equal(isAdminRecord(null), false);
-  assert.equal(isAdminRecord(undefined), false);
+// The main app must carry NO admin surface: administration lives
+// in the separate admin-panel app + the backend service's admin
+// API. These structural checks keep it that way.
+test("the in-app admin page is a 404 stub", () => {
+  const page = readFileSync(new URL("../app/admin/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /notFound\(\)/);
+  assert.doesNotMatch(page, /AdminShell/);
 });
 
-test("bootstrap allowlist still recognises the owner email", () => {
-  assert.equal(isAdminEmail("mostakimbdyt@gmail.com"), true);
-  assert.equal(isAdminEmail("MostakimBdyt@Gmail.com"), true); // case-insensitive
-  assert.equal(isAdminEmail("someone-else@example.com"), false);
-  assert.equal(isAdminEmail(null), false);
-  assert.equal(isAdminEmail(undefined), false);
-  assert.equal(isAdminEmail(""), false);
-});
-
-test("ADMIN_EMAILS env extends the allowlist", () => {
-  const previous = process.env.ADMIN_EMAILS;
-  process.env.ADMIN_EMAILS = "Second@Example.com , third@example.com";
-  try {
-    assert.equal(isAdminEmail("second@example.com"), true);
-    assert.equal(isAdminEmail("third@example.com"), true);
-    assert.equal(isAdminEmail("fourth@example.com"), false);
-  } finally {
-    if (previous === undefined) delete process.env.ADMIN_EMAILS;
-    else process.env.ADMIN_EMAILS = previous;
+test("the in-app admin APIs are 404 stubs", () => {
+  for (const path of ["../app/api/admin/overview/route.ts", "../app/api/admin/users/route.ts"]) {
+    const route = readFileSync(new URL(path, import.meta.url), "utf8");
+    assert.match(route, /404/);
+    assert.doesNotMatch(route, /authenticateAdmin|getAnalytics|listUsers/);
   }
+});
+
+test("settings contains no admin link", () => {
+  const shell = readFileSync(
+    new URL("../app/settings/settings-shell.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(shell, /\/admin/);
 });

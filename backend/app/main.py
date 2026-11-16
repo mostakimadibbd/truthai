@@ -25,8 +25,9 @@ import io
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
-from . import auth, jobs, models as model_lib, watermark
+from . import admin, auth, jobs, models as model_lib, watermark
 from .config import settings
+from .firebase import firestore_client
 
 app = FastAPI(title="Xyro AI Backend", docs_url=None, redoc_url=None)
 
@@ -152,6 +153,74 @@ async def chat_job_status(job_id: str, request: Request):
     if found is None:
         return _error(404, "JOB_NOT_FOUND", "This job no longer exists.")
     return {"success": True, **found}
+
+
+async def _admin_gate(request: Request):
+    """Shared gate for the admin API: service token + admin
+    secret + a verified administrator ID token (app/admin.py).
+    Returns (uid, email) or a JSONResponse error."""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    client_ip = (
+        forwarded.split(",")[0].strip()
+        or (request.client.host if request.client else "unknown")
+    )
+    try:
+        return await admin.authenticate_admin(
+            request.headers.get("x-service-token"),
+            request.headers.get("x-admin-secret"),
+            request.headers.get("authorization"),
+            client_ip,
+            firestore_client(),
+        )
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+
+
+@app.get("/v1/admin/overview")
+async def admin_overview(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    try:
+        return {"success": True, **admin.get_overview(firestore_client())}
+    except Exception:
+        return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
+
+
+@app.get("/v1/admin/users")
+async def admin_users(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    try:
+        return {"success": True, **admin.get_users(firestore_client())}
+    except Exception:
+        return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
+
+
+@app.patch("/v1/admin/users")
+async def admin_users_patch(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    actor_uid, _email = gate
+    try:
+        body = await request.json()
+    except Exception:
+        return _error(400, "INVALID_JSON", "Send a JSON body.")
+    if not isinstance(body, dict):
+        return _error(400, "INVALID_BODY", "Send a JSON object.")
+    target = body.get("uid")
+    action = body.get("action")
+    if not isinstance(target, str) or not isinstance(action, str):
+        return _error(400, "INVALID_ACTION", "A target user and action are required.")
+    try:
+        result = admin.patch_user(firestore_client(), actor_uid, target, action)
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+    except Exception:
+        return _error(503, "ACTION_FAILED", "That action couldn’t be completed.")
+    return {"success": True, **result}
 
 
 @app.post("/v1/images/watermark")

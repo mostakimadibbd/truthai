@@ -7,6 +7,7 @@ against in-memory fakes and a stubbed model stream.
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
 import sys
 import time
@@ -200,6 +201,222 @@ async def _lifecycle() -> None:
 
 def test_job_lifecycle():
     asyncio.run(_lifecycle())
+
+
+# --- Admin API (app/admin.py) -------------------------------------
+# Self-contained stubs for the exact Firestore/Auth surface the
+# admin module uses.
+
+class _AdminSnap:
+    def __init__(self, doc_id, data):
+        self.id = doc_id
+        self._data = data
+
+    @property
+    def exists(self):
+        return self._data is not None
+
+    def to_dict(self):
+        return copy.deepcopy(self._data) if self._data else None
+
+
+class _AdminQuery:
+    def __init__(self, docs, filters=None, order=None, limit_n=None):
+        self._docs = docs
+        self._filters = filters or []
+        self._order = order
+        self._limit = limit_n
+
+    def where(self, field, _op, value):
+        return _AdminQuery(
+            self._docs,
+            self._filters + [(field, value)],
+            self._order,
+            self._limit,
+        )
+
+    def order_by(self, field, direction=None):
+        return _AdminQuery(self._docs, self._filters, (field, direction), self._limit)
+
+    def limit(self, n):
+        return _AdminQuery(self._docs, self._filters, self._order, n)
+
+    def get(self):
+        rows = [
+            (doc_id, data)
+            for doc_id, data in self._docs
+            if all(data.get(field) == value for field, value in self._filters)
+        ]
+        if self._order:
+            field, direction = self._order
+            rows.sort(
+                key=lambda row: row[1].get(field) or 0,
+                reverse=(direction == "DESCENDING"),
+            )
+        if self._limit:
+            rows = rows[: self._limit]
+        return [_AdminSnap(doc_id, data) for doc_id, data in rows]
+
+
+class _AdminDoc:
+    def __init__(self, store, collection, doc_id):
+        self._store = store
+        self._collection = collection
+        self._id = doc_id
+
+    def get(self):
+        return _AdminSnap(self._id, self._store.get((self._collection, self._id)))
+
+    def set(self, data, merge=False):
+        key = (self._collection, self._id)
+        if merge and key in self._store:
+            self._store[key] = {**self._store[key], **data}
+        else:
+            self._store[key] = dict(data)
+
+
+class _AdminCollection(_AdminQuery):
+    def __init__(self, store, name):
+        self._store = store
+        self._name = name
+        docs = [
+            (doc_id, data)
+            for (collection, doc_id), data in store.items()
+            if collection == name
+        ]
+        super().__init__(docs)
+
+    def document(self, doc_id):
+        return _AdminDoc(self._store, self._name, doc_id)
+
+    def add(self, data):
+        doc_id = f"auto{len(self._store)}"
+        self._store[(self._name, doc_id)] = dict(data)
+        return None, _AdminDoc(self._store, self._name, doc_id)
+
+
+class _AdminDb:
+    def __init__(self):
+        self.store = {}
+
+    def collection(self, name):
+        return _AdminCollection(self.store, name)
+
+
+class _FakeUserRecord:
+    def __init__(self, uid, email, admin_flag=False):
+        self.uid = uid
+        self.email = email
+        self.display_name = None
+        self.email_verified = True
+        self.disabled = False
+        self._admin_flag = admin_flag
+
+        class _Meta:
+            creation_timestamp = 1700000000000
+            last_sign_in_timestamp = 1700001000000
+
+        self.user_metadata = _Meta()
+
+
+class _FakeAuthModule:
+    def __init__(self, records):
+        self.records = records
+        self.updated = []
+
+    def get_user(self, uid):
+        return self.records[uid]
+
+    def list_users(self, max_results=200):
+        records = self.records
+
+        class _Page:
+            page_token = None
+
+            def iterate_all(self):
+                return iter(list(records.values()))
+
+        return _Page()
+
+    def update_user(self, uid, disabled=None):
+        self.updated.append((uid, disabled))
+        self.records[uid].disabled = bool(disabled)
+
+
+def test_admin_gate_and_actions():
+    from app import admin
+
+    db = _AdminDb()
+    db.store[("users", "boss1")] = {"admin": True, "displayName": "Boss"}
+    db.store[("users", "plain1")] = {"displayName": "Plain"}
+    records = {
+        "boss1": _FakeUserRecord("boss1", "boss@example.com"),
+        "plain1": _FakeUserRecord("plain1", "plain@example.com"),
+    }
+    fake_auth = _FakeAuthModule(records)
+    original_auth = admin.firebase_auth
+    original_verify = admin.verify_id_token
+    original_secret = admin.settings.admin_api_secret
+    original_token = admin.settings.service_token
+    admin.firebase_auth = lambda: fake_auth
+    admin.verify_id_token = lambda token: {"tok-boss": "boss1", "tok-plain": "plain1"}.get(token)
+    admin.settings.admin_api_secret = "test-admin-secret"
+    admin.settings.service_token = "test-service-token"
+    try:
+        async def gate(token, secret, bearer, ip="10.0.0.1"):
+            return await admin.authenticate_admin(token, secret, bearer, ip, db)
+
+        # Wrong service token -> 401.
+        try:
+            asyncio.run(gate("nope", "test-admin-secret", "Bearer tok-boss"))
+            raise AssertionError("bad service token accepted")
+        except admin.AdminAuthError as error:
+            assert error.status == 401
+        # Wrong admin secret -> 401 (the main app's token alone is not enough).
+        try:
+            asyncio.run(gate("test-service-token", "nope", "Bearer tok-boss"))
+            raise AssertionError("bad admin secret accepted")
+        except admin.AdminAuthError as error:
+            assert error.status == 401
+        # Non-admin user -> 403.
+        try:
+            asyncio.run(gate("test-service-token", "test-admin-secret", "Bearer tok-plain"))
+            raise AssertionError("non-admin accepted")
+        except admin.AdminAuthError as error:
+            assert error.status == 403
+        # DB-flagged admin -> in.
+        uid, email = asyncio.run(
+            gate("test-service-token", "test-admin-secret", "Bearer tok-boss")
+        )
+        assert uid == "boss1" and email == "boss@example.com"
+
+        # Promote writes the flag; audit is recorded.
+        admin.patch_user(db, "boss1", "plain1", "promote")
+        assert db.store[("users", "plain1")]["admin"] is True
+        assert any(coll == "adminActions" for (coll, _id) in db.store)
+        # Self-demote is refused.
+        try:
+            admin.patch_user(db, "boss1", "boss1", "demote")
+            raise AssertionError("self-demote allowed")
+        except admin.AdminAuthError as error:
+            assert error.code == "SELF_ACTION"
+        # Disable flows to the auth module.
+        admin.patch_user(db, "boss1", "plain1", "disable")
+        assert fake_auth.updated == [("plain1", True)]
+
+        # Directory + overview shape against the stubs.
+        directory = admin.get_users(db)
+        assert directory["users"][0]["uid"] == "boss1"  # admins first
+        assert any(u["admin"] for u in directory["users"])
+        overview = admin.get_overview(db)
+        assert len(overview["minutes"]) == 60
+        assert overview["backend"]["integrationsOk"] in (True, False)
+        assert "totals" in overview and "recentEvents" in overview
+    finally:
+        admin.firebase_auth = original_auth
+        admin.verify_id_token = original_verify
+        admin.settings.admin_api_secret = original_secret
+        admin.settings.service_token = original_token
 
 
 if __name__ == "__main__":
