@@ -81,14 +81,23 @@ export async function tryDelegateChatTurn(
       signal: AbortSignal.timeout(15_000),
       cache: "no-store",
     });
-    if (submit.status === 401) {
-      return errorJson(
-        401,
-        "UNAUTHORIZED",
-        "Your session could not be verified. Please sign in again.",
-      );
+    if (!submit.ok) {
+      // ANY submit failure — unreachable, 5xx, and 401 alike —
+      // falls back to local execution. A 401 from the backend
+      // does NOT mean the session is invalid: this route has
+      // already verified it locally (authenticateVerifiedUser),
+      // so a backend rejection can only be a configuration
+      // mismatch between the two deployments (SESSION_SECRET or
+      // service token divergence). The optional backend must
+      // never take chat down with it.
+      if (submit.status === 401) {
+        console.warn(
+          "backend-delegate: backend rejected a locally verified session (401); " +
+            "check SESSION_SECRET and BACKEND_SERVICE_TOKEN alignment. Running locally.",
+        );
+      }
+      return null;
     }
-    if (!submit.ok) return null; // fall back to local execution
     const created: unknown = await submit.json().catch(() => null);
     if (
       typeof created !== "object" ||
