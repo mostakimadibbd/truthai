@@ -304,6 +304,21 @@ def get_overview(db) -> dict:
             }
         )
 
+    yesterday_doc = (
+        db.collection("analytics_days")
+        .document(_day_key(now - timedelta(days=1)))
+        .get()
+    )
+    yesterday = _totals(yesterday_doc.to_dict() if yesterday_doc.exists else None)
+
+    week = []
+    for offset in range(6, -1, -1):
+        day = _day_key(now - timedelta(days=offset))
+        doc = db.collection("analytics_days").document(day).get()
+        week.append(
+            {"day": day, **_totals(doc.to_dict() if doc.exists else None)}
+        )
+
     from . import watermark
 
     checks = settings.health()
@@ -316,6 +331,8 @@ def get_overview(db) -> dict:
     return {
         "today": today,
         "totals": totals,
+        "yesterday": yesterday,
+        "week": week,
         "minutes": minutes,
         "models": models,
         "topUsers": top_users,
@@ -324,6 +341,37 @@ def get_overview(db) -> dict:
         "recentErrors": errors,
         "backend": backend,
     }
+
+
+def get_audit(db) -> dict:
+    """The adminActions audit trail, newest first, with the
+    actors' and targets' emails resolved for display."""
+    entries = []
+    docs = (
+        db.collection("adminActions")
+        .order_by("ts", direction="DESCENDING")
+        .limit(50)
+        .get()
+    )
+    for doc in docs:
+        data = doc.to_dict() or {}
+        entries.append(
+            {
+                "id": doc.id,
+                "actorUid": data.get("actorUid") or "",
+                "actorRole": data.get("actorRole"),
+                "targetUid": data.get("targetUid") or "",
+                "action": data.get("action") or "",
+                "ts": data.get("ts") or 0,
+            }
+        )
+    emails = _resolve_emails(
+        list({*[row["actorUid"] for row in entries], *[row["targetUid"] for row in entries]})
+    )
+    for row in entries:
+        row["actorEmail"] = emails.get(row["actorUid"])
+        row["targetEmail"] = emails.get(row["targetUid"])
+    return {"entries": entries}
 
 
 def get_users(db, viewer_uid: str, viewer_role: str) -> dict:
@@ -395,7 +443,7 @@ def get_users(db, viewer_uid: str, viewer_role: str) -> dict:
     }
 
 
-ACTIONS = ("promote", "demote", "disable", "enable")
+ACTIONS = ("promote", "demote", "disable", "enable", "delete")
 
 
 def patch_user(
@@ -408,13 +456,47 @@ def patch_user(
 ) -> dict:
     if action not in ACTIONS:
         raise AdminAuthError(400, "INVALID_ACTION", "A valid action is required.")
-    if target_uid == actor_uid and action in ("demote", "disable"):
+    if target_uid == actor_uid and action in ("demote", "disable", "delete"):
         raise AdminAuthError(
             400,
             "SELF_ACTION",
-            "You can’t demote or disable your own admin account.",
+            "You can’t demote, disable or delete your own admin account.",
         )
     target_role = _registry_role(db, target_uid)
+    if action == "delete":
+        # Permanent account deletion is the owner's power alone.
+        if actor_role != "owner":
+            raise AdminAuthError(
+                403,
+                "OWNER_ONLY",
+                "Only the owner can delete accounts.",
+            )
+        if target_role == "owner":
+            raise AdminAuthError(
+                400, "OWNER_PROTECTED", "The owner’s account can’t be deleted."
+            )
+        try:
+            db.collection("admins").document(target_uid).delete()
+        except Exception:
+            pass
+        firebase_auth().delete_user(target_uid)
+        try:
+            db.collection("users").document(target_uid).delete()
+        except Exception:
+            pass
+        try:
+            db.collection("adminActions").add(
+                {
+                    "actorUid": actor_uid,
+                    "actorRole": actor_role,
+                    "targetUid": target_uid,
+                    "action": "delete",
+                    "ts": int(time.time() * 1000),
+                }
+            )
+        except Exception:
+            pass
+        return {"success": True, "uid": target_uid, "action": "delete"}
     if action in ("promote", "demote"):
         # Granting and revoking admin access is the owner's
         # power alone — enforced here, not just hidden in the UI.

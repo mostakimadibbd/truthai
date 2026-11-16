@@ -345,6 +345,10 @@ class _FakeAuthModule:
         self.updated.append((uid, disabled))
         self.records[uid].disabled = bool(disabled)
 
+    def delete_user(self, uid):
+        self.updated.append((uid, "deleted"))
+        self.records.pop(uid, None)
+
 
 def test_admin_gate_and_actions():
     from app import admin
@@ -451,8 +455,25 @@ def test_admin_gate_and_actions():
         assert emp_row["role"] == "admin" and emp_row["admin"] is True
         overview = admin.get_overview(db)
         assert len(overview["minutes"]) == 60
+        assert len(overview["week"]) == 7
+        assert "yesterday" in overview
         assert overview["backend"]["integrationsOk"] in (True, False)
         assert "totals" in overview and "recentEvents" in overview
+
+        # Account deletion: owner-only, with full effects.
+        try:
+            admin.patch_user(db, "emp1", "admin", "emp@example.com", "plain1", "delete")
+            raise AssertionError("admin deleted an account")
+        except admin.AdminAuthError as error:
+            assert error.code == "OWNER_ONLY"
+        admin.patch_user(db, "boss1", "owner", "boss@example.com", "plain1", "delete")
+        assert ("plain1", "deleted") in fake_auth.updated
+        assert ("users", "plain1") not in db.store
+
+        # The audit trail reads back what the actions wrote.
+        audit = admin.get_audit(db)
+        assert any(entry["action"] == "delete" for entry in audit["entries"])
+        assert all("actorEmail" in entry for entry in audit["entries"])
     finally:
         admin.firebase_auth = original_auth
         admin.verify_id_token = original_verify

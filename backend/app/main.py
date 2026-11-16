@@ -189,6 +189,17 @@ async def admin_overview(request: Request):
         return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
 
 
+@app.get("/v1/admin/audit")
+async def admin_audit(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    try:
+        return {"success": True, **admin.get_audit(firestore_client())}
+    except Exception:
+        return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
+
+
 @app.get("/v1/admin/users")
 async def admin_users(request: Request):
     gate = await _admin_gate(request)

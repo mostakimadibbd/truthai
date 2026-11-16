@@ -61,6 +61,8 @@ type BackendInfo = {
 type Overview = {
   today: string;
   totals: Totals;
+  yesterday: Totals;
+  week: (Totals & { day: string })[];
   minutes: MinutePoint[];
   models: ModelTotal[];
   topUsers: TopUser[];
@@ -85,8 +87,46 @@ type UserRow = {
   costUsdToday: number;
 };
 
+type AuditEntry = {
+  id: string;
+  actorUid: string;
+  actorRole: string | null;
+  actorEmail: string | null;
+  targetUid: string;
+  targetEmail: string | null;
+  action: string;
+  ts: number;
+};
+
 type Tab = "overview" | "users" | "activity" | "system";
-type ActionKind = "promote" | "demote" | "disable" | "enable";
+type ActionKind = "promote" | "demote" | "disable" | "enable" | "delete";
+type UserFilter = "all" | "admins" | "disabled" | "unverified";
+type UserSort = "tokens" | "joined" | "name";
+
+/** Turn a backend error into the concrete fix, so a setup
+ * problem never looks like a product bug. */
+function hintFor(message: string): string | null {
+  if (message.includes("Invalid service token")) {
+    return "The service token this panel sends doesn’t match the backend’s. Set BACKEND_SERVICE_TOKEN to the same value on BOTH the backend project and this panel’s project, then redeploy both.";
+  }
+  if (message.includes("Invalid admin secret")) {
+    return "The admin secret doesn’t match. Set ADMIN_API_SECRET to the same value on the backend project and this panel’s project, then redeploy both.";
+  }
+  if (message.includes("not configured") || message.includes("isn’t connected")) {
+    return "A required environment variable is missing — on the backend: BACKEND_SERVICE_TOKEN, ADMIN_API_SECRET and the FIREBASE_ADMIN trio; on this panel: BACKEND_URL, BACKEND_SERVICE_TOKEN and ADMIN_API_SECRET.";
+  }
+  if (message.includes("could not be reached")) {
+    return "The panel’s BACKEND_URL doesn’t point at the running backend service. Check that variable on this panel’s project.";
+  }
+  return null;
+}
+
+function delta(today: number, yesterday: number): string | null {
+  if (yesterday <= 0) return today > 0 ? "new today" : null;
+  const pct = Math.round(((today - yesterday) / yesterday) * 100);
+  if (pct === 0) return "same as yesterday";
+  return `${pct > 0 ? "▲" : "▼"} ${Math.abs(pct)}% vs yesterday`;
+}
 
 const compact = new Intl.NumberFormat("en", { notation: "compact" });
 
@@ -131,6 +171,10 @@ export default function ConsolePage() {
   const [pending, setPending] = useState<{ uid: string; action: ActionKind; label: string } | null>(null);
   const [acting, setActing] = useState(false);
   const [actionError, setActionError] = useState("");
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [userFilter, setUserFilter] = useState<UserFilter>("all");
+  const [userSort, setUserSort] = useState<UserSort>("tokens");
+  const [toast, setToast] = useState("");
 
   useEffect(() => {
     const auth = panelAuth();
@@ -152,9 +196,10 @@ export default function ConsolePage() {
   const load = useCallback(async () => {
     if (!user) return;
     try {
-      const [overviewRes, usersRes] = await Promise.all([
+      const [overviewRes, usersRes, auditRes] = await Promise.all([
         panelApi(user, "/api/overview"),
         panelApi(user, "/api/users"),
+        panelApi(user, "/api/audit"),
       ]);
       if (overviewRes.status === 403 || usersRes.status === 403) {
         setState("forbidden");
@@ -171,6 +216,10 @@ export default function ConsolePage() {
         };
         setUsers(payload.users);
         setViewer(payload.viewer);
+      }
+      if (auditRes.ok) {
+        const payload = (await auditRes.json()) as { entries: AuditEntry[] };
+        setAudit(payload.entries);
       }
       setUpdatedAt(Date.now());
       setState("ready");
@@ -202,7 +251,20 @@ export default function ConsolePage() {
       if (!response.ok) {
         throw new Error(await apiErrorMessage(response, "That action couldn’t be completed."));
       }
+      const done = pending;
       setPending(null);
+      setToast(
+        done.action === "promote"
+          ? "Admin access granted."
+          : done.action === "demote"
+            ? "Admin access revoked."
+            : done.action === "disable"
+              ? "Account disabled."
+              : done.action === "enable"
+                ? "Account re-enabled."
+                : "Account deleted.",
+      );
+      window.setTimeout(() => setToast(""), 4000);
       await load();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "That action couldn’t be completed.");
@@ -213,14 +275,33 @@ export default function ConsolePage() {
 
   const filteredUsers = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return users;
-    return users.filter(
-      (row) =>
-        row.email?.toLowerCase().includes(needle) ||
-        row.displayName?.toLowerCase().includes(needle) ||
-        row.uid.toLowerCase().includes(needle),
-    );
-  }, [users, query]);
+    let rows = users.filter((row) => {
+      if (
+        needle &&
+        !(
+          row.email?.toLowerCase().includes(needle) ||
+          row.displayName?.toLowerCase().includes(needle) ||
+          row.uid.toLowerCase().includes(needle)
+        )
+      ) {
+        return false;
+      }
+      if (userFilter === "admins") return row.admin;
+      if (userFilter === "disabled") return row.disabled;
+      if (userFilter === "unverified") return !row.emailVerified;
+      return true;
+    });
+    rows = [...rows].sort((a, b) => {
+      if (userSort === "joined") return (b.createdAt ?? 0) - (a.createdAt ?? 0);
+      if (userSort === "name") {
+        return (a.displayName || a.email || a.uid).localeCompare(
+          b.displayName || b.email || b.uid,
+        );
+      }
+      return b.totalTokensToday - a.totalTokensToday;
+    });
+    return rows;
+  }, [users, query, userFilter, userSort]);
 
   const totals = overview?.totals;
   const maxMinute = Math.max(1, ...(overview?.minutes ?? []).map((point) => point.totalTokens));
@@ -248,18 +329,30 @@ export default function ConsolePage() {
         <nav className="side-nav" aria-label="Console sections">
           {(
             [
-              ["overview", "Overview"],
-              ["users", "Users & access"],
-              ["activity", "Activity"],
-              ["system", "System"],
-            ] as [Tab, string][]
-          ).map(([id, label]) => (
+              ["overview", "Overview", "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"],
+              ["users", "Users & access", "M16 19v-1a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v1M9.5 10a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM21 19v-1a4 4 0 0 0-3-3.85M15.5 3.15a3.5 3.5 0 0 1 0 6.7"],
+              ["activity", "Activity", "M3 12h4l2.5-6 4 12L16 12h5"],
+              ["system", "System", "M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zM4 15a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zM7.5 7h.01M7.5 17h.01"],
+            ] as [Tab, string, string][]
+          ).map(([id, label, icon]) => (
             <button
               key={id}
               type="button"
               className={tab === id ? "side-link active" : "side-link"}
               onClick={() => setTab(id)}
             >
+              <svg
+                className="side-icon"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d={icon} />
+              </svg>
               {label}
             </button>
           ))}
@@ -292,7 +385,20 @@ export default function ConsolePage() {
           </button>
         </header>
 
-        {state === "loading" && <p className="muted" role="status">Loading console data…</p>}
+        {toast && (
+          <div className="toast" role="status">{toast}</div>
+        )}
+        {state === "loading" && (
+          <div className="skeleton-wrap" role="status" aria-label="Loading console data">
+            <div className="skeleton-row">
+              <div className="skeleton" />
+              <div className="skeleton" />
+              <div className="skeleton" />
+              <div className="skeleton" />
+            </div>
+            <div className="skeleton tall" />
+          </div>
+        )}
         {state === "forbidden" && (
           <section className="card">
             <h2>Not an administrator</h2>
@@ -306,7 +412,10 @@ export default function ConsolePage() {
           </section>
         )}
         {state === "error" && (
-          <div className="alert" role="alert">{errorMessage}</div>
+          <div className="alert" role="alert">
+            <strong>{errorMessage}</strong>
+            {hintFor(errorMessage) && <p className="hint">{hintFor(errorMessage)}</p>}
+          </div>
         )}
 
         {state === "ready" && overview && totals && tab === "overview" && (
@@ -318,6 +427,9 @@ export default function ConsolePage() {
                 <small>
                   {totals.promptTokens.toLocaleString("en-US")} in ·{" "}
                   {totals.completionTokens.toLocaleString("en-US")} out
+                  {delta(totals.totalTokens, overview.yesterday.totalTokens) && (
+                    <> · {delta(totals.totalTokens, overview.yesterday.totalTokens)}</>
+                  )}
                 </small>
               </div>
               <div className="stat">
@@ -325,6 +437,9 @@ export default function ConsolePage() {
                 <strong>{totals.requests.toLocaleString("en-US")}</strong>
                 <small>
                   {totals.chatRequests} chat · {totals.apiRequests} API · {totals.imageRequests} images
+                  {delta(totals.requests, overview.yesterday.requests) && (
+                    <> · {delta(totals.requests, overview.yesterday.requests)}</>
+                  )}
                 </small>
               </div>
               <div className="stat">
@@ -361,6 +476,40 @@ export default function ConsolePage() {
                     </span>
                   </div>
                 ))}
+              </div>
+            </section>
+
+            <section className="card">
+              <h2>Last 7 days — tokens per day</h2>
+              <div
+                className="chart"
+                style={{ gridTemplateColumns: "repeat(7, 1fr)", height: "8rem" }}
+                role="img"
+                aria-label="Tokens per day for the last seven days"
+              >
+                {overview.week.map((point) => {
+                  const maxWeek = Math.max(1, ...overview.week.map((d) => d.totalTokens));
+                  return (
+                    <div
+                      className="chart-col"
+                      key={point.day}
+                      title={`${point.day}: ${point.totalTokens.toLocaleString("en-US")} tokens, ${point.requests} requests`}
+                    >
+                      <span className="chart-value">
+                        {point.totalTokens > 0 ? compact.format(point.totalTokens) : ""}
+                      </span>
+                      <div className="chart-track">
+                        <span style={{ height: `${Math.max(2, (point.totalTokens / maxWeek) * 100)}%` }} />
+                      </div>
+                      <span className="chart-label">
+                        {new Date(`${point.day}T00:00:00Z`).toLocaleDateString("en-GB", {
+                          weekday: "short",
+                          timeZone: "UTC",
+                        })}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </section>
 
@@ -413,6 +562,37 @@ export default function ConsolePage() {
                 onChange={(event) => setQuery(event.target.value)}
                 aria-label="Search accounts"
               />
+            </div>
+            <div className="chip-row" role="group" aria-label="Filter and sort accounts">
+              {(
+                [
+                  ["all", "All"],
+                  ["admins", "Admins"],
+                  ["disabled", "Disabled"],
+                  ["unverified", "Unverified"],
+                ] as [UserFilter, string][]
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={userFilter === id ? "chip active" : "chip"}
+                  onClick={() => setUserFilter(id)}
+                >
+                  {label}
+                </button>
+              ))}
+              <label className="sort-label">
+                Sort
+                <select
+                  value={userSort}
+                  onChange={(event) => setUserSort(event.target.value as UserSort)}
+                  aria-label="Sort accounts"
+                >
+                  <option value="tokens">Tokens today</option>
+                  <option value="joined">Recently joined</option>
+                  <option value="name">Name</option>
+                </select>
+              </label>
             </div>
             <p className="muted">
               Admin power lives in the database’s <code>admins</code> registry — one entry
@@ -553,6 +733,22 @@ export default function ConsolePage() {
                               Enable
                             </button>
                           ))}
+                        {viewer?.role === "owner" && !isSelf && entry.role !== "owner" && (
+                          <button
+                            type="button"
+                            className="btn btn-danger"
+                            disabled={acting}
+                            onClick={() =>
+                              setPending({
+                                uid: entry.uid,
+                                action: "delete",
+                                label: `Permanently delete the account ${entry.email ?? entry.uid}? Their sign-in and profile are removed. This cannot be undone.`,
+                              })
+                            }
+                          >
+                            Delete
+                          </button>
+                        )}
                       </div>
                     </li>
                   );
@@ -564,6 +760,40 @@ export default function ConsolePage() {
 
         {state === "ready" && overview && tab === "activity" && (
           <>
+            <section className="card">
+              <h2>Admin actions — audit trail</h2>
+              {audit.length === 0 && (
+                <p className="muted">No admin actions recorded yet. Grants, revocations, disables and deletions appear here.</p>
+              )}
+              {audit.length > 0 && (
+                <ul className="plain-list">
+                  {audit.map((entry) => (
+                    <li key={entry.id}>
+                      <span>
+                        {entry.action === "promote" && "Granted admin"}
+                        {entry.action === "demote" && "Revoked admin"}
+                        {entry.action === "disable" && "Disabled account"}
+                        {entry.action === "enable" && "Re-enabled account"}
+                        {entry.action === "delete" && "Deleted account"}
+                        {!["promote", "demote", "disable", "enable", "delete"].includes(entry.action) &&
+                          entry.action}{" "}
+                        <span className="badge">{entry.actorRole ?? "admin"}</span>
+                      </span>
+                      <span className="muted small">
+                        {entry.actorEmail ?? entry.actorUid} → {entry.targetEmail ?? entry.targetUid} ·{" "}
+                        {new Date(entry.ts).toLocaleString("en-GB", {
+                          day: "numeric",
+                          month: "short",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
             {overview.recentErrors.length > 0 && (
               <section className="card">
                 <h2>Model failures — latest</h2>
