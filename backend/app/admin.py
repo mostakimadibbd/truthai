@@ -121,7 +121,7 @@ async def authenticate_admin(
     admin_secret: str | None,
     authorization: str | None,
     client_ip: str,
-    db,
+    db_factory,
 ) -> tuple[str, str | None, str]:
     """Verify all three credentials; return (uid, email, role).
 
@@ -161,6 +161,10 @@ async def authenticate_admin(
         email = record.email
     except Exception:
         email = None
+    # The database is only touched AFTER all three credentials
+    # pass, so an unauthenticated probe gets a clean 401 even if
+    # the service's database connection is not configured yet.
+    db = db_factory()
     role = await asyncio.to_thread(_registry_role, db, uid)
     if role:
         return uid, email, role

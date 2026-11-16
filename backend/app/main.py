@@ -170,10 +170,12 @@ async def _admin_gate(request: Request):
             request.headers.get("x-admin-secret"),
             request.headers.get("authorization"),
             client_ip,
-            firestore_client(),
+            firestore_client,
         )
     except admin.AdminAuthError as error:
         return _error(error.status, error.code, error.message)
+    except Exception:
+        return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
 
 
 @app.get("/v1/admin/overview")

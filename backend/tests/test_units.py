@@ -377,7 +377,9 @@ def test_admin_gate_and_actions():
     admin.settings.service_token = "test-service-token"
     try:
         async def gate(token, secret, bearer, ip="10.0.0.1"):
-            return await admin.authenticate_admin(token, secret, bearer, ip, db)
+            return await admin.authenticate_admin(
+                token, secret, bearer, ip, lambda: db
+            )
 
         # Wrong service token -> 401.
         try:
