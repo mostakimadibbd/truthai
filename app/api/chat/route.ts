@@ -865,6 +865,21 @@ export async function POST(request: NextRequest) {
       }
       if (error instanceof OpenRouterAttemptsExhausted) {
         logChatError(error.lastStatus, error.lastErrorBody);
+        // OpenRouter gives accounts without credit a daily free
+        // quota; when it is spent, every free model 429s with a
+        // "free-models-per-day" body until midnight UTC. Say that
+        // plainly instead of a misleading "busy, try again".
+        if (
+          error.lastStatus === 429 &&
+          /free-models-per-day|daily|per day/i.test(error.lastErrorBody ?? "")
+        ) {
+          throw new ChatRouteError(
+            429,
+            "DAILY_FREE_LIMIT",
+            "The platform has reached today's free-model limit (the AI account runs entirely on free models). Free usage resets at midnight UTC — please try again after then.",
+            error.retryAfter ? { "Retry-After": error.retryAfter } : undefined,
+          );
+        }
         const busy = error.lastStatus === 429;
         throw new ChatRouteError(
           busy ? 429 : 503,

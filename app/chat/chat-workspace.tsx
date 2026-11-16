@@ -103,6 +103,9 @@ const MAX_FILES_PER_MESSAGE = 5;
 const ACCEPTED_FILE_TYPES = ".jpg,.jpeg,.png,.webp,.gif,.pdf,.txt,.md,.csv";
 const IMAGE_FILE_TYPES = ".jpg,.jpeg,.png,.webp,.gif";
 const AUTO_MODEL_OPTION = { id: "openrouter/free", name: "Auto (Free)" };
+// Attachment access URLs are signed server-side for 15 minutes;
+// they count as fresh for 12 so they are re-minted before expiry.
+const ATTACHMENT_URL_FRESH_MS = 12 * 60 * 1000;
 
 type ModelOption = { id: string; name: string };
 
@@ -385,6 +388,12 @@ export default function ChatWorkspace() {
   const [attachmentUrls, setAttachmentUrls] = useState<Record<string, string>>({});
   const controllerRef = useRef<AbortController | null>(null);
   const attachmentUrlLoadingRef = useRef(new Set<string>());
+  // When each attachment access URL was minted, and how many
+  // error-driven re-mints each attachment has used. Access URLs
+  // are signed server-side for 15 minutes; they are treated as
+  // fresh for 12, leaving a safety margin before they expire.
+  const attachmentUrlMintedAtRef = useRef<Record<string, number>>({});
+  const attachmentRemintAttemptsRef = useRef<Record<string, number>>({});
   const previousUserIdRef = useRef<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -659,52 +668,127 @@ export default function ChatWorkspace() {
     );
   }, [activeChatId, activeMessages, pendingAttachments.length]);
 
-  useEffect(() => {
-    if (!user) return;
-    let active = true;
-    for (const attachment of activeMessages.flatMap((message) => message.attachments)) {
-      if (attachment.accessUrl || attachmentUrlLoadingRef.current.has(attachment.id)) continue;
-      attachmentUrlLoadingRef.current.add(attachment.id);
-      void (async () => {
-        try {
-          const idToken = await user.getIdToken();
-          const response = await fetch(
-            `/api/uploads/access?assetId=${encodeURIComponent(attachment.id)}`,
-            { headers: { Authorization: `Bearer ${idToken}` }, cache: "no-store" },
-          );
-          if (!response.ok) {
-            throw new Error(await getApiError(response, "This attachment is temporarily unavailable."));
-          }
-          const result: unknown = await response.json();
-          if (
-            typeof result !== "object" ||
-            result === null ||
-            !("accessUrl" in result) ||
-            typeof result.accessUrl !== "string"
-          ) {
-            throw new Error("This attachment is temporarily unavailable.");
-          }
-          const accessUrl = result.accessUrl;
-          if (active) {
+  // Mints (or re-mints) the signed access URL for one attachment,
+  // with bounded retries. Access URLs expire 15 minutes after the
+  // server signs them, so display reliability needs more than a
+  // single one-shot fetch: a transient failure or an expired URL
+  // must heal itself instead of leaving a permanently broken
+  // image (owner report: created images showing as errors).
+  const mintAttachmentUrl = useCallback(
+    async (attachmentId: string): Promise<string | null> => {
+      if (!user) return null;
+      if (attachmentUrlLoadingRef.current.has(attachmentId)) return null;
+      attachmentUrlLoadingRef.current.add(attachmentId);
+      try {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            const idToken = await user.getIdToken();
+            const response = await fetch(
+              `/api/uploads/access?assetId=${encodeURIComponent(attachmentId)}`,
+              { headers: { Authorization: `Bearer ${idToken}` }, cache: "no-store" },
+            );
+            if (!response.ok) {
+              throw new Error(
+                await getApiError(response, "This attachment is temporarily unavailable."),
+              );
+            }
+            const result: unknown = await response.json();
+            if (
+              typeof result !== "object" ||
+              result === null ||
+              !("accessUrl" in result) ||
+              typeof result.accessUrl !== "string"
+            ) {
+              throw new Error("This attachment is temporarily unavailable.");
+            }
+            const accessUrl: string = result.accessUrl;
+            attachmentUrlMintedAtRef.current[attachmentId] = Date.now();
+            attachmentRemintAttemptsRef.current[attachmentId] = 0;
             setAttachmentUrls((previous) => ({
               ...previous,
-              [attachment.id]: accessUrl,
+              [attachmentId]: accessUrl,
             }));
+            return accessUrl;
+          } catch (error) {
+            if (attempt === 2) {
+              console.error("Couldn’t load a private chat attachment.", error);
+              return null;
+            }
+            await new Promise((resolve) =>
+              setTimeout(resolve, attempt === 0 ? 600 : 1500),
+            );
           }
-        } catch (error) {
-          if (active) {
-            console.error("Couldn’t load a private chat attachment.", error);
-            setNotice("An attachment preview couldn’t be loaded. Try again shortly.");
-          }
-        } finally {
-          attachmentUrlLoadingRef.current.delete(attachment.id);
         }
-      })();
+        return null;
+      } finally {
+        attachmentUrlLoadingRef.current.delete(attachmentId);
+      }
+    },
+    [user],
+  );
+
+  // An <img> that fails to load (expired URL, dropped connection)
+  // drops its stale URL and re-mints, up to three times per
+  // attachment — a broken image repairs itself on screen.
+  const handleAttachmentImageError = useCallback(
+    (attachmentId: string) => {
+      const attempts = attachmentRemintAttemptsRef.current[attachmentId] ?? 0;
+      if (attempts >= 3) return;
+      attachmentRemintAttemptsRef.current[attachmentId] = attempts + 1;
+      attachmentUrlMintedAtRef.current[attachmentId] = 0;
+      setAttachmentUrls((previous) => {
+        if (!(attachmentId in previous)) return previous;
+        const next = { ...previous };
+        delete next[attachmentId];
+        return next;
+      });
+      void mintAttachmentUrl(attachmentId);
+    },
+    [mintAttachmentUrl],
+  );
+
+  useEffect(() => {
+    if (!user) return;
+    for (const attachment of activeMessages.flatMap((message) => message.attachments)) {
+      if (attachment.accessUrl) continue;
+      const mintedAt = attachmentUrlMintedAtRef.current[attachment.id] ?? 0;
+      const hasFreshUrl =
+        Boolean(attachmentUrls[attachment.id]) &&
+        Date.now() - mintedAt < ATTACHMENT_URL_FRESH_MS;
+      if (hasFreshUrl) continue;
+      void mintAttachmentUrl(attachment.id).then((url) => {
+        if (url === null) {
+          setNotice("An attachment preview couldn’t be loaded. Try again shortly.");
+        }
+      });
     }
-    return () => {
-      active = false;
+  }, [activeChatId, attachmentPreviewKey, attachmentUrls, mintAttachmentUrl, user]);
+
+  // Refresh stale access URLs when the tab becomes visible again
+  // and once a minute while the workspace stays open, so a
+  // long-open chat never decays into broken images as the signed
+  // URLs reach their 15-minute expiry.
+  useEffect(() => {
+    const refreshStale = () => {
+      const now = Date.now();
+      for (const [attachmentId, mintedAt] of Object.entries(
+        attachmentUrlMintedAtRef.current,
+      )) {
+        if (now - mintedAt >= ATTACHMENT_URL_FRESH_MS) {
+          void mintAttachmentUrl(attachmentId);
+        }
+      }
     };
-  }, [activeChatId, attachmentPreviewKey, user]);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refreshStale();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    const timer = setInterval(refreshStale, 60_000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(timer);
+    };
+  }, [mintAttachmentUrl]);
 
   // Model list for the top-bar picker (Phase 5). Fetched once per
   // signed-in user from /api/models (session + ID token; the server
@@ -1258,6 +1342,7 @@ export default function ChatWorkspace() {
           setPendingAttachments((previous) =>
             previous.map((item) => item.id === placeholder.id ? attachmentValue : item),
           );
+          attachmentUrlMintedAtRef.current[attachmentValue.id] = Date.now();
           setAttachmentUrls((previous) => ({
             ...previous,
             [attachmentValue.id]: attachmentValue.accessUrl,
@@ -1572,6 +1657,28 @@ export default function ChatWorkspace() {
         throw new Error(
           await getApiError(response, "The image couldn’t be created. Please try again."),
         );
+      }
+      // The response carries a freshly signed access URL for the
+      // new picture: seed it immediately so the image renders the
+      // moment the Firestore listener delivers the message, instead
+      // of waiting on a second access fetch (and failing with it).
+      const created: unknown = await response.json().catch(() => null);
+      const createdRecord =
+        typeof created === "object" && created !== null
+          ? (created as Record<string, unknown>)
+          : null;
+      const createdAssetId =
+        typeof createdRecord?.assetId === "string" ? createdRecord.assetId : null;
+      const createdAccessUrl =
+        typeof createdRecord?.accessUrl === "string"
+          ? createdRecord.accessUrl
+          : null;
+      if (createdAssetId && createdAccessUrl) {
+        attachmentUrlMintedAtRef.current[createdAssetId] = Date.now();
+        setAttachmentUrls((previous) => ({
+          ...previous,
+          [createdAssetId]: createdAccessUrl,
+        }));
       }
       // Success: the user + assistant messages (with the watermarked
       // picture attached) arrive through the Firestore listener.
@@ -2169,7 +2276,12 @@ export default function ChatWorkspace() {
                               aria-label={`Open ${attachment.name}`}
                             >
                               {attachment.mimeType.startsWith("image/") && accessUrl ? (
-                                <img src={accessUrl} alt={attachment.name} loading="lazy" />
+                                <img
+                                  src={accessUrl}
+                                  alt={attachment.name}
+                                  loading="lazy"
+                                  onError={() => handleAttachmentImageError(attachment.id)}
+                                />
                               ) : (
                                 <span className="chat-file-badge" aria-hidden="true">
                                   {attachment.name.split(".").at(-1)?.toUpperCase() ?? "FILE"}
@@ -2317,7 +2429,11 @@ export default function ChatWorkspace() {
                 return (
                   <div className="chat-pending-attachment" key={attachment.id}>
                     {attachment.mimeType.startsWith("image/") && accessUrl ? (
-                      <img src={accessUrl} alt="" />
+                      <img
+                        src={accessUrl}
+                        alt=""
+                        onError={() => handleAttachmentImageError(attachment.id)}
+                      />
                     ) : (
                       <span className="chat-file-badge" aria-hidden="true">
                         {attachment.name.split(".").at(-1)?.toUpperCase() ?? "FILE"}

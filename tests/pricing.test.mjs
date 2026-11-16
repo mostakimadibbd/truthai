@@ -36,3 +36,12 @@ test("webModelAttemptOrder puts curated models before the Auto router", () => {
   assert.ok(order.includes("openrouter/free"));
   assert.equal(order[0], "meta-llama/llama-3.3-70b-instruct:free");
 });
+
+test("freeOnlyAttempts keeps only the router and :free variants", async () => {
+  const { freeOnlyAttempts } = await import("../lib/server/openrouter.ts");
+  assert.deepEqual(
+    freeOnlyAttempts(["openai/gpt-5", "openrouter/free", "meta-llama/llama-3.3-70b-instruct:free", "anthropic/claude-sonnet-4"]),
+    ["openrouter/free", "meta-llama/llama-3.3-70b-instruct:free"],
+  );
+  assert.deepEqual(freeOnlyAttempts(["openai/gpt-5"]), ["openrouter/free"]);
+});

@@ -78,9 +78,31 @@ export type ChatCompletionArgs = {
   includeUsage?: boolean;
 };
 
+/**
+ * FREE-ONLY GUARD (owner requirement: the OpenRouter account has
+ * no credit, so a paid call must be impossible, not just unlikely).
+ * Every attempt is checked at this single choke point — chat and
+ * the public API both flow through here. An attempt survives only
+ * if it is the free router or a `:free` model variant; anything
+ * else is dropped and logged. (Verified against the live
+ * catalogue: the only $0-priced models without the suffix are two
+ * music models and the router itself — no chat model is lost.)
+ */
+export function freeOnlyAttempts(attempts: string[]): string[] {
+  const kept = attempts.filter(
+    (id) => id === "openrouter/free" || id.endsWith(":free"),
+  );
+  const dropped = attempts.filter((id) => !kept.includes(id));
+  if (dropped.length) {
+    console.error(`Free-only guard dropped non-free model attempts: ${dropped.join(", ")}`);
+  }
+  return kept.length ? kept : ["openrouter/free"];
+}
+
 export async function fetchChatCompletionWithFallback(
   args: ChatCompletionArgs,
 ): Promise<{ response: Response; model: string }> {
+  args = { ...args, attempts: freeOnlyAttempts(args.attempts) };
   const connectTimeoutMs = args.connectTimeoutMs ?? 25_000;
   let lastStatus: number | null = null;
   let lastRetryAfter: string | null = null;
