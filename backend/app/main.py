@@ -57,6 +57,7 @@ async def health(
     # variables exist" from "sign-in verification will work".
     admin_ready = False
     admin_error = None
+    admin_error_detail = None
     try:
         from .firebase import firebase_app
 
@@ -64,6 +65,7 @@ async def health(
         admin_ready = True
     except Exception as error:  # noqa: BLE001 - class name is the diagnostic
         admin_error = type(error).__name__
+        admin_error_detail = str(error)[:160]
     return {
         "ok": True,
         "service": "xyro-backend",
@@ -71,6 +73,7 @@ async def health(
         "firebaseProject": settings.firebase_project,
         "adminReady": admin_ready,
         "adminError": admin_error,
+        "adminErrorDetail": admin_error_detail,
         "watermarkEngine": "c" if watermark.using_c_core() else "python",
         "executionMode": settings.execution_mode,
     }

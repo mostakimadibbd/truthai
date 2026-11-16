@@ -44,6 +44,7 @@ from .auth import (
     check_service_token,
     decode_unverified_claims,
     verify_id_token_detailed,
+    verify_id_token_public,
 )
 from .config import settings
 from .firebase import firebase_app
@@ -158,6 +159,30 @@ async def authenticate_admin(
     if authorization and authorization.startswith("Bearer "):
         bearer = authorization[len("Bearer "):].strip()
     uid, failure = verify_id_token_detailed(bearer)
+    email = None
+    if uid:
+        try:
+            record = await asyncio.to_thread(firebase_auth().get_user, uid)
+            email = record.email
+        except Exception:
+            email = None
+        if email is None:
+            # The token itself was verified by the SDK; its
+            # claims are trustworthy for the email fallback.
+            claims = decode_unverified_claims(bearer)
+            claimed = claims.get("email")
+            email = claimed if isinstance(claimed, str) else None
+    else:
+        # Fallback: verify against Google's public signing keys.
+        # A damaged service-account key must never lock the
+        # owner out of their own panel.
+        pub_uid, pub_email, pub_failure = await asyncio.to_thread(
+            verify_id_token_public, bearer
+        )
+        if pub_uid:
+            uid, email, failure = pub_uid, pub_email, None
+        else:
+            failure = pub_failure or failure
     if not uid:
         # Explain the rejection with public identifiers only:
         # which project issued the token vs which project this
@@ -172,11 +197,6 @@ async def authenticate_admin(
             f"({failure or 'rejected'}). Token project: {token_project}. "
             f"Backend project: {backend_project}.",
         )
-    try:
-        record = await asyncio.to_thread(firebase_auth().get_user, uid)
-        email = record.email
-    except Exception:
-        email = None
     # The database is only touched AFTER all three credentials
     # pass, so an unauthenticated probe gets a clean 401 even if
     # the service's database connection is not configured yet.
@@ -185,9 +205,22 @@ async def authenticate_admin(
     if role:
         return uid, email, role
     if _is_admin_email(email):
-        # Bootstrap/recovery: the project owner's account acts as
-        # owner (permanently for the primary bootstrap email, so
-        # the owner can never be locked out of their own panel).
+        # Bootstrap owner — and AUTO-PROVISIONING: write the
+        # owner entry into the registry right now, so the
+        # database records the owner without anyone creating
+        # documents by hand. Best effort: admission never waits
+        # on the write.
+        try:
+            await asyncio.to_thread(
+                db.collection("admins").document(uid).set,
+                {
+                    "role": "owner",
+                    "grantedBy": "auto-bootstrap",
+                    "grantedAt": int(time.time() * 1000),
+                },
+            )
+        except Exception:
+            pass
         return uid, email, "owner"
     raise fail(403, "ADMIN_ONLY", "This area is available to administrators only.")
 

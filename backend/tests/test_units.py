@@ -484,6 +484,141 @@ def test_admin_gate_and_actions():
         admin.settings.service_token = original_token
 
 
+def test_key_normalization_repairs_pastes():
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding,
+        NoEncryption,
+        PrivateFormat,
+    )
+
+    from app.firebase import _key_candidates, _key_parses
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
+
+    def repaired(value: str) -> bool:
+        return any(_key_parses(candidate) for candidate in _key_candidates(value))
+
+    assert repaired(pem)  # pristine
+    assert repaired(pem.replace("\n", "\\n"))  # literal \n escapes
+    assert repaired(f'"{pem}"')  # wrapped in quotes
+    assert repaired(pem.replace("\n", "\r\n"))  # Windows endings
+    body = "".join(
+        line for line in pem.splitlines() if "PRIVATE KEY" not in line
+    )
+    assert repaired(body)  # PEM frame lost entirely
+    assert not repaired("not-a-key-at-all")  # garbage stays garbage
+
+
+def test_public_id_token_verification():
+    import datetime as _dt
+
+    import jwt as pyjwt
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding,
+        NoEncryption,
+        PrivateFormat,
+    )
+    from cryptography.x509.oid import NameOID
+
+    from app import auth as auth_mod
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=1))
+        .not_valid_after(_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=30))
+        .sign(key, hashes.SHA256())
+    )
+    cert_pem = cert.public_bytes(Encoding.PEM).decode()
+    key_pem = key.private_bytes(
+        Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()
+    ).decode()
+
+    original_certs = auth_mod._google_certs
+    original_json = auth_mod.settings.firebase_service_account_json
+    original_pid = auth_mod.settings.firebase_project_id
+    auth_mod._google_certs = lambda: {"kid1": cert_pem}
+    auth_mod.settings.firebase_service_account_json = ""
+    auth_mod.settings.firebase_project_id = "demo-project"
+    try:
+        now = _dt.datetime.now(_dt.timezone.utc)
+        claims = {
+            "sub": "user-123",
+            "email": "owner@example.com",
+            "aud": "demo-project",
+            "iss": "https://securetoken.google.com/demo-project",
+            "iat": now,
+            "exp": now + _dt.timedelta(hours=1),
+        }
+        token = pyjwt.encode(claims, key_pem, algorithm="RS256", headers={"kid": "kid1"})
+        uid, email, failure = auth_mod.verify_id_token_public(token)
+        assert (uid, email, failure) == ("user-123", "owner@example.com", None)
+
+        bad = dict(claims, aud="someone-elses-project")
+        bad_token = pyjwt.encode(bad, key_pem, algorithm="RS256", headers={"kid": "kid1"})
+        uid, email, failure = auth_mod.verify_id_token_public(bad_token)
+        assert uid is None and failure is not None
+    finally:
+        auth_mod._google_certs = original_certs
+        auth_mod.settings.firebase_service_account_json = original_json
+        auth_mod.settings.firebase_project_id = original_pid
+
+
+def test_admin_autoprovision_owner():
+    from app import admin
+
+    db = _AdminDb()
+    records = {"owner1": _FakeUserRecord("owner1", "mostakimbdyt@gmail.com")}
+    fake_auth = _FakeAuthModule(records)
+    originals = (
+        admin.firebase_auth,
+        admin.verify_id_token_detailed,
+        admin.verify_id_token_public,
+        admin.settings.admin_api_secret,
+        admin.settings.service_token,
+    )
+    admin.firebase_auth = lambda: fake_auth
+    # SDK path broken (damaged key); public-key path verifies.
+    admin.verify_id_token_detailed = lambda token: (None, "ValueError")
+    admin.verify_id_token_public = lambda token: (
+        "owner1",
+        "mostakimbdyt@gmail.com",
+        None,
+    )
+    admin.settings.admin_api_secret = "s3cret"
+    admin.settings.service_token = "tok3n"
+    try:
+        uid, email, role = asyncio.run(
+            admin.authenticate_admin(
+                "tok3n", "s3cret", "Bearer anything", "10.9.9.9", lambda: db
+            )
+        )
+        assert (uid, role) == ("owner1", "owner")
+        # The registry entry was created automatically — nobody
+        # had to create a document by hand.
+        entry = db.store[("admins", "owner1")]
+        assert entry["role"] == "owner"
+        assert entry["grantedBy"] == "auto-bootstrap"
+    finally:
+        (
+            admin.firebase_auth,
+            admin.verify_id_token_detailed,
+            admin.verify_id_token_public,
+            admin.settings.admin_api_secret,
+            admin.settings.service_token,
+        ) = originals
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
+import time
 
 import httpx
 import jwt
@@ -100,6 +102,71 @@ def decode_unverified_claims(id_token: str | None) -> dict:
         return claims if isinstance(claims, dict) else {}
     except Exception:
         return {}
+
+
+_CERTS_URL = (
+    "https://www.googleapis.com/robot/v1/metadata/x509/"
+    "securetoken@system.gserviceaccount.com"
+)
+_certs_cache: dict = {"certs": {}, "expires": 0.0}
+
+
+def _google_certs() -> dict:
+    """Google's public ID-token signing certificates, cached
+    per their Cache-Control header."""
+    now = time.time()
+    if _certs_cache["certs"] and now < _certs_cache["expires"]:
+        return _certs_cache["certs"]
+    response = httpx.get(_CERTS_URL, timeout=10)
+    response.raise_for_status()
+    certs = response.json()
+    max_age = 3600
+    match = re.search(r"max-age=(\d+)", response.headers.get("cache-control", ""))
+    if match:
+        max_age = int(match.group(1))
+    _certs_cache.update(certs=certs, expires=now + max_age)
+    return certs
+
+
+def verify_id_token_public(
+    id_token: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    """(uid, email, failure) — verify a Firebase ID token
+    against Google's PUBLIC signing keys, the same algorithm
+    the Admin SDK uses, needing only the project id. This is
+    the fallback that keeps admin sign-in working even when
+    the service-account credential itself is damaged: a broken
+    private key must never lock the owner out."""
+    project = settings.firebase_project
+    if not id_token or not project:
+        return None, None, "MissingTokenOrProject"
+    try:
+        kid = jwt.get_unverified_header(id_token).get("kid")
+        pem = _google_certs().get(kid)
+        if not pem:
+            _certs_cache["expires"] = 0.0  # keys may have rotated
+            pem = _google_certs().get(kid)
+        if not pem:
+            return None, None, "UnknownSigningKey"
+        from cryptography.x509 import load_pem_x509_certificate
+
+        public_key = load_pem_x509_certificate(pem.encode()).public_key()
+        claims = jwt.decode(
+            id_token,
+            public_key,
+            algorithms=["RS256"],
+            audience=project,
+            issuer=f"https://securetoken.google.com/{project}",
+        )
+        uid = claims.get("sub")
+        email = claims.get("email")
+        return (
+            uid if isinstance(uid, str) else None,
+            email if isinstance(email, str) else None,
+            None,
+        )
+    except Exception as error:  # noqa: BLE001 - class name is the diagnostic
+        return None, None, type(error).__name__
 
 
 def verify_id_token_detailed(id_token: str | None) -> tuple[str | None, str | None]:
