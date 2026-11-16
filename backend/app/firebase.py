@@ -50,11 +50,19 @@ def firebase_app():
     return _app
 
 
-def firestore_client():
-    from firebase_admin import firestore
+_firestore_client = None
 
-    firebase_app()
-    return firestore.client()
+
+def firestore_client():
+    """The Firestore client is cached: building one spins up a
+    gRPC channel, which is far too expensive to pay per job."""
+    global _firestore_client
+    if _firestore_client is None:
+        from firebase_admin import firestore
+
+        firebase_app()
+        _firestore_client = firestore.client()
+    return _firestore_client
 
 
 def rtdb_ref(path: str):

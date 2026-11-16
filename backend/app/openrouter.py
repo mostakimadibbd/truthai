@@ -33,6 +33,25 @@ class AttemptsExhausted(Exception):
         self.retry_after = retry_after
 
 
+_shared: httpx.AsyncClient | None = None
+
+
+def _shared_client() -> httpx.AsyncClient:
+    """One pooled client for every upstream call in this process.
+
+    Creating a client per attempt (the old shape) paid a fresh
+    TCP + TLS handshake to OpenRouter for every model tried and
+    every job. Pooling keeps warm connections alive across
+    attempts and across jobs; per-request timeouts still apply.
+    """
+    global _shared
+    if _shared is None or _shared.is_closed:
+        _shared = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=32, max_keepalive_connections=16)
+        )
+    return _shared
+
+
 async def stream_completion(
     attempts: list[str],
     messages: list[dict],
@@ -55,59 +74,60 @@ async def stream_completion(
         usage: dict | None = None
         try:
             timeout = httpx.Timeout(connect=connect_timeout, read=None, write=30, pool=30)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream(
-                    "POST",
-                    f"{settings.openrouter_base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {settings.openrouter_api_key}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "https://truthai-six.vercel.app",
-                        "X-Title": "Xyro AI",
-                    },
-                    json={
-                        "model": model,
-                        "messages": messages,
-                        "stream": True,
-                        "max_tokens": max_tokens,
-                        "usage": {"include": True},
-                    },
-                ) as response:
-                    if response.status_code != 200:
-                        body = (await response.aread()).decode("utf-8", "replace")[:2000]
-                        last_status = response.status_code
-                        last_body = body
-                        last_retry_after = response.headers.get("retry-after")
-                        if response.status_code in RETRYABLE_STATUSES:
-                            continue
-                        raise AttemptsExhausted(
-                            response.status_code, body, last_retry_after
-                        )
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data:"):
-                            continue
-                        payload = line[len("data:"):].strip()
-                        if payload == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(payload)
-                        except json.JSONDecodeError:
-                            continue
-                        choices = chunk.get("choices") or []
-                        if choices:
-                            delta = choices[0].get("delta") or {}
-                            piece = delta.get("content")
-                            if isinstance(piece, str) and piece:
-                                text_parts.append(piece)
-                                await on_text("".join(text_parts))
-                        raw_usage = chunk.get("usage")
-                        if isinstance(raw_usage, dict):
-                            usage = {
-                                "promptTokens": int(raw_usage.get("prompt_tokens") or 0),
-                                "completionTokens": int(
-                                    raw_usage.get("completion_tokens") or 0
-                                ),
-                            }
+            client = _shared_client()
+            async with client.stream(
+                "POST",
+                f"{settings.openrouter_base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.openrouter_api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://truthai-six.vercel.app",
+                    "X-Title": "Xyro AI",
+                },
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "stream": True,
+                    "max_tokens": max_tokens,
+                    "usage": {"include": True},
+                },
+                timeout=timeout,
+            ) as response:
+                if response.status_code != 200:
+                    body = (await response.aread()).decode("utf-8", "replace")[:2000]
+                    last_status = response.status_code
+                    last_body = body
+                    last_retry_after = response.headers.get("retry-after")
+                    if response.status_code in RETRYABLE_STATUSES:
+                        continue
+                    raise AttemptsExhausted(
+                        response.status_code, body, last_retry_after
+                    )
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[len("data:"):].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = chunk.get("choices") or []
+                    if choices:
+                        delta = choices[0].get("delta") or {}
+                        piece = delta.get("content")
+                        if isinstance(piece, str) and piece:
+                            text_parts.append(piece)
+                            await on_text("".join(text_parts))
+                    raw_usage = chunk.get("usage")
+                    if isinstance(raw_usage, dict):
+                        usage = {
+                            "promptTokens": int(raw_usage.get("prompt_tokens") or 0),
+                            "completionTokens": int(
+                                raw_usage.get("completion_tokens") or 0
+                            ),
+                        }
             text = "".join(text_parts)
             if text.strip():
                 return {"model": model, "text": text, "usage": usage}
