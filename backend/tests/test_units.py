@@ -174,10 +174,10 @@ async def _lifecycle() -> None:
             rtdb_ref,
         )
         job_id = submitted["jobId"]
-        for _ in range(100):
-            await asyncio.sleep(0.05)
-            if jobs.get_job(job_id, "u1")["status"] in ("complete", "failed"):
-                break
+        # wait_for_job is the sync-mode path (Vercel): it must
+        # resolve with the terminal status.
+        waited = await jobs.wait_for_job(job_id, timeout=10)
+        assert waited is not None and waited["status"] == "complete", waited
         status = jobs.get_job(job_id, "u1")
         assert status["status"] == "complete", status
         assert status["result"]["model"] == "openrouter/free"

@@ -33,6 +33,16 @@ class Settings:
 
     # Backend-only
     service_token: str = os.environ.get("BACKEND_SERVICE_TOKEN", "")
+    # Execution mode: "async" (default) returns 202 and runs the
+    # job in-process — the mode that survives anything, on a
+    # persistent host. "sync" executes the job inside the submit
+    # request: required on serverless hosts (Vercel), where
+    # background work is frozen once the response is sent. Vercel
+    # sets VERCEL=1 itself, so deploying there just works;
+    # BACKEND_EXECUTION_MODE overrides either way.
+    execution_mode: str = os.environ.get("BACKEND_EXECUTION_MODE", "") or (
+        "sync" if os.environ.get("VERCEL") else "async"
+    )
     openrouter_base_url: str = os.environ.get(
         "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
     ).rstrip("/")

@@ -44,9 +44,27 @@ def submit_chat_job(payload: dict, db, rtdb_ref) -> dict:
         "result": None,
         "error": None,
     }
+    job["_done"] = asyncio.Event()
     _jobs[job_id] = job
     asyncio.get_running_loop().create_task(_run(job, db, rtdb_ref))
     return {"jobId": job_id, "status": "queued"}
+
+
+async def wait_for_job(job_id: str, timeout: float) -> dict | None:
+    """Block until a job reaches a terminal state (sync mode)."""
+    job = _jobs.get(job_id)
+    if job is None:
+        return None
+    try:
+        await asyncio.wait_for(job["_done"].wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        pass
+    return {
+        "jobId": job["id"],
+        "status": job["status"],
+        "result": job.get("result"),
+        "error": job.get("error"),
+    }
 
 
 async def _run(job: dict, db, rtdb_ref) -> None:
@@ -85,6 +103,7 @@ async def _run(job: dict, db, rtdb_ref) -> None:
         finally:
             job["finishedAt"] = _now_ms()
             _mirror(job, db)
+            job["_done"].set()
 
 
 def _mirror(job: dict, db) -> None:

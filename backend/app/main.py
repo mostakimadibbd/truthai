@@ -46,6 +46,7 @@ async def health() -> dict:
         "service": "xyro-backend",
         "integrations": checks,
         "watermarkEngine": "c" if watermark.using_c_core() else "python",
+        "executionMode": settings.execution_mode,
     }
 
 
@@ -117,6 +118,16 @@ async def submit_chat_job(request: Request):
         firestore_client(),
         rtdb_ref,
     )
+    if settings.execution_mode == "sync":
+        # Serverless host (Vercel): background tasks are frozen
+        # when the response is sent, so the job runs to completion
+        # inside this request and the response carries the final
+        # status. The caller's first status poll then resolves
+        # immediately from the registry.
+        final = await jobs.wait_for_job(
+            submitted["jobId"], timeout=settings.job_timeout_seconds + 10
+        )
+        return {"success": True, "delegated": True, **(final or submitted)}
     return JSONResponse(
         status_code=202,
         content={"success": True, "delegated": True, **submitted},
