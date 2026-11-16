@@ -227,10 +227,10 @@ class _AdminQuery:
         self._order = order
         self._limit = limit_n
 
-    def where(self, field, _op, value):
+    def where(self, field, op, value):
         return _AdminQuery(
             self._docs,
-            self._filters + [(field, value)],
+            self._filters + [(field, op, value)],
             self._order,
             self._limit,
         )
@@ -242,11 +242,17 @@ class _AdminQuery:
         return _AdminQuery(self._docs, self._filters, self._order, n)
 
     def get(self):
-        rows = [
-            (doc_id, data)
-            for doc_id, data in self._docs
-            if all(data.get(field) == value for field, value in self._filters)
-        ]
+        def matches(data):
+            for field, op, value in self._filters:
+                current = data.get(field)
+                if op == ">=":
+                    if not (isinstance(current, str) and current >= value):
+                        return False
+                elif current != value:
+                    return False
+            return True
+
+        rows = [(doc_id, data) for doc_id, data in self._docs if matches(data)]
         if self._order:
             field, direction = self._order
             rows.sort(
@@ -276,6 +282,11 @@ class _AdminDoc:
 
     def delete(self):
         self._store.pop((self._collection, self._id), None)
+
+    def collection(self, name):
+        return _AdminCollection(
+            self._store, f"{self._collection}/{self._id}/{name}"
+        )
 
 
 class _AdminCollection(_AdminQuery):
@@ -320,6 +331,7 @@ class _FakeUserRecord:
             last_sign_in_timestamp = 1700001000000
 
         self.user_metadata = _Meta()
+        self.provider_data = []
 
 
 class _FakeAuthModule:
@@ -348,6 +360,12 @@ class _FakeAuthModule:
     def delete_user(self, uid):
         self.updated.append((uid, "deleted"))
         self.records.pop(uid, None)
+
+    def generate_password_reset_link(self, email):
+        return f"https://example.test/reset?email={email}"
+
+    def revoke_refresh_tokens(self, uid):
+        self.updated.append((uid, "revoked"))
 
 
 def test_admin_gate_and_actions():
@@ -617,6 +635,125 @@ def test_admin_autoprovision_owner():
             admin.settings.admin_api_secret,
             admin.settings.service_token,
         ) = originals
+
+
+def test_admin_detail_logs_trash_and_ranges():
+    from app import admin
+
+    db = _AdminDb()
+    records = {
+        "boss1": _FakeUserRecord("boss1", "boss@example.com"),
+        "emp1": _FakeUserRecord("emp1", "emp@example.com"),
+        "plain1": _FakeUserRecord("plain1", "plain@example.com"),
+    }
+    fake_auth = _FakeAuthModule(records)
+    original = admin.firebase_auth
+    admin.firebase_auth = lambda: fake_auth
+    try:
+        db.store[("admins", "boss1")] = {"role": "owner"}
+        db.store[("users", "plain1")] = {"displayName": "Plain User"}
+        db.store[("users/plain1/chats", "c1")] = {
+            "title": "First chat",
+            "updatedAt": 5000,
+        }
+        db.store[("users/plain1/apiKeys", "k1")] = {
+            "name": "prod",
+            "revoked": False,
+            "createdAt": 4000,
+        }
+        db.store[("analytics_user_days", "2026-11-16__plain1")] = {
+            "day": "2026-11-16",
+            "uid": "plain1",
+            "requests": 3,
+            "totalTokens": 900,
+            "costUsd": 0.0,
+        }
+        db.store[("analytics_days", "2026-11-16")] = {
+            "day": "2026-11-16",
+            "requests": 10,
+            "totalTokens": 5000,
+        }
+        db.store[("analytics_minutes", "m1")] = {
+            "minute": "2999-01-01T00:00",
+            "requests": 1,
+            "totalTokens": 10,
+        }
+        db.store[("usageEvents", "e1")] = {
+            "ts": 3000,
+            "uid": "plain1",
+            "surface": "chat",
+            "model": "openrouter/free",
+            "totalTokens": 42,
+            "status": "ok",
+        }
+        db.store[("chatErrors", "x1")] = {
+            "ts": 2000,
+            "uid": "plain1",
+            "status": 429,
+            "model": "openrouter/free",
+            "error": "quota",
+        }
+
+        # Detail: identity + subcollections + lifetime.
+        detail = admin.get_user_detail(db, "plain1")
+        assert detail["email"] == "plain@example.com"
+        assert detail["chats"]["count"] == 1
+        assert detail["apiKeys"][0]["name"] == "prod"
+        assert detail["lifetime"]["totalTokens"] == 900
+
+        # Users list carries lifetime usage.
+        payload = admin.get_users(db, "boss1", "owner")
+        plain_row = next(r for r in payload["users"] if r["uid"] == "plain1")
+        assert plain_row["lifetimeTokens"] == 900
+
+        # Overview carries lifetime + ranges + live keys.
+        overview = admin.get_overview(db)
+        assert overview["lifetime"]["totalTokens"] >= 5000
+        assert "24h" in overview["ranges"] and "48h" in overview["ranges"]
+        assert overview["live"] == {"streams": 0, "generating": 0}
+
+        # Logs merge newest-first with error codes.
+        logs = admin.get_logs(db)
+        kinds = [row["kind"] for row in logs["entries"]]
+        assert kinds[0] == "request" and "error" in kinds
+        error_row = next(r for r in logs["entries"] if r["kind"] == "error")
+        assert error_row["code"] == 429
+
+        # Storage reports unconfigured honestly.
+        assert admin.get_storage() == {"configured": False}
+
+        # Full-control actions.
+        result = admin.patch_user(
+            db, "boss1", "owner", "boss@example.com", "plain1", "reset-link"
+        )
+        assert result["link"].startswith("https://example.test/reset")
+        admin.patch_user(
+            db, "boss1", "owner", "boss@example.com", "plain1", "sign-out-all"
+        )
+        assert ("plain1", "revoked") in fake_auth.updated
+        # An employee may not mint a reset link for the owner.
+        try:
+            admin.patch_user(
+                db, "emp1", "admin", "emp@example.com", "boss1", "reset-link"
+            )
+            raise AssertionError("employee reset-link on owner must fail")
+        except admin.AdminAuthError as error:
+            assert error.status == 403
+
+        # Delete snapshots into the trash first.
+        admin.patch_user(
+            db, "boss1", "owner", "boss@example.com", "plain1", "delete"
+        )
+        snapshot = db.store[("deletedUsers", "plain1")]
+        assert snapshot["email"] == "plain@example.com"
+        assert snapshot["stats"]["chats"] == 1
+        assert snapshot["stats"]["lifetimeTokens"] == 900
+        trash = admin.get_trash(db)
+        assert trash["totals"]["accounts"] == 1
+        assert trash["totals"]["chats"] == 1
+        assert trash["entries"][0]["lifetimeTokens"] == 900
+    finally:
+        admin.firebase_auth = original
 
 
 if __name__ == "__main__":

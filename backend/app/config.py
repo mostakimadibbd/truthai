@@ -34,6 +34,14 @@ class Settings:
     firebase_database_url: str = os.environ.get(
         "NEXT_PUBLIC_FIREBASE_DATABASE_URL", ""
     ) or os.environ.get("FIREBASE_DATABASE_URL", "")
+    # Optional: media storage statistics for the admin panel.
+    # Accepts the single CLOUDINARY_URL (cloudinary://key:secret
+    # @cloud) or the split trio, same as the Next.js app.
+    cloudinary_url: str = os.environ.get("CLOUDINARY_URL", "")
+    cloudinary_cloud_name: str = os.environ.get("CLOUDINARY_CLOUD_NAME", "")
+    cloudinary_api_key: str = os.environ.get("CLOUDINARY_API_KEY", "")
+    cloudinary_api_secret: str = os.environ.get("CLOUDINARY_API_SECRET", "")
+
     upstash_rest_url: str = os.environ.get("UPSTASH_REDIS_REST_URL", "")
     upstash_rest_token: str = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 
@@ -59,6 +67,30 @@ class Settings:
     ).rstrip("/")
     max_concurrent_upstream: int = _int("BACKEND_MAX_CONCURRENT_UPSTREAM", 8)
     job_timeout_seconds: int = _int("BACKEND_JOB_TIMEOUT_SECONDS", 280)
+
+    @property
+    def cloudinary_credentials(self) -> tuple[str, str, str] | None:
+        """(cloud_name, api_key, api_secret) or None."""
+        if self.cloudinary_url.startswith("cloudinary://"):
+            try:
+                from urllib.parse import urlparse
+
+                parsed = urlparse(self.cloudinary_url)
+                if parsed.username and parsed.password and parsed.hostname:
+                    return parsed.hostname, parsed.username, parsed.password
+            except Exception:
+                pass
+        if (
+            self.cloudinary_cloud_name
+            and self.cloudinary_api_key
+            and self.cloudinary_api_secret
+        ):
+            return (
+                self.cloudinary_cloud_name,
+                self.cloudinary_api_key,
+                self.cloudinary_api_secret,
+            )
+        return None
 
     @property
     def firebase_project(self) -> str | None:

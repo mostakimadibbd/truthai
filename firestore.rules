@@ -192,6 +192,14 @@ service cloud.firestore {
     match /admins/{uid} {
       allow read, write: if false;
     }
+    // Deleted-account archive: when the owner deletes an
+    // account from the admin panel, its identity, profile and
+    // data-volume measurements are preserved here (message
+    // contents are purged with the account). Server-only; no
+    // client access.
+    match /deletedUsers/{uid} {
+      allow read, write: if false;
+    }
     match /analytics_minutes/{minute} {
       allow read, write: if false;
     }

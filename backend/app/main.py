@@ -234,6 +234,57 @@ async def admin_users(request: Request):
         return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
 
 
+@app.get("/v1/admin/logs")
+async def admin_logs(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    try:
+        return {"success": True, **admin.get_logs(firestore_client())}
+    except Exception:
+        return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
+
+
+@app.get("/v1/admin/storage")
+async def admin_storage(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    try:
+        return {"success": True, **admin.get_storage()}
+    except Exception:
+        return _error(
+            503, "STORAGE_UNAVAILABLE", "Storage statistics couldn’t be loaded."
+        )
+
+
+@app.get("/v1/admin/trash")
+async def admin_trash(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    try:
+        return {"success": True, **admin.get_trash(firestore_client())}
+    except Exception:
+        return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
+
+
+@app.get("/v1/admin/users/{uid}")
+async def admin_user_detail(request: Request, uid: str):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    try:
+        return {
+            "success": True,
+            **admin.get_user_detail(firestore_client(), uid),
+        }
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+    except Exception:
+        return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
+
+
 @app.patch("/v1/admin/users")
 async def admin_users_patch(request: Request):
     gate = await _admin_gate(request)

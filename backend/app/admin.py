@@ -377,6 +377,17 @@ def get_overview(db) -> dict:
         "integrations": checks,
         "integrationsOk": all(checks.values()),
     }
+    # Lifetime: every day of metering, summed.
+    lifetime = _totals(None)
+    days_with_data = 0
+    for doc in db.collection("analytics_days").limit(1000).get():
+        data = doc.to_dict() or {}
+        days_with_data += 1
+        for field in TOTAL_FIELDS:
+            value = data.get(field)
+            if isinstance(value, (int, float)):
+                lifetime[field] += value
+
     return {
         "today": today,
         "totals": totals,
@@ -389,7 +400,228 @@ def get_overview(db) -> dict:
         "recentSearches": searches,
         "recentErrors": errors,
         "backend": backend,
+        "live": _live_streams(),
+        "lifetime": lifetime,
+        "lifetimeDays": days_with_data,
+        "ranges": _ranges(db, now),
     }
+
+
+def _ranges(db, now: datetime) -> dict:
+    """24h / 48h / 7d views. The 24h and 48h views aggregate
+    the per-minute rollups into hourly (24h) and two-hourly
+    (48h) buckets; 7d reuses the daily rollups. Best effort:
+    a range that fails to load is simply absent."""
+    ranges: dict = {}
+    try:
+        start48 = _minute_key(now - timedelta(hours=48))
+        rows = []
+        for doc in (
+            db.collection("analytics_minutes")
+            .where("minute", ">=", start48)
+            .limit(4000)
+            .get()
+        ):
+            data = doc.to_dict() or {}
+            if isinstance(data.get("minute"), str):
+                rows.append(data)
+
+        def aggregate(hours: int, bucket_hours: int) -> dict:
+            cutoff = _minute_key(now - timedelta(hours=hours))
+            totals = _totals(None)
+            buckets: list[dict] = []
+            bucket_count = hours // bucket_hours
+            for index in range(bucket_count):
+                start = now - timedelta(hours=hours - index * bucket_hours)
+                buckets.append(
+                    {"label": start.strftime("%H:%M"), **_totals(None)}
+                )
+            for data in rows:
+                minute = data["minute"]
+                if minute < cutoff:
+                    continue
+                for field in TOTAL_FIELDS:
+                    value = data.get(field)
+                    if isinstance(value, (int, float)):
+                        totals[field] += value
+                try:
+                    moment = datetime.strptime(minute, "%Y-%m-%dT%H:%M").replace(
+                        tzinfo=timezone.utc
+                    )
+                except ValueError:
+                    continue
+                age_hours = (now - moment).total_seconds() / 3600
+                slot = int((hours - age_hours) // bucket_hours)
+                if 0 <= slot < bucket_count:
+                    for field in TOTAL_FIELDS:
+                        value = data.get(field)
+                        if isinstance(value, (int, float)):
+                            buckets[slot][field] += value
+            return {"totals": totals, "buckets": buckets}
+
+        ranges["24h"] = aggregate(24, 1)
+        ranges["48h"] = aggregate(48, 2)
+    except Exception:
+        pass
+    return ranges
+
+
+def get_logs(db) -> dict:
+    """One realtime timeline merging the platform's own
+    records: requests, web searches, model errors (with their
+    status codes) and admin actions — newest first."""
+    entries: list[dict] = []
+
+    for doc in (
+        db.collection("usageEvents")
+        .order_by("ts", direction="DESCENDING")
+        .limit(40)
+        .get()
+    ):
+        data = doc.to_dict() or {}
+        entries.append(
+            {
+                "id": f"req-{doc.id}",
+                "ts": data.get("ts") if isinstance(data.get("ts"), (int, float)) else 0,
+                "kind": "request",
+                "uid": data.get("uid") or "",
+                "summary": (
+                    f"{data.get('surface') or 'chat'} · "
+                    f"{data.get('model') or 'auto'} · "
+                    f"{data.get('totalTokens') or 0} tokens"
+                ),
+                "code": data.get("status") or None,
+            }
+        )
+    for doc in (
+        db.collection("searchEvents")
+        .order_by("ts", direction="DESCENDING")
+        .limit(25)
+        .get()
+    ):
+        data = doc.to_dict() or {}
+        entries.append(
+            {
+                "id": f"search-{doc.id}",
+                "ts": data.get("ts") if isinstance(data.get("ts"), (int, float)) else 0,
+                "kind": "search",
+                "uid": data.get("uid") or "",
+                "summary": (
+                    f"“{data.get('query') or ''}” · "
+                    f"{data.get('resultCount') or 0} results · "
+                    f"{data.get('provider') or '—'}"
+                ),
+                "code": None,
+            }
+        )
+    for doc in (
+        db.collection("chatErrors")
+        .order_by("ts", direction="DESCENDING")
+        .limit(25)
+        .get()
+    ):
+        data = doc.to_dict() or {}
+        entries.append(
+            {
+                "id": f"error-{doc.id}",
+                "ts": data.get("ts") if isinstance(data.get("ts"), (int, float)) else 0,
+                "kind": "error",
+                "uid": data.get("uid") or "",
+                "summary": (
+                    f"{data.get('model') or 'model'} failed"
+                    + (" (web on)" if data.get("webInjected") is True else "")
+                    + f": {(data.get('error') or '')[:140]}"
+                ),
+                "code": data.get("status"),
+            }
+        )
+    for doc in (
+        db.collection("adminActions")
+        .order_by("ts", direction="DESCENDING")
+        .limit(25)
+        .get()
+    ):
+        data = doc.to_dict() or {}
+        entries.append(
+            {
+                "id": f"admin-{doc.id}",
+                "ts": data.get("ts") if isinstance(data.get("ts"), (int, float)) else 0,
+                "kind": "admin",
+                "uid": data.get("targetUid") or "",
+                "summary": f"{data.get('action') or 'action'} by {data.get('actorRole') or 'admin'}",
+                "code": None,
+            }
+        )
+    entries.sort(key=lambda row: row["ts"], reverse=True)
+    entries = entries[:80]
+    emails = _resolve_emails(list({row["uid"] for row in entries if row["uid"]}))
+    for row in entries:
+        row["email"] = emails.get(row["uid"])
+    return {"entries": entries}
+
+
+def get_storage() -> dict:
+    """Media storage from Cloudinary's usage API: plan,
+    credits, storage/bandwidth consumption and object counts.
+    Reports configured: false (with the variable names to set)
+    until the backend can see the Cloudinary credentials."""
+    credentials = settings.cloudinary_credentials
+    if credentials is None:
+        return {"configured": False}
+    cloud_name, api_key, api_secret = credentials
+    import httpx
+
+    response = httpx.get(
+        f"https://api.cloudinary.com/v1_1/{cloud_name}/usage",
+        auth=(api_key, api_secret),
+        timeout=15,
+    )
+    response.raise_for_status()
+    usage = response.json()
+
+    def section(name: str) -> dict:
+        value = usage.get(name)
+        return value if isinstance(value, dict) else {}
+
+    credits = section("credits")
+    return {
+        "configured": True,
+        "plan": usage.get("plan"),
+        "cloudName": cloud_name,
+        "creditsLimit": credits.get("limit"),
+        "creditsUsed": credits.get("usage"),
+        "creditsUsedPercent": credits.get("used_percent"),
+        "storageBytes": section("storage").get("usage"),
+        "bandwidthBytes": section("bandwidth").get("usage"),
+        "objects": section("objects").get("count"),
+        "requests": usage.get("requests"),
+        "transformations": section("transformations").get("usage"),
+        "updatedAt": usage.get("last_updated"),
+    }
+
+
+def _live_streams() -> dict:
+    """What's happening right now in the Realtime Database:
+    how many chat stream nodes exist and how many are actively
+    generating. Best effort — a realtime hiccup must never take
+    the overview down with it."""
+    try:
+        from .firebase import rtdb_ref
+
+        snapshot = rtdb_ref("chatStreams").get() or {}
+        streams = 0
+        generating = 0
+        if isinstance(snapshot, dict):
+            for uid_node in snapshot.values():
+                if not isinstance(uid_node, dict):
+                    continue
+                for node in uid_node.values():
+                    streams += 1
+                    if isinstance(node, dict) and node.get("status") == "generating":
+                        generating += 1
+        return {"streams": streams, "generating": generating}
+    except Exception:
+        return {"streams": 0, "generating": 0}
 
 
 def get_audit(db) -> dict:
@@ -444,6 +676,18 @@ def get_users(db, viewer_uid: str, viewer_role: str) -> dict:
         uid = data.get("uid") if isinstance(data.get("uid"), str) else doc.id
         usage[uid] = _totals(data)
 
+    lifetime_usage: dict[str, dict] = {}
+    for doc in db.collection("analytics_user_days").limit(3000).get():
+        data = doc.to_dict() or {}
+        uid = data.get("uid") if isinstance(data.get("uid"), str) else None
+        if not uid:
+            continue
+        entry = lifetime_usage.setdefault(uid, {"requests": 0, "totalTokens": 0})
+        if isinstance(data.get("requests"), (int, float)):
+            entry["requests"] += data["requests"]
+        if isinstance(data.get("totalTokens"), (int, float)):
+            entry["totalTokens"] += data["totalTokens"]
+
     users = []
     page = auth.list_users(max_results=200)
     for record in page.iterate_all():
@@ -470,6 +714,8 @@ def get_users(db, viewer_uid: str, viewer_role: str) -> dict:
                 "requestsToday": totals["requests"],
                 "totalTokensToday": totals["totalTokens"],
                 "costUsdToday": totals["costUsd"],
+                "lifetimeRequests": (lifetime_usage.get(record.uid) or {}).get("requests", 0),
+                "lifetimeTokens": (lifetime_usage.get(record.uid) or {}).get("totalTokens", 0),
             }
         )
         if len(users) >= 200:
@@ -492,7 +738,248 @@ def get_users(db, viewer_uid: str, viewer_role: str) -> dict:
     }
 
 
-ACTIONS = ("promote", "demote", "disable", "enable", "delete")
+ACTIONS = (
+    "promote",
+    "demote",
+    "disable",
+    "enable",
+    "delete",
+    "reset-link",
+    "sign-out-all",
+)
+
+
+def _snapshot_deleted_user(
+    db, actor_uid: str, actor_role: str, target_uid: str, target_role: str | None
+) -> None:
+    auth = firebase_auth()
+    record = auth.get_user(target_uid)
+    metadata = record.user_metadata
+    profile_doc = db.collection("users").document(target_uid).get()
+    profile = profile_doc.to_dict() if profile_doc.exists else {}
+
+    lifetime = _totals(None)
+    usage_days = 0
+    for doc in (
+        db.collection("analytics_user_days").where("uid", "==", target_uid).get()
+    ):
+        data = doc.to_dict() or {}
+        usage_days += 1
+        for field in TOTAL_FIELDS:
+            value = data.get(field)
+            if isinstance(value, (int, float)):
+                lifetime[field] += value
+
+    def sub_count(name: str, cap: int) -> int:
+        return len(
+            db.collection("users")
+            .document(target_uid)
+            .collection(name)
+            .limit(cap)
+            .get()
+        )
+
+    chat_titles = []
+    for doc in (
+        db.collection("users").document(target_uid).collection("chats").limit(200).get()
+    ):
+        data = doc.to_dict() or {}
+        if isinstance(data.get("title"), str):
+            chat_titles.append(data["title"])
+
+    db.collection("deletedUsers").document(target_uid).set(
+        {
+            "uid": target_uid,
+            "email": record.email,
+            "displayName": record.display_name
+            or (profile.get("displayName") if isinstance(profile.get("displayName"), str) else None),
+            "role": target_role,
+            "accountCreatedAt": getattr(metadata, "creation_timestamp", None),
+            "lastSignInAt": getattr(metadata, "last_sign_in_timestamp", None),
+            "deletedAt": int(time.time() * 1000),
+            "deletedBy": actor_uid,
+            "deletedByRole": actor_role,
+            "profile": profile,
+            "stats": {
+                "chats": len(chat_titles),
+                "chatTitles": chat_titles[:50],
+                "apiKeys": sub_count("apiKeys", 100),
+                "devices": sub_count("devices", 100),
+                "lifetimeRequests": lifetime["requests"],
+                "lifetimeTokens": lifetime["totalTokens"],
+                "lifetimeCostUsd": lifetime["costUsd"],
+                "usageDays": usage_days,
+            },
+        }
+    )
+
+
+def get_trash(db) -> dict:
+    """The deleted-accounts archive: who was removed, when, by
+    whom, and how much data went with them — plus the totals
+    across the whole trash."""
+    entries = []
+    docs = (
+        db.collection("deletedUsers")
+        .order_by("deletedAt", direction="DESCENDING")
+        .limit(100)
+        .get()
+    )
+    totals = {"accounts": 0, "chats": 0, "lifetimeTokens": 0, "lifetimeRequests": 0}
+    for doc in docs:
+        data = doc.to_dict() or {}
+        stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
+        entry = {
+            "uid": data.get("uid") or doc.id,
+            "email": data.get("email"),
+            "displayName": data.get("displayName"),
+            "role": data.get("role"),
+            "deletedAt": data.get("deletedAt") or 0,
+            "deletedByRole": data.get("deletedByRole"),
+            "chats": stats.get("chats") or 0,
+            "apiKeys": stats.get("apiKeys") or 0,
+            "devices": stats.get("devices") or 0,
+            "lifetimeTokens": stats.get("lifetimeTokens") or 0,
+            "lifetimeRequests": stats.get("lifetimeRequests") or 0,
+            "lifetimeCostUsd": stats.get("lifetimeCostUsd") or 0,
+        }
+        entries.append(entry)
+        totals["accounts"] += 1
+        totals["chats"] += entry["chats"]
+        totals["lifetimeTokens"] += entry["lifetimeTokens"]
+        totals["lifetimeRequests"] += entry["lifetimeRequests"]
+    return {"entries": entries, "totals": totals}
+
+
+def get_user_detail(db, uid: str) -> dict:
+    """Everything the console shows about one account: identity,
+    a week of usage, devices, recent chats, API keys and recent
+    security/API activity. Read-only; assembled from the same
+    collections the product itself writes."""
+    auth = firebase_auth()
+    try:
+        record = auth.get_user(uid)
+    except Exception:
+        raise AdminAuthError(404, "USER_NOT_FOUND", "That account no longer exists.")
+    metadata = record.user_metadata
+    profile_doc = db.collection("users").document(uid).get()
+    profile = profile_doc.to_dict() if profile_doc.exists else {}
+
+    now = datetime.now(timezone.utc)
+    week = []
+    day_docs = (
+        db.collection("analytics_user_days").where("uid", "==", uid).get()
+    )
+    by_day = {}
+    for doc in day_docs:
+        data = doc.to_dict() or {}
+        if isinstance(data.get("day"), str):
+            by_day[data["day"]] = _totals(data)
+    for offset in range(6, -1, -1):
+        day = _day_key(now - timedelta(days=offset))
+        week.append({"day": day, **(by_day.get(day) or _totals(None))})
+
+    def sub(name: str):
+        return db.collection("users").document(uid).collection(name)
+
+    chats = []
+    chat_docs = sub("chats").limit(200).get()
+    for doc in chat_docs:
+        data = doc.to_dict() or {}
+        chats.append(
+            {
+                "id": doc.id,
+                "title": data.get("title") if isinstance(data.get("title"), str) else None,
+                "updatedAt": data.get("updatedAt") if isinstance(data.get("updatedAt"), (int, float)) else None,
+                "pinned": data.get("pinned") is True,
+            }
+        )
+    chats.sort(key=lambda row: row["updatedAt"] or 0, reverse=True)
+
+    devices = []
+    for doc in sub("devices").limit(50).get():
+        data = doc.to_dict() or {}
+        devices.append(
+            {
+                "id": doc.id,
+                "label": data.get("label") if isinstance(data.get("label"), str) else None,
+                "platform": data.get("platform") if isinstance(data.get("platform"), str) else None,
+                "lastSeenAt": data.get("lastSeenAt") if isinstance(data.get("lastSeenAt"), (int, float)) else None,
+                "signIns": data.get("signIns") if isinstance(data.get("signIns"), int) else None,
+            }
+        )
+
+    api_keys = []
+    for doc in sub("apiKeys").limit(25).get():
+        data = doc.to_dict() or {}
+        api_keys.append(
+            {
+                "id": doc.id,
+                "name": data.get("name") if isinstance(data.get("name"), str) else None,
+                "revoked": data.get("revoked") is True,
+                "createdAt": data.get("createdAt") if isinstance(data.get("createdAt"), (int, float)) else None,
+                "lastUsedAt": data.get("lastUsedAt") if isinstance(data.get("lastUsedAt"), (int, float)) else None,
+            }
+        )
+
+    security = []
+    for doc in (
+        sub("securityEvents").order_by("ts", direction="DESCENDING").limit(8).get()
+    ):
+        data = doc.to_dict() or {}
+        security.append(
+            {
+                "type": data.get("type") if isinstance(data.get("type"), str) else (data.get("event") if isinstance(data.get("event"), str) else "event"),
+                "ts": data.get("ts") if isinstance(data.get("ts"), (int, float)) else 0,
+                "newDevice": data.get("newDevice") is True,
+            }
+        )
+
+    api_events = []
+    for doc in (
+        sub("apiEvents").order_by("ts", direction="DESCENDING").limit(8).get()
+    ):
+        data = doc.to_dict() or {}
+        api_events.append(
+            {
+                "model": data.get("model") if isinstance(data.get("model"), str) else None,
+                "totalTokens": data.get("totalTokens") if isinstance(data.get("totalTokens"), int) else 0,
+                "status": data.get("status") if isinstance(data.get("status"), (int, str)) else None,
+                "ts": data.get("ts") if isinstance(data.get("ts"), (int, float)) else 0,
+            }
+        )
+
+    providers = []
+    for info in record.provider_data or []:
+        provider_id = getattr(info, "provider_id", None)
+        if isinstance(provider_id, str):
+            providers.append(provider_id)
+
+    lifetime = _totals(None)
+    for day_totals in by_day.values():
+        for field in TOTAL_FIELDS:
+            lifetime[field] += day_totals[field]
+
+    return {
+        "uid": uid,
+        "email": record.email,
+        "displayName": record.display_name
+        or (profile.get("displayName") if isinstance(profile.get("displayName"), str) else None),
+        "emailVerified": bool(record.email_verified),
+        "disabled": bool(record.disabled),
+        "role": _registry_role(db, uid),
+        "providers": providers,
+        "createdAt": getattr(metadata, "creation_timestamp", None),
+        "lastSignInAt": getattr(metadata, "last_sign_in_timestamp", None),
+        "developer": sub("developerProfile").document("main").get().exists,
+        "week": week,
+        "lifetime": lifetime,
+        "chats": {"count": len(chats), "recent": chats[:6]},
+        "devices": devices,
+        "apiKeys": api_keys,
+        "securityEvents": security,
+        "apiEvents": api_events,
+    }
 
 
 def patch_user(
@@ -524,6 +1011,15 @@ def patch_user(
             raise AdminAuthError(
                 400, "OWNER_PROTECTED", "The owner’s account can’t be deleted."
             )
+        # Trash snapshot FIRST: the account's identity, profile
+        # and data-volume measurements move to deletedUsers so
+        # the owner can see exactly how much data was trashed.
+        # Message contents are purged with the account — the
+        # snapshot keeps metadata and counts, not conversations.
+        try:
+            _snapshot_deleted_user(db, actor_uid, actor_role, target_uid, target_role)
+        except Exception:
+            pass
         try:
             db.collection("admins").document(target_uid).delete()
         except Exception:
@@ -546,7 +1042,35 @@ def patch_user(
         except Exception:
             pass
         return {"success": True, "uid": target_uid, "action": "delete"}
-    if action in ("promote", "demote"):
+    result: dict = {"success": True, "uid": target_uid, "action": action}
+    if action in ("reset-link", "sign-out-all"):
+        # Full-control actions. Touching the OWNER's account
+        # this way stays the owner's own power.
+        if target_role == "owner" and actor_role != "owner":
+            raise AdminAuthError(
+                403,
+                "OWNER_ONLY",
+                "Only the owner can do that on the owner’s account.",
+            )
+        if action == "reset-link":
+            try:
+                record = firebase_auth().get_user(target_uid)
+            except Exception:
+                raise AdminAuthError(
+                    404, "USER_NOT_FOUND", "That account no longer exists."
+                )
+            if not record.email:
+                raise AdminAuthError(
+                    400,
+                    "NO_EMAIL",
+                    "That account has no email address to send a reset link to.",
+                )
+            result["link"] = firebase_auth().generate_password_reset_link(
+                record.email
+            )
+        else:
+            firebase_auth().revoke_refresh_tokens(target_uid)
+    elif action in ("promote", "demote"):
         # Granting and revoking admin access is the owner's
         # power alone — enforced here, not just hidden in the UI.
         if actor_role != "owner":
@@ -596,4 +1120,4 @@ def patch_user(
         )
     except Exception:
         pass  # Auditing must never block the action itself.
-    return {"success": True, "uid": target_uid, "action": action}
+    return result
