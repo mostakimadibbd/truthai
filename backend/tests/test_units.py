@@ -274,6 +274,9 @@ class _AdminDoc:
         else:
             self._store[key] = dict(data)
 
+    def delete(self):
+        self._store.pop((self._collection, self._id), None)
+
 
 class _AdminCollection(_AdminQuery):
     def __init__(self, store, name):
@@ -347,10 +350,16 @@ def test_admin_gate_and_actions():
     from app import admin
 
     db = _AdminDb()
-    db.store[("users", "boss1")] = {"admin": True, "displayName": "Boss"}
-    db.store[("users", "plain1")] = {"displayName": "Plain"}
+    # Authority is the dedicated admins registry (doc id = uid),
+    # NOT a flag on the profile: plain1 HAS admin: true on the
+    # profile and must still be refused.
+    db.store[("admins", "boss1")] = {"role": "owner", "grantedBy": "boss1"}
+    db.store[("admins", "emp1")] = {"role": "admin", "grantedBy": "boss1"}
+    db.store[("users", "boss1")] = {"displayName": "Boss"}
+    db.store[("users", "plain1")] = {"displayName": "Plain", "admin": True}
     records = {
         "boss1": _FakeUserRecord("boss1", "boss@example.com"),
+        "emp1": _FakeUserRecord("emp1", "emp@example.com"),
         "plain1": _FakeUserRecord("plain1", "plain@example.com"),
     }
     fake_auth = _FakeAuthModule(records)
@@ -359,7 +368,11 @@ def test_admin_gate_and_actions():
     original_secret = admin.settings.admin_api_secret
     original_token = admin.settings.service_token
     admin.firebase_auth = lambda: fake_auth
-    admin.verify_id_token = lambda token: {"tok-boss": "boss1", "tok-plain": "plain1"}.get(token)
+    admin.verify_id_token = lambda token: {
+        "tok-boss": "boss1",
+        "tok-emp": "emp1",
+        "tok-plain": "plain1",
+    }.get(token)
     admin.settings.admin_api_secret = "test-admin-secret"
     admin.settings.service_token = "test-service-token"
     try:
@@ -378,36 +391,62 @@ def test_admin_gate_and_actions():
             raise AssertionError("bad admin secret accepted")
         except admin.AdminAuthError as error:
             assert error.status == 401
-        # Non-admin user -> 403.
+        # Profile flag without a registry entry -> 403.
         try:
             asyncio.run(gate("test-service-token", "test-admin-secret", "Bearer tok-plain"))
-            raise AssertionError("non-admin accepted")
+            raise AssertionError("profile-flag user accepted")
         except admin.AdminAuthError as error:
             assert error.status == 403
-        # DB-flagged admin -> in.
-        uid, email = asyncio.run(
+        # Registry roles resolve.
+        uid, email, role = asyncio.run(
             gate("test-service-token", "test-admin-secret", "Bearer tok-boss")
         )
-        assert uid == "boss1" and email == "boss@example.com"
+        assert (uid, role) == ("boss1", "owner")
+        uid, email, role = asyncio.run(
+            gate("test-service-token", "test-admin-secret", "Bearer tok-emp", ip="10.0.0.2")
+        )
+        assert (uid, role) == ("emp1", "admin")
 
-        # Promote writes the flag; audit is recorded.
-        admin.patch_user(db, "boss1", "plain1", "promote")
-        assert db.store[("users", "plain1")]["admin"] is True
-        assert any(coll == "adminActions" for (coll, _id) in db.store)
-        # Self-demote is refused.
+        # A plain admin cannot grant admin access (owner-only).
         try:
-            admin.patch_user(db, "boss1", "boss1", "demote")
+            admin.patch_user(db, "emp1", "admin", "emp@example.com", "plain1", "promote")
+            raise AssertionError("admin granted access")
+        except admin.AdminAuthError as error:
+            assert error.code == "OWNER_ONLY"
+        # The owner grants: a registry entry appears, role admin.
+        admin.patch_user(db, "boss1", "owner", "boss@example.com", "plain1", "promote")
+        assert db.store[("admins", "plain1")]["role"] == "admin"
+        assert db.store[("admins", "plain1")]["grantedBy"] == "boss1"
+        assert any(coll == "adminActions" for (coll, _id) in db.store)
+        # The owner revokes at any time: the entry is deleted.
+        admin.patch_user(db, "boss1", "owner", "boss@example.com", "plain1", "demote")
+        assert ("admins", "plain1") not in db.store
+        # Self-demote is refused; the owner entry is protected.
+        try:
+            admin.patch_user(db, "boss1", "owner", "boss@example.com", "boss1", "demote")
             raise AssertionError("self-demote allowed")
         except admin.AdminAuthError as error:
             assert error.code == "SELF_ACTION"
-        # Disable flows to the auth module.
-        admin.patch_user(db, "boss1", "plain1", "disable")
+        # A plain admin may disable a normal account but not the owner.
+        admin.patch_user(db, "emp1", "admin", "emp@example.com", "plain1", "disable")
         assert fake_auth.updated == [("plain1", True)]
+        try:
+            admin.patch_user(db, "emp1", "admin", "emp@example.com", "boss1", "disable")
+            raise AssertionError("admin disabled the owner")
+        except admin.AdminAuthError as error:
+            assert error.code == "OWNER_ONLY"
 
-        # Directory + overview shape against the stubs.
-        directory = admin.get_users(db)
-        assert directory["users"][0]["uid"] == "boss1"  # admins first
-        assert any(u["admin"] for u in directory["users"])
+        # Directory carries roles + viewer; owner sorts first.
+        directory = admin.get_users(db, "boss1", "owner")
+        assert directory["viewer"] == {
+            "uid": "boss1",
+            "role": "owner",
+            "registered": True,
+        }
+        assert directory["users"][0]["uid"] == "boss1"
+        assert directory["users"][0]["role"] == "owner"
+        emp_row = next(u for u in directory["users"] if u["uid"] == "emp1")
+        assert emp_row["role"] == "admin" and emp_row["admin"] is True
         overview = admin.get_overview(db)
         assert len(overview["minutes"]) == 60
         assert overview["backend"]["integrationsOk"] in (True, False)

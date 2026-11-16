@@ -46,11 +46,24 @@ reaches a browser.
 
 Anyone with a Xyro account can complete the sign-in form, but
 the backend returns 403 and the panel shows nothing unless the
-account's Firestore document (`users/{uid}`) has
-`admin: true` — or the account is on the bootstrap allowlist
-(the owner's email). Admins manage the flag for everyone else
-from the Users tab (promote/demote), and can disable accounts;
-every action is written to the `adminActions` audit collection.
+account has an entry in the database's dedicated `admins`
+registry (collection `admins`, document id = the admin's uid,
+field `role`). The owner's email is accepted as owner until —
+and so that — the owner claims their registry entry from the
+Users tab.
+
+Roles:
+
+- **Owner** — exactly one. The only account that can grant or
+  revoke admin access (Make admin / Remove admin), at any
+  time; revocation deletes the registry entry and takes effect
+  on the target's next request.
+- **Admin** — can monitor everything and enable/disable normal
+  accounts, but cannot grant or revoke admin access (the
+  backend refuses with 403, the controls are also hidden).
+
+Every action is written to the `adminActions` audit
+collection.
 
 ## Notes
 

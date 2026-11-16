@@ -9,15 +9,29 @@ own server, which attaches three credentials to every call:
      service and the panel, so the main app's credentials alone
      can never open an admin endpoint.
   3. Authorization: Bearer <Firebase ID token> of the signed-in
-     administrator, verified here, whose profile document must
-     carry admin: true (the email allowlist is kept only as a
-     bootstrap/recovery path for the owner).
+     administrator, verified here, whose uid must appear in the
+     database's dedicated admins registry (see below).
 
 Knowing this service's address alone therefore yields nothing:
 every admin route fails closed without all three. Failed
-attempts are throttled per client IP. Admin authority itself
-lives in the database (users/{uid}.admin) — profile documents
-are writable only by servers, so nobody can self-promote.
+attempts are throttled per client IP.
+
+Admin authority lives in a dedicated registry collection,
+`admins/{uid}`, whose document id IS the admin's uid and whose
+`role` field is "owner" or "admin":
+
+  - The OWNER is the single account whose registry entry says
+    role "owner" (the project owner's email is also accepted as
+    owner until the entry exists, so the panel can be claimed —
+    claiming writes the entry). Only the owner can grant or
+    revoke admin access, from the panel, at any time; revocation
+    deletes the entry and takes effect on the next request.
+  - ADMINs (e.g. the owner's employees) can monitor everything
+    and enable/disable accounts, but cannot grant or revoke
+    admin access — the backend refuses, not just the UI.
+
+The registry is writable only by this service (Firestore rules
+deny all client access to it), so nobody can self-promote.
 """
 from __future__ import annotations
 
@@ -79,14 +93,44 @@ def _is_admin_email(email: str | None) -> bool:
     return email.lower() in allowed
 
 
+def _registry_role(db, uid: str) -> str | None:
+    """The uid's role from the dedicated admins registry, if any."""
+    try:
+        snapshot = db.collection("admins").document(uid).get()
+        if not snapshot.exists:
+            return None
+        data = snapshot.to_dict() or {}
+        role = data.get("role")
+        return role if role in ("owner", "admin") else "admin"
+    except Exception:
+        return None
+
+
+def _owner_registered(db) -> bool:
+    try:
+        rows = (
+            db.collection("admins").where("role", "==", "owner").limit(1).get()
+        )
+        return len(rows) > 0
+    except Exception:
+        return False
+
+
 async def authenticate_admin(
     service_token: str | None,
     admin_secret: str | None,
     authorization: str | None,
     client_ip: str,
     db,
-) -> tuple[str, str | None]:
-    """Verify all three credentials; return (uid, email)."""
+) -> tuple[str, str | None, str]:
+    """Verify all three credentials; return (uid, email, role).
+
+    Role resolution: the registry entry wins. The bootstrap
+    owner email is a permanent owner-level recovery path (so the
+    owner can never be locked out); claiming the panel writes
+    the matching registry entry, after which the database is
+    the visible source of truth.
+    """
     if _throttled(client_ip):
         raise AdminAuthError(
             429, "TOO_MANY_ATTEMPTS", "Too many failed attempts. Try again shortly."
@@ -117,17 +161,14 @@ async def authenticate_admin(
         email = record.email
     except Exception:
         email = None
+    role = await asyncio.to_thread(_registry_role, db, uid)
+    if role:
+        return uid, email, role
     if _is_admin_email(email):
-        return uid, email
-    try:
-        snapshot = await asyncio.to_thread(
-            db.collection("users").document(uid).get
-        )
-        data = snapshot.to_dict() if snapshot.exists else None
-    except Exception:
-        data = None
-    if data and data.get("admin") is True:
-        return uid, email
+        # Bootstrap/recovery: the project owner's account acts as
+        # owner (permanently for the primary bootstrap email, so
+        # the owner can never be locked out of their own panel).
+        return uid, email, "owner"
     raise fail(403, "ADMIN_ONLY", "This area is available to administrators only.")
 
 
@@ -281,7 +322,7 @@ def get_overview(db) -> dict:
     }
 
 
-def get_users(db) -> dict:
+def get_users(db, viewer_uid: str, viewer_role: str) -> dict:
     now = datetime.now(timezone.utc)
     today = _day_key(now)
     auth = firebase_auth()
@@ -289,6 +330,12 @@ def get_users(db) -> dict:
     profiles: dict[str, dict] = {}
     for doc in db.collection("users").limit(500).get():
         profiles[doc.id] = doc.to_dict() or {}
+
+    registry: dict[str, str] = {}
+    for doc in db.collection("admins").limit(500).get():
+        data = doc.to_dict() or {}
+        role = data.get("role")
+        registry[doc.id] = role if role in ("owner", "admin") else "admin"
 
     usage: dict[str, dict] = {}
     for doc in db.collection("analytics_user_days").where("day", "==", today).get():
@@ -302,6 +349,11 @@ def get_users(db) -> dict:
         profile = profiles.get(record.uid) or {}
         totals = usage.get(record.uid) or _totals(None)
         metadata = record.user_metadata
+        role = registry.get(record.uid)
+        if role is None and record.uid == viewer_uid:
+            # The viewer may be in via the bootstrap owner path
+            # before claiming a registry entry.
+            role = viewer_role
         users.append(
             {
                 "uid": record.uid,
@@ -310,7 +362,8 @@ def get_users(db) -> dict:
                 or (profile.get("displayName") if isinstance(profile.get("displayName"), str) else None),
                 "emailVerified": bool(record.email_verified),
                 "disabled": bool(record.disabled),
-                "admin": profile.get("admin") is True,
+                "admin": role is not None,
+                "role": role,
                 "createdAt": getattr(metadata, "creation_timestamp", None),
                 "lastSignInAt": getattr(metadata, "last_sign_in_timestamp", None),
                 "requestsToday": totals["requests"],
@@ -320,16 +373,35 @@ def get_users(db) -> dict:
         )
         if len(users) >= 200:
             break
+    role_rank = {"owner": 0, "admin": 1}
     users.sort(
-        key=lambda row: (not row["admin"], -row["totalTokensToday"])
+        key=lambda row: (role_rank.get(row["role"], 2), -row["totalTokensToday"])
     )
-    return {"today": today, "users": users, "truncated": page.page_token is not None}
+    return {
+        "today": today,
+        "users": users,
+        "truncated": page.page_token is not None,
+        "viewer": {
+            "uid": viewer_uid,
+            "role": viewer_role,
+            # False when the viewer is in through the bootstrap
+            # owner path and has not claimed a registry entry yet.
+            "registered": viewer_uid in registry,
+        },
+    }
 
 
 ACTIONS = ("promote", "demote", "disable", "enable")
 
 
-def patch_user(db, actor_uid: str, target_uid: str, action: str) -> dict:
+def patch_user(
+    db,
+    actor_uid: str,
+    actor_role: str,
+    actor_email: str | None,
+    target_uid: str,
+    action: str,
+) -> dict:
     if action not in ACTIONS:
         raise AdminAuthError(400, "INVALID_ACTION", "A valid action is required.")
     if target_uid == actor_uid and action in ("demote", "disable"):
@@ -338,16 +410,50 @@ def patch_user(db, actor_uid: str, target_uid: str, action: str) -> dict:
             "SELF_ACTION",
             "You can’t demote or disable your own admin account.",
         )
+    target_role = _registry_role(db, target_uid)
     if action in ("promote", "demote"):
-        db.collection("users").document(target_uid).set(
-            {"admin": action == "promote"}, merge=True
-        )
+        # Granting and revoking admin access is the owner's
+        # power alone — enforced here, not just hidden in the UI.
+        if actor_role != "owner":
+            raise AdminAuthError(
+                403,
+                "OWNER_ONLY",
+                "Only the owner can grant or revoke admin access.",
+            )
+        if action == "demote" and target_role == "owner":
+            raise AdminAuthError(
+                400, "OWNER_PROTECTED", "The owner’s access can’t be removed."
+            )
+        if action == "promote":
+            # The bootstrap owner claiming their own entry is
+            # recorded as owner; every other grant is a plain
+            # admin, and only when no conflicting owner exists.
+            granted_role = "admin"
+            if target_uid == actor_uid and _is_admin_email(actor_email):
+                if not _owner_registered(db) or target_role == "owner":
+                    granted_role = "owner"
+            db.collection("admins").document(target_uid).set(
+                {
+                    "role": granted_role,
+                    "grantedBy": actor_uid,
+                    "grantedAt": int(time.time() * 1000),
+                }
+            )
+        else:
+            # Revocation deletes the registry entry and takes
+            # effect on the target's very next request.
+            db.collection("admins").document(target_uid).delete()
     else:
+        if target_role == "owner" and actor_role != "owner":
+            raise AdminAuthError(
+                403, "OWNER_ONLY", "Only the owner can disable the owner’s account."
+            )
         firebase_auth().update_user(target_uid, disabled=(action == "disable"))
     try:
         db.collection("adminActions").add(
             {
                 "actorUid": actor_uid,
+                "actorRole": actor_role,
                 "targetUid": target_uid,
                 "action": action,
                 "ts": int(time.time() * 1000),

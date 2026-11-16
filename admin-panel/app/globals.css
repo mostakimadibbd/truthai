@@ -292,6 +292,7 @@ code {
   vertical-align: middle;
 }
 .badge-admin { background: rgba(59, 130, 246, 0.18); border-color: var(--accent); color: var(--accent-2); }
+.badge-owner { background: rgba(96, 165, 250, 0.28); border-color: var(--accent-2); color: #dbeafe; }
 .badge-warn { background: rgba(251, 191, 36, 0.12); border-color: rgba(251, 191, 36, 0.5); color: var(--warn); }
 
 .confirm-bar {

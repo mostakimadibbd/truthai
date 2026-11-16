@@ -180,8 +180,16 @@ service cloud.firestore {
       allow read, write: if false;
     }
     // Admin audit trail (promote/demote/disable/enable actions,
-    // written by /api/admin/users). Server-only; no client access.
+    // written by the backend's admin API). Server-only; no
+    // client access.
     match /adminActions/{actionId} {
+      allow read, write: if false;
+    }
+    // The admins registry: one document per administrator, the
+    // document id IS the admin's uid, with a role field ("owner"
+    // or "admin"). This is the database's record of who holds
+    // admin power. Server-only; no client access.
+    match /admins/{uid} {
       allow read, write: if false;
     }
     match /analytics_minutes/{minute} {

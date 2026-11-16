@@ -77,6 +77,7 @@ type UserRow = {
   emailVerified: boolean;
   disabled: boolean;
   admin: boolean;
+  role: "owner" | "admin" | null;
   createdAt: number | null;
   lastSignInAt: number | null;
   requestsToday: number;
@@ -118,6 +119,11 @@ export default function ConsolePage() {
   const [tab, setTab] = useState<Tab>("overview");
   const [overview, setOverview] = useState<Overview | null>(null);
   const [users, setUsers] = useState<UserRow[]>([]);
+  const [viewer, setViewer] = useState<{
+    uid: string;
+    role: string;
+    registered: boolean;
+  } | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "forbidden" | "error">("loading");
   const [errorMessage, setErrorMessage] = useState("");
   const [updatedAt, setUpdatedAt] = useState<number | null>(null);
@@ -159,8 +165,12 @@ export default function ConsolePage() {
       }
       setOverview((await overviewRes.json()) as Overview);
       if (usersRes.ok) {
-        const payload = (await usersRes.json()) as { users: UserRow[] };
+        const payload = (await usersRes.json()) as {
+          users: UserRow[];
+          viewer: { uid: string; role: string; registered: boolean };
+        };
         setUsers(payload.users);
+        setViewer(payload.viewer);
       }
       setUpdatedAt(Date.now());
       setState("ready");
@@ -287,10 +297,11 @@ export default function ConsolePage() {
           <section className="card">
             <h2>Not an administrator</h2>
             <p className="muted">
-              You are signed in, but this account is not marked as an administrator in the
-              database, so the backend refused to send any data. If this is the owner
-              account, set <code>admin: true</code> on your user document in Firestore, or
-              ask an existing admin to promote you from this console.
+              You are signed in, but this account has no entry in the database’s{" "}
+              <code>admins</code> registry, so the backend refused to send any data. Only
+              the owner can add entries — from this console, or by creating the document{" "}
+              <code>admins/&lt;your-uid&gt;</code> in Firestore. The owner’s own account is
+              accepted automatically so the panel can be claimed the first time.
             </p>
           </section>
         )}
@@ -404,9 +415,20 @@ export default function ConsolePage() {
               />
             </div>
             <p className="muted">
-              Admin power comes from the <code>admin</code> field on the account’s database
-              record — only an admin can change it, and every change is written to the audit
-              trail. You can’t demote or disable your own account.
+              Admin power lives in the database’s <code>admins</code> registry — one entry
+              per admin uid, marked <code>owner</code> or <code>admin</code>.{" "}
+              {viewer?.role === "owner" ? (
+                <>
+                  As the owner, only you can grant or revoke admin access, at any time;
+                  revoking takes effect on that person’s next request. Every change is
+                  written to the audit trail.
+                </>
+              ) : (
+                <>
+                  Only the owner can grant or revoke admin access — those controls are
+                  hidden from your account, and the backend refuses them too.
+                </>
+              )}
             </p>
             {actionError && <div className="alert" role="alert">{actionError}</div>}
             {pending && (
@@ -430,7 +452,12 @@ export default function ConsolePage() {
                       <div className="user-main">
                         <span className="user-name">
                           {entry.displayName || entry.email || entry.uid}
-                          {entry.admin && <span className="badge badge-admin">Admin</span>}
+                          {entry.role === "owner" && (
+                            <span className="badge badge-owner">Owner</span>
+                          )}
+                          {entry.role === "admin" && (
+                            <span className="badge badge-admin">Admin</span>
+                          )}
                           {isSelf && <span className="badge">You</span>}
                           {entry.disabled && <span className="badge badge-warn">Disabled</span>}
                           {!entry.emailVerified && <span className="badge">Unverified</span>}
@@ -442,23 +469,26 @@ export default function ConsolePage() {
                         </span>
                       </div>
                       <div className="user-actions">
-                        {!entry.admin ? (
+                        {viewer?.role === "owner" && isSelf && !viewer.registered && (
                           <button
                             type="button"
-                            className="btn btn-ghost"
+                            className="btn btn-primary"
                             disabled={acting}
                             onClick={() =>
                               setPending({
                                 uid: entry.uid,
                                 action: "promote",
-                                label: `Make ${entry.email ?? entry.uid} an admin? They will get full control of the platform.`,
+                                label:
+                                  "Record your owner entry in the database’s admins registry? From then on the registry itself is the source of truth for your access.",
                               })
                             }
                           >
-                            Make admin
+                            Claim owner entry
                           </button>
-                        ) : (
-                          !isSelf && (
+                        )}
+                        {viewer?.role === "owner" &&
+                          !isSelf &&
+                          (!entry.admin ? (
                             <button
                               type="button"
                               className="btn btn-ghost"
@@ -466,15 +496,31 @@ export default function ConsolePage() {
                               onClick={() =>
                                 setPending({
                                   uid: entry.uid,
-                                  action: "demote",
-                                  label: `Remove admin power from ${entry.email ?? entry.uid}?`,
+                                  action: "promote",
+                                  label: `Make ${entry.email ?? entry.uid} an admin? They will be able to use this console (but not grant admin access to others).`,
                                 })
                               }
                             >
-                              Remove admin
+                              Make admin
                             </button>
-                          )
-                        )}
+                          ) : (
+                            entry.role !== "owner" && (
+                              <button
+                                type="button"
+                                className="btn btn-ghost"
+                                disabled={acting}
+                                onClick={() =>
+                                  setPending({
+                                    uid: entry.uid,
+                                    action: "demote",
+                                    label: `Remove admin power from ${entry.email ?? entry.uid}? It takes effect on their next request.`,
+                                  })
+                                }
+                              >
+                                Remove admin
+                              </button>
+                            )
+                          ))}
                         {!isSelf &&
                           (!entry.disabled ? (
                             <button

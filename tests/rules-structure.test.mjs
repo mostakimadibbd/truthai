@@ -21,6 +21,8 @@ test("server-only collections deny all client access", () => {
     "analytics_days",
     "deviceSignals",
     "apiKeys",
+    "admins",
+    "adminActions",
   ]) {
     const block = new RegExp(
       `match /${collection}/\\{[^}]+\\} \\{[^}]*allow read, write: if false;`,

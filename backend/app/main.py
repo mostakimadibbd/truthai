@@ -158,7 +158,7 @@ async def chat_job_status(job_id: str, request: Request):
 async def _admin_gate(request: Request):
     """Shared gate for the admin API: service token + admin
     secret + a verified administrator ID token (app/admin.py).
-    Returns (uid, email) or a JSONResponse error."""
+    Returns (uid, email, role) or a JSONResponse error."""
     forwarded = request.headers.get("x-forwarded-for", "")
     client_ip = (
         forwarded.split(",")[0].strip()
@@ -192,8 +192,12 @@ async def admin_users(request: Request):
     gate = await _admin_gate(request)
     if isinstance(gate, JSONResponse):
         return gate
+    viewer_uid, _email, viewer_role = gate
     try:
-        return {"success": True, **admin.get_users(firestore_client())}
+        return {
+            "success": True,
+            **admin.get_users(firestore_client(), viewer_uid, viewer_role),
+        }
     except Exception:
         return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
 
@@ -203,7 +207,7 @@ async def admin_users_patch(request: Request):
     gate = await _admin_gate(request)
     if isinstance(gate, JSONResponse):
         return gate
-    actor_uid, _email = gate
+    actor_uid, actor_email, actor_role = gate
     try:
         body = await request.json()
     except Exception:
@@ -215,7 +219,9 @@ async def admin_users_patch(request: Request):
     if not isinstance(target, str) or not isinstance(action, str):
         return _error(400, "INVALID_ACTION", "A target user and action are required.")
     try:
-        result = admin.patch_user(firestore_client(), actor_uid, target, action)
+        result = admin.patch_user(
+            firestore_client(), actor_uid, actor_role, actor_email, target, action
+        )
     except admin.AdminAuthError as error:
         return _error(error.status, error.code, error.message)
     except Exception:

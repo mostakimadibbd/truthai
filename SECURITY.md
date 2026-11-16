@@ -577,18 +577,26 @@ apply to Google sign-ins unchanged.
   that exists only on the backend and the panel (so the main
   app's credentials alone can never open an admin endpoint),
   and the signed-in administrator's Firebase ID token, verified
-  server-side. Authorization is the database flag
-  users/{uid}.admin === true, checked on the backend; the email
-  allowlist remains only as the owner's bootstrap/recovery
-  path. Failed attempts are throttled per client IP.
-- Self-promotion is impossible by construction: Firestore rules
-  deny ALL client writes to profile documents, so the admin
-  flag can be written only by a server (an existing admin via
-  the panel, or the project owner in the Firebase Console).
-- Admin controls: promote/demote (writes the flag) and
-  disable/enable (Firebase Auth state). An admin cannot demote
-  or disable their own account. Every action is recorded in
-  the adminActions audit collection (rules: no client access).
+  server-side. Authorization is the database's dedicated
+  admins registry (collection `admins`, document id = the
+  admin's uid, field `role`: "owner" | "admin"), checked on
+  the backend on every request. The owner's email remains a
+  permanent owner-level recovery path so the owner can never
+  be locked out; claiming the panel writes the matching
+  registry entry. Failed attempts are throttled per client IP.
+- Only the OWNER can grant or revoke admin access — enforced
+  by the backend (403 OWNER_ONLY), not just hidden in the UI.
+  Revocation deletes the registry entry and takes effect on
+  the target's next request. Admins (e.g. employees) can
+  monitor everything and enable/disable normal accounts, but
+  cannot touch the owner's account or anyone's admin status.
+- Self-promotion is impossible by construction: Firestore
+  rules deny ALL client access to the admins registry, so an
+  entry can be created only by the backend (owner action) or
+  by the project owner in the Firebase Console. Nobody can
+  demote or disable their own account, and the owner's entry
+  is protected. Every action is recorded in the adminActions
+  audit collection (rules: no client access).
 - BACKEND_URL and both secrets are server-only environment
   values on every deployment; the backend's address is never
   sent to any browser (the panel's own API routes are the only
