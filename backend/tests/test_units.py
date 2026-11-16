@@ -346,7 +346,11 @@ class _FakeAuthModule:
         records = self.records
 
         class _Page:
-            page_token = None
+            # Mirrors the real firebase_admin ListUsersPage,
+            # whose members are: users, next_page_token,
+            # has_next_page, get_next_page, iterate_all.
+            next_page_token = None
+            has_next_page = False
 
             def iterate_all(self):
                 return iter(list(records.values()))

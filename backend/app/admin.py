@@ -571,13 +571,23 @@ def get_storage() -> dict:
     cloud_name, api_key, api_secret = credentials
     import httpx
 
-    response = httpx.get(
-        f"https://api.cloudinary.com/v1_1/{cloud_name}/usage",
-        auth=(api_key, api_secret),
-        timeout=15,
-    )
-    response.raise_for_status()
-    usage = response.json()
+    try:
+        response = httpx.get(
+            f"https://api.cloudinary.com/v1_1/{cloud_name}/usage",
+            auth=(api_key, api_secret),
+            timeout=15,
+        )
+        response.raise_for_status()
+        usage = response.json()
+    except Exception as error:  # noqa: BLE001 - surfaced in the UI, not as a 503
+        return {
+            "configured": True,
+            "error": (
+                "Cloudinary rejected the request "
+                f"({type(error).__name__}). Check CLOUDINARY_URL / the "
+                "API key and secret on the backend project."
+            ),
+        }
 
     def section(name: str) -> dict:
         value = usage.get(name)
@@ -727,7 +737,11 @@ def get_users(db, viewer_uid: str, viewer_role: str) -> dict:
     return {
         "today": today,
         "users": users,
-        "truncated": page.page_token is not None,
+        # The directory read caps at 200 accounts; hitting the
+        # cap means there may be more. (The Auth page object
+        # exposes next_page_token, but iterate_all() consumes
+        # the pages, so the cap is the honest signal.)
+        "truncated": len(users) >= 200,
         "viewer": {
             "uid": viewer_uid,
             "role": viewer_role,

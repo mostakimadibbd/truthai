@@ -156,6 +156,7 @@ type LogEntry = {
 
 type StorageInfo = {
   configured: boolean;
+  error?: string;
   plan?: string | null;
   cloudName?: string;
   creditsLimit?: number | null;
@@ -356,6 +357,7 @@ export default function ConsolePage() {
   const [toast, setToast] = useState("");
   const [addQuery, setAddQuery] = useState("");
   const [addPick, setAddPick] = useState<string | null>(null);
+  const [usersError, setUsersError] = useState("");
   const [detailUid, setDetailUid] = useState<string | null>(null);
   const [detail, setDetail] = useState<UserDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -379,15 +381,11 @@ export default function ConsolePage() {
     return stop;
   }, [router]);
 
-  const loadCore = useCallback(async () => {
+  const loadOverview = useCallback(async () => {
     if (!user) return;
     try {
-      const [overviewRes, usersRes, auditRes] = await Promise.all([
-        panelApi(user, "/api/overview"),
-        panelApi(user, "/api/users"),
-        panelApi(user, "/api/audit"),
-      ]);
-      if (overviewRes.status === 403 || usersRes.status === 403) {
+      const overviewRes = await panelApi(user, "/api/overview");
+      if (overviewRes.status === 403) {
         setState("forbidden");
         return;
       }
@@ -395,6 +393,30 @@ export default function ConsolePage() {
         throw new Error(await apiErrorMessage(overviewRes, "Console data couldn’t be loaded."));
       }
       setOverview((await overviewRes.json()) as Overview);
+      setUpdatedAt(Date.now());
+      setState("ready");
+    } catch (error) {
+      setState((current) => {
+        if (current !== "ready") {
+          setErrorMessage(error instanceof Error ? error.message : "Console data couldn’t be loaded.");
+          return "error";
+        }
+        return current;
+      });
+    }
+  }, [user]);
+
+  const loadDirectory = useCallback(async () => {
+    if (!user) return;
+    try {
+      const [usersRes, auditRes] = await Promise.all([
+        panelApi(user, "/api/users"),
+        panelApi(user, "/api/audit"),
+      ]);
+      if (usersRes.status === 403) {
+        setState("forbidden");
+        return;
+      }
       if (usersRes.ok) {
         const payload = (await usersRes.json()) as {
           users: UserRow[];
@@ -402,36 +424,52 @@ export default function ConsolePage() {
         };
         setUsers(payload.users);
         setViewer(payload.viewer);
+        setUsersError("");
+      } else {
+        // Never let a failed directory read masquerade as an
+        // empty product: say so, loudly, where the list lives.
+        setUsersError(await apiErrorMessage(usersRes, "The user list couldn’t be loaded."));
       }
       if (auditRes.ok) {
         const payload = (await auditRes.json()) as { entries: AuditEntry[] };
         setAudit(payload.entries);
       }
-      setUpdatedAt(Date.now());
-      setState("ready");
     } catch (error) {
-      setState((current) => (current === "ready" ? current : "error"));
-      if (state !== "ready") {
-        setErrorMessage(error instanceof Error ? error.message : "Console data couldn’t be loaded.");
-      }
+      setUsersError(error instanceof Error ? error.message : "The user list couldn’t be loaded.");
     }
-  }, [user, state]);
+  }, [user]);
 
-  const loadExtras = useCallback(async () => {
+  const loadCore = useCallback(async () => {
+    await Promise.all([loadOverview(), loadDirectory()]);
+  }, [loadOverview, loadDirectory]);
+
+  const loadLogs = useCallback(async () => {
     if (!user) return;
     try {
-      const [logsRes, storageRes, trashRes] = await Promise.all([
-        panelApi(user, "/api/logs"),
+      const logsRes = await panelApi(user, "/api/logs");
+      if (logsRes.ok) setLogs(((await logsRes.json()) as { entries: LogEntry[] }).entries);
+    } catch {
+      /* best-effort */
+    }
+  }, [user]);
+
+  const loadStorageTrash = useCallback(async () => {
+    if (!user) return;
+    try {
+      const [storageRes, trashRes] = await Promise.all([
         panelApi(user, "/api/storage"),
         panelApi(user, "/api/trash"),
       ]);
-      if (logsRes.ok) setLogs(((await logsRes.json()) as { entries: LogEntry[] }).entries);
       if (storageRes.ok) setStorage((await storageRes.json()) as StorageInfo);
       if (trashRes.ok) setTrash(await trashRes.json());
     } catch {
-      /* extras are best-effort; the core console stays up */
+      /* best-effort */
     }
   }, [user]);
+
+  const loadExtras = useCallback(async () => {
+    await Promise.all([loadLogs(), loadStorageTrash()]);
+  }, [loadLogs, loadStorageTrash]);
 
   useEffect(() => {
     void loadCore();
@@ -441,21 +479,37 @@ export default function ConsolePage() {
     if (state === "ready") void loadExtras();
   }, [state, loadExtras]);
 
-  // Realtime feel: silent refresh every 15s while the tab is
-  // visible, plus a 1s ticker for the "updated Xs ago" label.
+  // Realtime feel without hammering the backend: the overview
+  // refreshes every 15s, the (heavier) user directory every
+  // 60s, logs stream only while the Logs tab is open, and
+  // storage/trash load on demand. Plus a 1s ticker for the
+  // "updated Xs ago" label.
   useEffect(() => {
     if (state !== "ready") return;
-    const refresh = window.setInterval(() => {
+    const fast = window.setInterval(() => {
       if (document.hidden) return;
-      void loadCore();
-      void loadExtras();
+      void loadOverview();
+      if (tab === "logs") void loadLogs();
     }, 15_000);
+    const slow = window.setInterval(() => {
+      if (document.hidden) return;
+      void loadDirectory();
+    }, 60_000);
     const ticker = window.setInterval(() => setNowTick(Date.now()), 1000);
     return () => {
-      window.clearInterval(refresh);
+      window.clearInterval(fast);
+      window.clearInterval(slow);
       window.clearInterval(ticker);
     };
-  }, [state, loadCore, loadExtras]);
+  }, [state, tab, loadOverview, loadDirectory, loadLogs]);
+
+  // Storage and trash are slow-changing: fetch them when their
+  // tabs are opened rather than on the polling loop.
+  useEffect(() => {
+    if (state !== "ready") return;
+    if (tab === "system" || tab === "users") void loadStorageTrash();
+    if (tab === "logs") void loadLogs();
+  }, [tab, state, loadStorageTrash, loadLogs]);
 
   const openDetail = useCallback(
     async (uid: string) => {
@@ -1004,6 +1058,14 @@ export default function ConsolePage() {
                 <h2>All accounts</h2>
                 <span className="muted small">{filteredUsers.length} of {users.length} · click a row for full control</span>
               </div>
+              {usersError && (
+                <div className="alert" role="alert">
+                  {usersError}{" "}
+                  <button type="button" className="btn btn-ghost" onClick={() => void loadDirectory()}>
+                    Retry
+                  </button>
+                </div>
+              )}
               <div className="toolbar">
                 <input
                   className="search"
@@ -1039,7 +1101,7 @@ export default function ConsolePage() {
               <div className="table-wrap">
                 <table className="table">
                   <thead>
-                    <tr><th>User</th><th>Role</th><th>Status</th><th>Today</th><th>Lifetime</th><th>Joined</th><th /></tr>
+                    <tr><th>User</th><th>Role</th><th>Status</th><th>Today</th><th>Lifetime</th><th>Last active</th><th>Joined</th><th /></tr>
                   </thead>
                   <tbody>
                     {filteredUsers.map((row) => (
@@ -1064,14 +1126,21 @@ export default function ConsolePage() {
                           )}
                         </td>
                         <td>{compact.format(row.totalTokensToday)} tok · {row.requestsToday} req</td>
-                        <td>{compact.format(row.lifetimeTokens)} tok</td>
+                        <td>{compact.format(row.lifetimeTokens)} tok · {row.lifetimeRequests} req</td>
+                        <td>{date(row.lastSignInAt)}</td>
                         <td>{date(row.createdAt)}</td>
                         <td className="chev">›</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-                {filteredUsers.length === 0 && <p className="muted pad">No accounts match.</p>}
+                {filteredUsers.length === 0 && (
+                  <p className="muted pad">
+                    {users.length === 0
+                      ? "No accounts in the directory yet — new sign-ups will appear here automatically."
+                      : "No accounts match this search or filter."}
+                  </p>
+                )}
               </div>
             </section>
 
@@ -1199,7 +1268,9 @@ export default function ConsolePage() {
             <div className="grid-2">
               <section className="card">
                 <div className="card-head"><h2>Media storage</h2><span className="muted small">Cloudinary</span></div>
-                {storage?.configured ? (
+                {storage?.configured && storage.error ? (
+                  <div className="alert" role="alert">{storage.error}</div>
+                ) : storage?.configured ? (
                   <div className="storage-wrap">
                     <div
                       className="pie"
