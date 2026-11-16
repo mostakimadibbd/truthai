@@ -40,7 +40,11 @@ import hmac
 import time
 from datetime import datetime, timedelta, timezone
 
-from .auth import check_service_token, verify_id_token
+from .auth import (
+    check_service_token,
+    decode_unverified_claims,
+    verify_id_token_detailed,
+)
 from .config import settings
 from .firebase import firebase_app
 
@@ -153,9 +157,21 @@ async def authenticate_admin(
     bearer = None
     if authorization and authorization.startswith("Bearer "):
         bearer = authorization[len("Bearer "):].strip()
-    uid = verify_id_token(bearer)
+    uid, failure = verify_id_token_detailed(bearer)
     if not uid:
-        raise fail(401, "UNAUTHORIZED", "A valid admin sign-in is required.")
+        # Explain the rejection with public identifiers only:
+        # which project issued the token vs which project this
+        # backend's credentials belong to, plus the failure kind.
+        claims = decode_unverified_claims(bearer)
+        token_project = claims.get("aud") or "unknown"
+        backend_project = settings.firebase_project or "not configured"
+        raise fail(
+            401,
+            "SIGNIN_UNVERIFIED",
+            "Your sign-in couldn’t be verified "
+            f"({failure or 'rejected'}). Token project: {token_project}. "
+            f"Backend project: {backend_project}.",
+        )
     try:
         record = await asyncio.to_thread(firebase_auth().get_user, uid)
         email = record.email

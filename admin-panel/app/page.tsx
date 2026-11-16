@@ -118,6 +118,9 @@ function hintFor(message: string): string | null {
   if (message.includes("could not be reached")) {
     return "The panel’s BACKEND_URL doesn’t point at the running backend service. Check that variable on this panel’s project.";
   }
+  if (message.includes("couldn’t be verified")) {
+    return "The two project names in the message must be identical. They come from this panel’s NEXT_PUBLIC_FIREBASE_PROJECT_ID and the backend’s FIREBASE_ADMIN_PROJECT_ID (with its client email and private key from the same project’s service account). Fix the side that names the wrong project, redeploy it, then sign out of the panel and back in.";
+  }
   return null;
 }
 
@@ -175,6 +178,8 @@ export default function ConsolePage() {
   const [userFilter, setUserFilter] = useState<UserFilter>("all");
   const [userSort, setUserSort] = useState<UserSort>("tokens");
   const [toast, setToast] = useState("");
+  const [addQuery, setAddQuery] = useState("");
+  const [addPick, setAddPick] = useState<string | null>(null);
 
   useEffect(() => {
     const auth = panelAuth();
@@ -610,6 +615,99 @@ export default function ConsolePage() {
                 </>
               )}
             </p>
+            {viewer?.role === "owner" && (
+              <div className="add-admin">
+                <h3>Add an admin</h3>
+                <p className="muted small">
+                  Search any account by email, name or uid. You’ll see the account’s full
+                  details before you grant access.
+                </p>
+                <input
+                  className="search wide"
+                  type="search"
+                  placeholder="Search by email, name or uid…"
+                  value={addQuery}
+                  onChange={(event) => {
+                    setAddQuery(event.target.value);
+                    setAddPick(null);
+                  }}
+                  aria-label="Search an account to make admin"
+                />
+                {addQuery.trim() && (
+                  <div className="pick-list">
+                    {users
+                      .filter((row) => !row.admin)
+                      .filter((row) => {
+                        const needle = addQuery.trim().toLowerCase();
+                        return (
+                          row.email?.toLowerCase().includes(needle) ||
+                          row.displayName?.toLowerCase().includes(needle) ||
+                          row.uid.toLowerCase().includes(needle)
+                        );
+                      })
+                      .slice(0, 6)
+                      .map((row) => (
+                        <button
+                          key={row.uid}
+                          type="button"
+                          className={addPick === row.uid ? "pick active" : "pick"}
+                          onClick={() => setAddPick(row.uid)}
+                        >
+                          <span>{row.displayName || row.email || row.uid}</span>
+                          <span className="muted small">{row.email ?? row.uid}</span>
+                        </button>
+                      ))}
+                    {users.filter((row) => !row.admin).length > 0 &&
+                      addQuery.trim() &&
+                      users
+                        .filter((row) => !row.admin)
+                        .filter((row) => {
+                          const needle = addQuery.trim().toLowerCase();
+                          return (
+                            row.email?.toLowerCase().includes(needle) ||
+                            row.displayName?.toLowerCase().includes(needle) ||
+                            row.uid.toLowerCase().includes(needle)
+                          );
+                        }).length === 0 && (
+                        <p className="muted small">No matching account without admin access.</p>
+                      )}
+                  </div>
+                )}
+                {addPick &&
+                  (() => {
+                    const row = users.find((entry) => entry.uid === addPick);
+                    if (!row) return null;
+                    return (
+                      <div className="detail-card">
+                        <div className="rows">
+                          <div className="row"><span>Name</span><strong>{row.displayName || "—"}</strong></div>
+                          <div className="row"><span>Email</span><strong>{row.email || "—"}</strong></div>
+                          <div className="row"><span>UID</span><strong><code>{row.uid}</code></strong></div>
+                          <div className="row"><span>Email verified</span><strong>{row.emailVerified ? "Yes" : "No"}</strong></div>
+                          <div className="row"><span>Account state</span><strong>{row.disabled ? "Disabled" : "Active"}</strong></div>
+                          <div className="row"><span>Joined</span><strong>{date(row.createdAt)}</strong></div>
+                          <div className="row"><span>Last sign-in</span><strong>{date(row.lastSignInAt)}</strong></div>
+                          <div className="row"><span>Usage today</span><strong>{row.totalTokensToday.toLocaleString("en-US")} tokens · {row.requestsToday} requests · {usd(row.costUsdToday)}</strong></div>
+                        </div>
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          disabled={acting}
+                          onClick={() =>
+                            setPending({
+                              uid: row.uid,
+                              action: "promote",
+                              label: `Make ${row.email ?? row.uid} an admin? They will be able to use this console (but not grant admin access to others). You can revoke this at any time.`,
+                            })
+                          }
+                        >
+                          Make this account an admin
+                        </button>
+                      </div>
+                    );
+                  })()}
+              </div>
+            )}
             {actionError && <div className="alert" role="alert">{actionError}</div>}
             {pending && (
               <div className="confirm-bar" role="group" aria-label="Confirm action">

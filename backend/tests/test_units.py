@@ -368,15 +368,18 @@ def test_admin_gate_and_actions():
     }
     fake_auth = _FakeAuthModule(records)
     original_auth = admin.firebase_auth
-    original_verify = admin.verify_id_token
+    original_verify = admin.verify_id_token_detailed
     original_secret = admin.settings.admin_api_secret
     original_token = admin.settings.service_token
     admin.firebase_auth = lambda: fake_auth
-    admin.verify_id_token = lambda token: {
-        "tok-boss": "boss1",
-        "tok-emp": "emp1",
-        "tok-plain": "plain1",
-    }.get(token)
+    admin.verify_id_token_detailed = lambda token: (
+        {
+            "tok-boss": "boss1",
+            "tok-emp": "emp1",
+            "tok-plain": "plain1",
+        }.get(token),
+        None,
+    )
     admin.settings.admin_api_secret = "test-admin-secret"
     admin.settings.service_token = "test-service-token"
     try:
@@ -476,7 +479,7 @@ def test_admin_gate_and_actions():
         assert all("actorEmail" in entry for entry in audit["entries"])
     finally:
         admin.firebase_auth = original_auth
-        admin.verify_id_token = original_verify
+        admin.verify_id_token_detailed = original_verify
         admin.settings.admin_api_secret = original_secret
         admin.settings.service_token = original_token
 

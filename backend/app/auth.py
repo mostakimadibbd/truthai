@@ -80,8 +80,34 @@ def verify_session_cookie(cookie_value: str | None) -> dict | None:
 
 
 def verify_id_token(id_token: str | None) -> str | None:
+    uid, _reason = verify_id_token_detailed(id_token)
+    return uid
+
+
+def decode_unverified_claims(id_token: str | None) -> dict:
+    """Read a JWT's payload WITHOUT trusting it — used only to
+    explain a verification failure (which project issued the
+    token), never to authorize anything."""
+    if not id_token or id_token.count(".") != 2:
+        return {}
+    try:
+        import base64
+        import json
+
+        payload = id_token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload.encode()))
+        return claims if isinstance(claims, dict) else {}
+    except Exception:
+        return {}
+
+
+def verify_id_token_detailed(id_token: str | None) -> tuple[str | None, str | None]:
+    """(uid, failure) — failure is the exception class name when
+    verification rejects the token, so an admin-facing error can
+    say WHY (expired, wrong project, broken credentials…)."""
     if not id_token:
-        return None
+        return None, "MissingToken"
     try:
         from firebase_admin import auth as firebase_auth
 
@@ -90,9 +116,9 @@ def verify_id_token(id_token: str | None) -> str | None:
         firebase_app()
         decoded = firebase_auth.verify_id_token(id_token)
         uid = decoded.get("uid")
-        return uid if isinstance(uid, str) else None
-    except Exception:
-        return None
+        return (uid if isinstance(uid, str) else None), None
+    except Exception as error:  # noqa: BLE001 - the class name is the diagnostic
+        return None, type(error).__name__
 
 
 async def authenticate(

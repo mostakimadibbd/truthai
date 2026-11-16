@@ -51,10 +51,26 @@ async def health(
         # information, and it is reachable only by the main app.
         return {"ok": True, "service": "xyro-backend"}
     checks = settings.health()
+    # Beyond presence: prove the Firebase Admin credentials
+    # actually initialize, and name the project they belong to
+    # (a public identifier). This is what distinguishes "the
+    # variables exist" from "sign-in verification will work".
+    admin_ready = False
+    admin_error = None
+    try:
+        from .firebase import firebase_app
+
+        firebase_app()
+        admin_ready = True
+    except Exception as error:  # noqa: BLE001 - class name is the diagnostic
+        admin_error = type(error).__name__
     return {
         "ok": True,
         "service": "xyro-backend",
         "integrations": checks,
+        "firebaseProject": settings.firebase_project,
+        "adminReady": admin_ready,
+        "adminError": admin_error,
         "watermarkEngine": "c" if watermark.using_c_core() else "python",
         "executionMode": settings.execution_mode,
     }

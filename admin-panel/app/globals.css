@@ -393,6 +393,34 @@ code {
   to { background-position: -80% 0; }
 }
 
+.add-admin {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  padding: 1rem 1.1rem;
+  margin: 1rem 0;
+}
+.add-admin h3 { margin: 0 0 0.3rem; font-size: 1rem; }
+.add-admin .search.wide { width: 100%; margin-top: 0.6rem; }
+.pick-list { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.7rem; }
+.pick {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 0.55rem 0.8rem;
+  font: inherit;
+  cursor: pointer;
+  flex-wrap: wrap;
+}
+.pick.active { border-color: var(--accent); }
+.detail-card { margin-top: 0.8rem; display: flex; flex-direction: column; gap: 0.8rem; }
+.detail-card .btn { align-self: flex-start; }
+
 @media (max-width: 760px) {
   .shell { grid-template-columns: 1fr; }
   .sidebar {

@@ -60,6 +60,22 @@ class Settings:
     max_concurrent_upstream: int = _int("BACKEND_MAX_CONCURRENT_UPSTREAM", 8)
     job_timeout_seconds: int = _int("BACKEND_JOB_TIMEOUT_SECONDS", 280)
 
+    @property
+    def firebase_project(self) -> str | None:
+        """The Firebase project the Admin credentials belong to
+        (a public identifier, safe to surface in diagnostics)."""
+        if self.firebase_service_account_json:
+            try:
+                import json
+
+                parsed = json.loads(self.firebase_service_account_json)
+                project = parsed.get("project_id")
+                if isinstance(project, str) and project:
+                    return project
+            except Exception:
+                pass
+        return self.firebase_project_id or None
+
     def health(self) -> dict[str, bool]:
         return {
             "session": bool(self.session_secret),
