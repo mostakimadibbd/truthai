@@ -25,6 +25,12 @@ class Settings:
     firebase_service_account_json: str = os.environ.get(
         "FIREBASE_SERVICE_ACCOUNT_JSON", ""
     )
+    # Split form, identical to the Next.js app's variables, so a
+    # deployment can copy the same three values across instead of
+    # handling a JSON document.
+    firebase_project_id: str = os.environ.get("FIREBASE_ADMIN_PROJECT_ID", "")
+    firebase_client_email: str = os.environ.get("FIREBASE_ADMIN_CLIENT_EMAIL", "")
+    firebase_private_key: str = os.environ.get("FIREBASE_ADMIN_PRIVATE_KEY", "")
     firebase_database_url: str = os.environ.get(
         "NEXT_PUBLIC_FIREBASE_DATABASE_URL", ""
     ) or os.environ.get("FIREBASE_DATABASE_URL", "")
@@ -53,7 +59,12 @@ class Settings:
         return {
             "session": bool(self.session_secret),
             "openRouter": bool(self.openrouter_api_key),
-            "firebaseAdmin": bool(self.firebase_service_account_json),
+            "firebaseAdmin": bool(self.firebase_service_account_json)
+            or bool(
+                self.firebase_project_id
+                and self.firebase_client_email
+                and self.firebase_private_key
+            ),
             "realtimeDatabase": bool(self.firebase_database_url),
             "redis": bool(self.upstash_rest_url and self.upstash_rest_token),
             "serviceToken": bool(self.service_token),

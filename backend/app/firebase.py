@@ -21,9 +21,28 @@ def firebase_app():
     from firebase_admin import credentials
 
     raw = settings.firebase_service_account_json
-    if not raw:
-        raise RuntimeError("FIREBASE_SERVICE_ACCOUNT_JSON is not set")
-    cert = credentials.Certificate(json.loads(raw))
+    if raw:
+        info = json.loads(raw)
+    elif (
+        settings.firebase_project_id
+        and settings.firebase_client_email
+        and settings.firebase_private_key
+    ):
+        # Split form (same variables as the Next.js app). Vercel
+        # stores the key with literal \n escapes; restore them.
+        info = {
+            "type": "service_account",
+            "project_id": settings.firebase_project_id,
+            "private_key": settings.firebase_private_key.replace("\\n", "\n"),
+            "client_email": settings.firebase_client_email,
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    else:
+        raise RuntimeError(
+            "Set FIREBASE_SERVICE_ACCOUNT_JSON or the "
+            "FIREBASE_ADMIN_PROJECT_ID / _CLIENT_EMAIL / _PRIVATE_KEY trio"
+        )
+    cert = credentials.Certificate(info)
     options = {}
     if settings.firebase_database_url:
         options["databaseURL"] = settings.firebase_database_url
