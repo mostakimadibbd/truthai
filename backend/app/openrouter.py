@@ -46,6 +46,7 @@ CROSS_PROVIDERS: list[dict] = [
         "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
         "env_keys": ["GEMINI_API_KEY", "GOOGLE_AI_API_KEY"],
         "models": ["gemini-2.5-flash", "gemini-2.5-flash-lite"],
+        "vision_models": ["gemini-2.5-flash", "gemini-2.5-flash-lite"],
     },
     {
         "provider": "groq",
@@ -62,6 +63,7 @@ CROSS_PROVIDERS: list[dict] = [
             "google/gemma-4-31b-it",
             "nvidia/nemotron-3.5-lightning-30b-a3b",
         ],
+        "vision_models": ["google/gemma-4-31b-it"],
     },
     {
         "provider": "sambanova",
@@ -92,7 +94,7 @@ def provider_presence() -> dict[str, bool]:
     }
 
 
-def cross_provider_targets() -> list[dict]:
+def cross_provider_targets(vision_only: bool = False) -> list[dict]:
     targets: list[dict] = []
     for spec in CROSS_PROVIDERS:
         api_key = next(
@@ -102,7 +104,8 @@ def cross_provider_targets() -> list[dict]:
         )
         if not api_key:
             continue
-        for model in spec["models"]:
+        models = spec.get("vision_models", []) if vision_only else spec["models"]
+        for model in models:
             targets.append(
                 {
                     "provider": spec["provider"],
@@ -115,7 +118,7 @@ def cross_provider_targets() -> list[dict]:
     return targets
 
 
-def build_targets(openrouter_attempts: list[str]) -> list[dict]:
+def build_targets(openrouter_attempts: list[str], vision_only: bool = False) -> list[dict]:
     targets = [
         {
             "provider": "openrouter",
@@ -126,7 +129,7 @@ def build_targets(openrouter_attempts: list[str]) -> list[dict]:
         }
         for model in openrouter_attempts
     ]
-    return targets + cross_provider_targets()
+    return targets + cross_provider_targets(vision_only)
 
 _shared: httpx.AsyncClient | None = None
 
@@ -158,7 +161,18 @@ async def stream_completion(
     far whenever it grows. Returns {model, text, usage} where usage
     is {promptTokens, completionTokens} or None."""
     attempts = free_only_attempts(attempts)
-    targets = build_targets(attempts)
+    # Media turns only target cross-provider models that can see
+    # images (parity with the TS chain).
+    has_images = any(
+        isinstance(message.get("content"), list)
+        and any(
+            isinstance(part, dict) and part.get("type") == "image_url"
+            for part in message["content"]
+        )
+        for message in messages
+        if isinstance(message, dict)
+    )
+    targets = build_targets(attempts, vision_only=has_images)
     last_status = 0
     last_body = ""
     last_retry_after: str | None = None

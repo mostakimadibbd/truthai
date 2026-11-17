@@ -19,14 +19,13 @@ import { buildWatermarkPayload, embedWatermark } from "@/lib/server/watermark";
 // POST { chatId, prompt, userMessageId, assistantMessageId } creates
 // one image in a chat:
 //  1. Image sources, in order — both free, no paid model is ever
-//     called: (a) a FREE image-generation model from the live
-//     OpenRouter catalogue (output modality "image"), when one
-//     exists; (b) the Pollinations free generation service, which
-//     needs no key. (As of November 2026 the OpenRouter catalogue
-//     has no free image models at all, so in practice source (b)
-//     serves creation; source (a) takes over automatically if a
-//     free image model appears.) If both sources fail the route
-//     answers 503 and the UI says so plainly — no result is faked.
+//     called: (a) the Pollinations free generation service FIRST
+//     (no key, no quota bookkeeping, answers immediately — the
+//     owner asked for instant switching to Pollinations); (b) a
+//     FREE image-generation model from the live OpenRouter
+//     catalogue (output modality "image") as backup, when one
+//     exists. If both sources fail the route answers 503 and the
+//     UI says so plainly — no result is faked.
 //  2. The returned image is downloaded server-side, passed through
 //     the invisible LSB watermark (lib/server/watermark.ts), and the
 //     WATERMARKED PNG is stored in Cloudinary as an authenticated
@@ -203,7 +202,7 @@ async function downloadImage(reference: string): Promise<Buffer> {
 }
 
 /**
- * Fallback image source: the Pollinations free generation service
+ * Primary image source: the Pollinations free generation service
  * (no API key). The host is fixed, the prompt travels in the URL
  * path, and the response must be an image within the size cap; the
  * bytes are additionally parsed by the watermark step before they
@@ -345,9 +344,9 @@ export async function POST(request: NextRequest) {
 
   const apiKey = process.env.OPENROUTER_API_KEY;
   // Free OpenRouter image models, checked against the live
-  // catalogue at request time. The list is usually empty (no free
-  // image models exist), in which case the Pollinations fallback
-  // below serves the creation instead of an error.
+  // catalogue at request time — the BACKUP source, tried only when
+  // Pollinations fails. The list is usually empty (no free image
+  // models exist), in which case Pollinations is the only source.
   const imageModels = await getFreeImageModels().catch(() => []);
 
   let db: ReturnType<typeof getFirebaseAdminFirestore>;
@@ -371,14 +370,22 @@ export async function POST(request: NextRequest) {
     }
 
     // Produce the original image bytes from the first source that
-    // answers: a free OpenRouter image model when the catalogue has
-    // one, otherwise the Pollinations free service. A source that
-    // answers without an image is a failure of that source, never a
-    // reason to fabricate a result.
+    // answers: Pollinations FIRST (instant, keyless), then a free
+    // OpenRouter image model as backup when the catalogue has one.
+    // A source that answers without an image is a failure of that
+    // source, never a reason to fabricate a result.
     let originalBytes: Buffer | null = null;
     let usedModel = "";
 
-    if (apiKey && imageModels.length > 0) {
+    try {
+      originalBytes = await fetchPollinationsImage(prompt);
+      usedModel = "pollinations/free";
+    } catch (error) {
+      console.error("Pollinations image generation failed; trying OpenRouter.", error);
+      originalBytes = null;
+    }
+
+    if (!originalBytes && apiKey && imageModels.length > 0) {
       let imageReference: string | null = null;
       for (const candidate of imageModels.slice(0, 2)) {
         let response: Response;
@@ -418,16 +425,6 @@ export async function POST(request: NextRequest) {
           }
           break;
         }
-      }
-    }
-
-    if (!originalBytes) {
-      try {
-        originalBytes = await fetchPollinationsImage(prompt);
-        usedModel = "pollinations/free";
-      } catch (error) {
-        console.error("Fallback image generation failed.", error);
-        originalBytes = null;
       }
     }
 

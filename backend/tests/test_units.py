@@ -825,6 +825,23 @@ def test_provider_presence_reports_keys():
         os.environ.update(saved)
 
 
+def test_vision_targets_only_include_vision_models():
+    saved = dict(os.environ)
+    try:
+        os.environ["GEMINI_API_KEY"] = "g"
+        os.environ["GROQ_API_KEY"] = "q"
+        os.environ["REQUESTY_API_KEY"] = "r"
+        targets = chatjob.openrouter.build_targets(["openrouter/free"], vision_only=True)
+        providers = [t["provider"] for t in targets]
+        assert "groq" not in providers
+        assert providers.count("gemini") == 2
+        requesty = [t for t in targets if t["provider"] == "requesty"]
+        assert len(requesty) == 1 and requesty[0]["model"] == "google/gemma-4-31b-it"
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):

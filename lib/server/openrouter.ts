@@ -125,6 +125,10 @@ type ProviderSpec = {
   url: string;
   envKeys: string[];
   models: string[];
+  /** Subset of models that can actually SEE image attachments.
+   * Turns carrying images only ever target these — a text-only
+   * model must never be handed pictures it cannot perceive. */
+  visionModels?: string[];
 };
 
 const CROSS_PROVIDERS: ProviderSpec[] = [
@@ -133,6 +137,7 @@ const CROSS_PROVIDERS: ProviderSpec[] = [
     url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
     envKeys: ["GEMINI_API_KEY", "GOOGLE_AI_API_KEY"],
     models: ["gemini-2.5-flash", "gemini-2.5-flash-lite"],
+    visionModels: ["gemini-2.5-flash", "gemini-2.5-flash-lite"],
   },
   {
     provider: "groq",
@@ -149,6 +154,7 @@ const CROSS_PROVIDERS: ProviderSpec[] = [
       "google/gemma-4-31b-it",
       "nvidia/nemotron-3.5-lightning-30b-a3b",
     ],
+    visionModels: ["google/gemma-4-31b-it"],
   },
   {
     provider: "sambanova",
@@ -170,6 +176,7 @@ const CROSS_PROVIDERS: ProviderSpec[] = [
 
 export function crossProviderTargets(
   env: Record<string, string | undefined> = process.env,
+  visionOnly = false,
 ): AttemptTarget[] {
   const targets: AttemptTarget[] = [];
   for (const spec of CROSS_PROVIDERS) {
@@ -177,7 +184,8 @@ export function crossProviderTargets(
       .map((name) => env[name]?.trim())
       .find((value) => value);
     if (!apiKey) continue;
-    for (const model of spec.models) {
+    const models = visionOnly ? (spec.visionModels ?? []) : spec.models;
+    for (const model of models) {
       targets.push({
         provider: spec.provider,
         model,
@@ -194,6 +202,7 @@ export function buildAttemptTargets(
   openRouterAttempts: string[],
   openRouterApiKey: string,
   env: Record<string, string | undefined> = process.env,
+  visionOnly = false,
 ): AttemptTarget[] {
   const targets: AttemptTarget[] = openRouterAttempts.map((model) => ({
     provider: "openrouter",
@@ -202,14 +211,36 @@ export function buildAttemptTargets(
     url: "https://openrouter.ai/api/v1/chat/completions",
     apiKey: openRouterApiKey,
   }));
-  return [...targets, ...crossProviderTargets(env)];
+  return [...targets, ...crossProviderTargets(env, visionOnly)];
+}
+
+/** True when any message carries an image content part. */
+export function messagesHaveImages(messages: unknown): boolean {
+  if (!Array.isArray(messages)) return false;
+  return messages.some((message) => {
+    const content = (message as { content?: unknown })?.content;
+    return (
+      Array.isArray(content) &&
+      content.some(
+        (part) => (part as { type?: unknown })?.type === "image_url",
+      )
+    );
+  });
 }
 
 export async function fetchChatCompletionWithFallback(
   args: ChatCompletionArgs,
 ): Promise<{ response: Response; model: string }> {
   args = { ...args, attempts: freeOnlyAttempts(args.attempts) };
-  const targets = buildAttemptTargets(args.attempts, args.apiKey);
+  // Media turns: cross-provider attempts are restricted to models
+  // that can see images, so an uploaded photo is always analysed by
+  // a vision model even when OpenRouter's quota is exhausted.
+  const targets = buildAttemptTargets(
+    args.attempts,
+    args.apiKey,
+    process.env,
+    messagesHaveImages(args.messages),
+  );
   const connectTimeoutMs = args.connectTimeoutMs ?? 25_000;
   let lastStatus: number | null = null;
   let lastRetryAfter: string | null = null;
