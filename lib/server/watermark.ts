@@ -16,8 +16,9 @@
 // Implementation is dependency-light and pure JS:
 //  - PNG: decoded/encoded with pngjs.
 //  - JPEG: decoded with jpeg-js, re-encoded as PNG via pngjs.
-//  - WebP: no pure-JS decoder exists; conversion is attempted with
-//    sharp when the runtime happens to provide it (Next.js ships
+//  - WebP: no pure-JS decoder exists; conversion uses sharp,
+//    which is a declared dependency (statically imported below
+//    and externalised via serverExternalPackages). Next.js ships
 //    it for image optimisation), otherwise a clear error is thrown
 //    and the generation fails honestly instead of storing an
 //    unwatermarked image.
