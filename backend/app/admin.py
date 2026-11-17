@@ -46,7 +46,7 @@ from .auth import (
     verify_id_token_detailed,
     verify_id_token_public,
 )
-from .config import settings
+from .config import owner_secret, settings
 from .firebase import firebase_app
 
 BOOTSTRAP_ADMIN_EMAILS = ["mostakimbdyt@gmail.com"]
@@ -665,7 +665,7 @@ def get_audit(db) -> dict:
     return {"entries": entries}
 
 
-def get_users(db, viewer_uid: str, viewer_role: str) -> dict:
+def get_users(db, viewer_uid: str, viewer_role: str, query: str = "") -> dict:
     now = datetime.now(timezone.utc)
     today = _day_key(now)
     auth = firebase_auth()
@@ -698,10 +698,24 @@ def get_users(db, viewer_uid: str, viewer_role: str) -> dict:
         if isinstance(data.get("totalTokens"), (int, float)):
             entry["totalTokens"] += data["totalTokens"]
 
+    needle = query.strip().lower()
+    searching = len(needle) >= 2
     users = []
-    page = auth.list_users(max_results=200)
+    page = auth.list_users(max_results=1000 if searching else 200)
     for record in page.iterate_all():
         profile = profiles.get(record.uid) or {}
+        if searching:
+            # Directory-wide search: keep only matches on email,
+            # display name (Auth or profile) or uid — the target
+            # may sit far beyond the first page of the directory.
+            haystacks = (
+                (record.email or "").lower(),
+                (record.display_name or "").lower(),
+                record.uid.lower(),
+                str(profile.get("displayName") or "").lower(),
+            )
+            if not any(needle in hay for hay in haystacks):
+                continue
         totals = usage.get(record.uid) or _totals(None)
         metadata = record.user_metadata
         role = registry.get(record.uid)
@@ -728,7 +742,10 @@ def get_users(db, viewer_uid: str, viewer_role: str) -> dict:
                 "lifetimeTokens": (lifetime_usage.get(record.uid) or {}).get("totalTokens", 0),
             }
         )
-        if len(users) >= 200:
+        if searching:
+            if len(users) >= 100:
+                break
+        elif len(users) >= 200:
             break
     role_rank = {"owner": 0, "admin": 1}
     users.sort(
@@ -742,12 +759,17 @@ def get_users(db, viewer_uid: str, viewer_role: str) -> dict:
         # exposes next_page_token, but iterate_all() consumes
         # the pages, so the cap is the honest signal.)
         "truncated": len(users) >= 200,
+        "query": query if searching else "",
         "viewer": {
             "uid": viewer_uid,
             "role": viewer_role,
             # False when the viewer is in through the bootstrap
             # owner path and has not claimed a registry entry yet.
             "registered": viewer_uid in registry,
+            # Whether the backend has an OWNER_SECRET configured —
+            # the panel warns the owner when privilege changes
+            # would fail closed without one.
+            "ownerSecretConfigured": bool(owner_secret()),
         },
     }
 
@@ -996,6 +1018,30 @@ def get_user_detail(db, uid: str) -> dict:
     }
 
 
+SECRET_GATED_ACTIONS = ("promote", "demote", "delete")
+
+
+def _require_owner_secret(provided: str | None) -> None:
+    """Step-up check for privilege changes: the caller must present
+    the OWNER_SECRET configured on this backend. Fails CLOSED when
+    the secret is not configured at all — granting admin must never
+    silently work without the owner's password layer."""
+    expected = owner_secret()
+    if not expected:
+        raise AdminAuthError(
+            503,
+            "OWNER_SECRET_NOT_CONFIGURED",
+            "The owner secret is not set on the backend yet. Add OWNER_SECRET "
+            "to the backend project and redeploy, then try again.",
+        )
+    if not provided or not hmac.compare_digest(provided.strip(), expected):
+        raise AdminAuthError(
+            403,
+            "OWNER_SECRET_INVALID",
+            "The owner secret is incorrect — nothing was changed.",
+        )
+
+
 def patch_user(
     db,
     actor_uid: str,
@@ -1003,6 +1049,7 @@ def patch_user(
     actor_email: str | None,
     target_uid: str,
     action: str,
+    owner_secret_value: str | None = None,
 ) -> dict:
     if action not in ACTIONS:
         raise AdminAuthError(400, "INVALID_ACTION", "A valid action is required.")
@@ -1013,6 +1060,17 @@ def patch_user(
             "You can’t demote, disable or delete your own admin account.",
         )
     target_role = _registry_role(db, target_uid)
+    if action in SECRET_GATED_ACTIONS:
+        # Privilege changes (grant / revoke admin, delete account)
+        # need BOTH the owner role AND the owner secret — a signed-in
+        # owner session alone is never enough.
+        if actor_role != "owner":
+            raise AdminAuthError(
+                403,
+                "OWNER_ONLY",
+                "Only the owner can grant or revoke admin access or delete accounts.",
+            )
+        _require_owner_secret(owner_secret_value)
     if action == "delete":
         # Permanent account deletion is the owner's power alone.
         if actor_role != "owner":

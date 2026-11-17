@@ -18,6 +18,13 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def owner_secret() -> str:
+    """The owner's step-up password for privilege changes (grant /
+    revoke admin, delete account). Set as OWNER_SECRET on the
+    backend project; when unset, those actions fail closed."""
+    return os.environ.get("OWNER_SECRET", "").strip()
+
+
 def cloudflare_account_id() -> str:
     """Cloudflare account id (pairs with CLOUDFLARE_API_TOKEN for
     Workers AI). Read here like every other credential."""

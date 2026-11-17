@@ -426,3 +426,21 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
   .live-dot, .skel { animation: none; }
   .drawer { animation: none; }
 }
+
+/* Owner tab + step-up confirmation (owner secret) */
+.owner-warn { border-color: #6b5518; background: linear-gradient(180deg, #221d0d, var(--panel)); }
+.modal-field { display: block; margin-top: 14px; text-align: left; }
+.modal-field span { display: block; font-size: 12.5px; color: var(--muted, #93a4c4); margin-bottom: 6px; }
+.modal-field input {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+}
+.modal-field input:focus { outline: 2px solid #2f6df6; outline-offset: 1px; }
+.admin-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line-soft); }
+.admin-row-main { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.admin-row-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

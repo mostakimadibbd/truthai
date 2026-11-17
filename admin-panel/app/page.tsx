@@ -187,8 +187,12 @@ type TrashEntry = {
 
 type RangeKey = "today" | "24h" | "48h" | "7d" | "lifetime";
 
-type Tab = "overview" | "users" | "logs" | "activity" | "system";
+type Tab = "overview" | "users" | "owner" | "logs" | "activity" | "system";
 type ActionKind = "promote" | "demote" | "disable" | "enable" | "delete" | "sign-out-all";
+
+/** Actions the backend only performs for the owner AND with the
+ * owner secret — the panel collects it in the confirm modal. */
+const SECRET_GATED_ACTIONS: ActionKind[] = ["promote", "demote", "delete"];
 type UserFilter = "all" | "admins" | "disabled" | "unverified";
 type UserSort = "tokens" | "joined" | "name";
 
@@ -300,6 +304,7 @@ const ICONS = {
   logs: "M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01",
   activity: "M22 12h-4l-3 9L9 3l-3 9H2",
   system: "M4 17l6-6-6-6M12 19h8",
+  owner: "M12 2l7 3v5c0 5-3.5 9.3-7 11-3.5-1.7-7-6-7-11V5l7-3zM9 12l2 2 4-4",
   refresh: "M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6",
   out: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
 };
@@ -337,6 +342,7 @@ export default function ConsolePage() {
     uid: string;
     role: string;
     registered: boolean;
+    ownerSecretConfigured?: boolean;
   } | null>(null);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -351,7 +357,16 @@ export default function ConsolePage() {
   const [userFilter, setUserFilter] = useState<UserFilter>("all");
   const [userSort, setUserSort] = useState<UserSort>("tokens");
   const [logFilter, setLogFilter] = useState<"all" | LogEntry["kind"]>("all");
-  const [pending, setPending] = useState<{ uid: string; action: ActionKind; label: string } | null>(null);
+  const [pending, setPending] = useState<{ uid: string; action: ActionKind; label: string; email?: string | null } | null>(null);
+  // Step-up confirmation state for privilege changes: the owner
+  // types the target's email (grants) and the owner secret (all
+  // gated actions) before anything is sent.
+  const [confirmEmail, setConfirmEmail] = useState("");
+  const [ownerSecretInput, setOwnerSecretInput] = useState("");
+  // Directory-wide search results (server-side, beyond the loaded
+  // page of accounts) for the Users tab and the Owner tab.
+  const [searchRows, setSearchRows] = useState<UserRow[] | null>(null);
+  const [addResults, setAddResults] = useState<UserRow[] | null>(null);
   const [acting, setActing] = useState(false);
   const [actionError, setActionError] = useState("");
   const [toast, setToast] = useState("");
@@ -420,7 +435,7 @@ export default function ConsolePage() {
       if (usersRes.ok) {
         const payload = (await usersRes.json()) as {
           users: UserRow[];
-          viewer: { uid: string; role: string; registered: boolean };
+          viewer: { uid: string; role: string; registered: boolean; ownerSecretConfigured?: boolean };
         };
         setUsers(payload.users);
         setViewer(payload.viewer);
@@ -442,6 +457,62 @@ export default function ConsolePage() {
   const loadCore = useCallback(async () => {
     await Promise.all([loadOverview(), loadDirectory()]);
   }, [loadOverview, loadDirectory]);
+
+  // Directory-wide search: once a query is specific enough, the
+  // backend searches EVERY account (the loaded list is only the
+  // first page of the directory). Results feed the Users table
+  // (searchRows) and the Owner tab's add-admin picker (addResults).
+  useEffect(() => {
+    const needle = query.trim();
+    if (!user || needle.length < 2) {
+      setSearchRows(null);
+      return;
+    }
+    let active = true;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await panelApi(user, `/api/users?q=${encodeURIComponent(needle)}`);
+          if (active && response.ok) {
+            const payload = (await response.json()) as { users: UserRow[] };
+            setSearchRows(payload.users);
+          }
+        } catch {
+          /* keep the locally loaded rows */
+        }
+      })();
+    }, 350);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [user, query]);
+
+  useEffect(() => {
+    const needle = addQuery.trim();
+    if (!user || needle.length < 2) {
+      setAddResults(null);
+      return;
+    }
+    let active = true;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await panelApi(user, `/api/users?q=${encodeURIComponent(needle)}`);
+          if (active && response.ok) {
+            const payload = (await response.json()) as { users: UserRow[] };
+            setAddResults(payload.users);
+          }
+        } catch {
+          /* the picker keeps its empty state */
+        }
+      })();
+    }, 350);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [user, addQuery]);
 
   const loadLogs = useCallback(async () => {
     if (!user) return;
@@ -530,6 +601,13 @@ export default function ConsolePage() {
     [user],
   );
 
+  // Fresh confirmation fields for every new pending action.
+  useEffect(() => {
+    setConfirmEmail("");
+    setOwnerSecretInput("");
+    setActionError("");
+  }, [pending]);
+
   const runAction = useCallback(async () => {
     if (!user || !pending) return;
     setActing(true);
@@ -537,7 +615,13 @@ export default function ConsolePage() {
     try {
       const response = await panelApi(user, "/api/users", {
         method: "PATCH",
-        body: { uid: pending.uid, action: pending.action },
+        body: {
+          uid: pending.uid,
+          action: pending.action,
+          ...(SECRET_GATED_ACTIONS.includes(pending.action)
+            ? { ownerSecret: ownerSecretInput }
+            : {}),
+        },
       });
       if (!response.ok) {
         throw new Error(await apiErrorMessage(response, "That action couldn’t be completed."));
@@ -565,7 +649,7 @@ export default function ConsolePage() {
     } finally {
       setActing(false);
     }
-  }, [user, pending, loadCore, detailUid, openDetail]);
+  }, [user, pending, loadCore, detailUid, openDetail, ownerSecretInput]);
 
   const runResetLink = useCallback(
     async (uid: string) => {
@@ -593,7 +677,7 @@ export default function ConsolePage() {
 
   const filteredUsers = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    let rows = users.filter((row) => {
+    let rows = (searchRows ?? users).filter((row) => {
       if (
         needle &&
         !(
@@ -617,7 +701,7 @@ export default function ConsolePage() {
       return b.totalTokensToday - a.totalTokensToday;
     });
     return rows;
-  }, [users, query, userFilter, userSort]);
+  }, [users, searchRows, query, userFilter, userSort]);
 
   const rangeTotals: Totals | null = useMemo(() => {
     if (!overview) return null;
@@ -746,6 +830,17 @@ export default function ConsolePage() {
     { id: "activity", label: "Activity", icon: ICONS.activity },
     { id: "system", label: "System", icon: ICONS.system },
   ];
+  // The Owner tab exists only for the owner — admins never see it.
+  if (viewer?.role === "owner") {
+    navItems.splice(2, 0, { id: "owner", label: "Owner", icon: ICONS.owner });
+  }
+  const pendingGated = pending ? SECRET_GATED_ACTIONS.includes(pending.action) : false;
+  const pendingEmailOk =
+    pending?.action !== "promote" ||
+    (pending?.email != null &&
+      confirmEmail.trim().toLowerCase() === pending.email.toLowerCase());
+  const pendingSecretOk = !pendingGated || ownerSecretInput.trim().length >= 4;
+  const canConfirm = pendingEmailOk && pendingSecretOk && !acting;
 
   return (
     <div className="shell">
@@ -983,80 +1078,142 @@ export default function ConsolePage() {
           </>
         )}
 
+        {tab === "owner" && viewer?.role === "owner" && (
+          <>
+            {viewer.ownerSecretConfigured === false && (
+              <section className="card owner-warn">
+                <div className="card-head">
+                  <h2>Owner secret not set</h2>
+                  <span className="role-badge owner">action needed</span>
+                </div>
+                <p className="muted">
+                  Granting or revoking admin access and deleting accounts stay locked until
+                  the owner secret exists on the backend. Add <strong>OWNER_SECRET</strong> to
+                  the <strong>xyro-backend</strong> project in Vercel, redeploy the backend,
+                  then reload this panel. This fail-closed lock is deliberate — a signed-in
+                  session alone must never be enough to grant admin.
+                </p>
+              </section>
+            )}
+
+            <section className="card owner-card">
+              <div className="card-head">
+                <h2>Add an admin</h2>
+                <span className="role-badge owner">owner power</span>
+              </div>
+              <p className="muted">
+                Search the whole directory by email, name or uid — not just the first page
+                of accounts. Pick an account to open its full details (sign-in providers,
+                usage, chats, devices), then grant access from there. The final step asks
+                you to type the account’s email and enter your owner secret.
+              </p>
+              <input
+                className="search wide"
+                type="search"
+                placeholder="Search by email, name or uid…"
+                value={addQuery}
+                onChange={(event) => {
+                  setAddQuery(event.target.value);
+                  setAddPick(null);
+                }}
+                aria-label="Search an account to make admin"
+              />
+              {addQuery.trim().length >= 2 && (
+                <div className="pick-list">
+                  {(addResults ?? [])
+                    .filter((row) => !row.admin)
+                    .slice(0, 8)
+                    .map((row) => (
+                      <button
+                        key={row.uid}
+                        type="button"
+                        className={addPick === row.uid ? "pick active" : "pick"}
+                        onClick={() => {
+                          setAddPick(row.uid);
+                          void openDetail(row.uid);
+                        }}
+                      >
+                        <span className="avatar sm">{initials(row)}</span>
+                        <span>{row.displayName || row.email || row.uid}</span>
+                        <span className="muted small">{row.email ?? row.uid}</span>
+                      </button>
+                    ))}
+                  {(addResults ?? []).filter((row) => !row.admin).length === 0 && (
+                    <p className="muted small">No matching account without admin access.</p>
+                  )}
+                </div>
+              )}
+              {addPick && (
+                <p className="muted small">
+                  The account’s full details are open in the drawer — review them, then use
+                  “Make admin” there to start the confirmed grant.
+                </p>
+              )}
+            </section>
+
+            <section className="card">
+              <div className="card-head">
+                <h2>Current admins</h2>
+                <span className="muted small">{users.filter((row) => row.admin).length} with access</span>
+              </div>
+              {users
+                .filter((row) => row.admin)
+                .map((row) => (
+                  <div key={row.uid} className="admin-row">
+                    <span className="avatar sm">{initials(row)}</span>
+                    <span className="admin-row-main">
+                      <strong>{row.displayName || row.email || row.uid}</strong>
+                      <span className="muted small">{row.email ?? row.uid}</span>
+                    </span>
+                    <span className={`role-badge ${row.role ?? "admin"}`}>{row.role ?? "admin"}</span>
+                    {row.role !== "owner" && row.uid !== viewer.uid && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() =>
+                          setPending({
+                            uid: row.uid,
+                            action: "demote",
+                            email: row.email,
+                            label: `Remove admin access from ${row.email ?? row.uid}? It takes effect on their next request.`,
+                          })
+                        }
+                      >
+                        Revoke
+                      </button>
+                    )}
+                  </div>
+                ))}
+              {users.filter((row) => row.admin).length === 0 && (
+                <p className="muted small">No admin accounts found in the loaded directory.</p>
+              )}
+            </section>
+          </>
+        )}
+
         {tab === "users" && (
           <>
             {viewer?.role === "owner" && (
               <section className="card owner-card">
                 <div className="card-head">
-                  <h2>Add an admin</h2>
+                  <h2>Admin access</h2>
                   <span className="role-badge owner">owner power</span>
                 </div>
                 <p className="muted">
-                  Search any account by email, name or uid. You’ll see the account’s full details
-                  before you grant access — and you can revoke it at any time.
+                  Granting and revoking admin access now lives in the Owner tab — with
+                  directory-wide search, full account details, and an owner-secret
+                  confirmation before anything changes.
                 </p>
-                <input
-                  className="search wide"
-                  type="search"
-                  placeholder="Search by email, name or uid…"
-                  value={addQuery}
-                  onChange={(event) => {
-                    setAddQuery(event.target.value);
-                    setAddPick(null);
-                  }}
-                  aria-label="Search an account to make admin"
-                />
-                {addQuery.trim() && (
-                  <div className="pick-list">
-                    {users
-                      .filter((row) => !row.admin)
-                      .filter((row) => {
-                        const needle = addQuery.trim().toLowerCase();
-                        return (
-                          row.email?.toLowerCase().includes(needle) ||
-                          row.displayName?.toLowerCase().includes(needle) ||
-                          row.uid.toLowerCase().includes(needle)
-                        );
-                      })
-                      .slice(0, 6)
-                      .map((row) => (
-                        <button
-                          key={row.uid}
-                          type="button"
-                          className={addPick === row.uid ? "pick active" : "pick"}
-                          onClick={() => {
-                            setAddPick(row.uid);
-                            void openDetail(row.uid);
-                          }}
-                        >
-                          <span className="avatar sm">{initials(row)}</span>
-                          <span>{row.displayName || row.email || row.uid}</span>
-                          <span className="muted small">{row.email ?? row.uid}</span>
-                        </button>
-                      ))}
-                    {users.filter((row) => !row.admin).length > 0 &&
-                      users
-                        .filter((row) => !row.admin)
-                        .filter((row) => {
-                          const needle = addQuery.trim().toLowerCase();
-                          return (
-                            row.email?.toLowerCase().includes(needle) ||
-                            row.displayName?.toLowerCase().includes(needle) ||
-                            row.uid.toLowerCase().includes(needle)
-                          );
-                        }).length === 0 && (
-                        <p className="muted small">No matching account without admin access.</p>
-                      )}
-                  </div>
-                )}
-                {actionError && <div className="alert" role="alert">{actionError}</div>}
+                <button type="button" className="btn btn-primary" onClick={() => setTab("owner")}>
+                  Open the Owner panel
+                </button>
               </section>
             )}
 
             <section className="card">
               <div className="card-head">
                 <h2>All accounts</h2>
-                <span className="muted small">{filteredUsers.length} of {users.length} · click a row for full control</span>
+                <span className="muted small">{searchRows ? `${filteredUsers.length} matches across all accounts` : `${filteredUsers.length} of ${users.length}`} · click a row for full control</span>
               </div>
               {usersError && (
                 <div className="alert" role="alert">
@@ -1440,13 +1597,13 @@ export default function ConsolePage() {
                 <div className="drawer-actions">
                   {viewer?.role === "owner" && !detail.role && (
                     <button type="button" className="btn btn-primary" disabled={acting}
-                      onClick={() => setPending({ uid: detail.uid, action: "promote", label: `Make ${detail.email ?? detail.uid} an admin? They’ll be able to use this console (but not grant admin access). You can revoke this at any time.` })}>
+                      onClick={() => setPending({ uid: detail.uid, action: "promote", email: detail.email, label: `Make ${detail.email ?? detail.uid} an admin? They’ll be able to use this console (but not grant admin access). You can revoke this at any time.` })}>
                       Make admin
                     </button>
                   )}
                   {viewer?.role === "owner" && detail.role === "admin" && (
                     <button type="button" className="btn" disabled={acting}
-                      onClick={() => setPending({ uid: detail.uid, action: "demote", label: `Remove admin access from ${detail.email ?? detail.uid}? It takes effect on their next request.` })}>
+                      onClick={() => setPending({ uid: detail.uid, action: "demote", email: detail.email, label: `Remove admin access from ${detail.email ?? detail.uid}? It takes effect on their next request.` })}>
                       Remove admin
                     </button>
                   )}
@@ -1470,7 +1627,7 @@ export default function ConsolePage() {
                   </button>
                   {viewer?.role === "owner" && detail.role !== "owner" && (
                     <button type="button" className="btn btn-danger" disabled={acting}
-                      onClick={() => setPending({ uid: detail.uid, action: "delete", label: `Delete ${detail.email ?? detail.uid} permanently? Their chats and files are removed; a measurement snapshot is kept in the trash archive.` })}>
+                      onClick={() => setPending({ uid: detail.uid, action: "delete", email: detail.email, label: `Delete ${detail.email ?? detail.uid} permanently? Their chats and files are removed; a measurement snapshot is kept in the trash archive.` })}>
                       Delete account
                     </button>
                   )}
@@ -1496,10 +1653,34 @@ export default function ConsolePage() {
           <div className="modal">
             <h2>Are you sure?</h2>
             <p>{pending.label}</p>
+            {pending.action === "promote" && pending.email && (
+              <label className="modal-field">
+                <span>Type the account’s email to confirm: <strong>{pending.email}</strong></span>
+                <input
+                  type="email"
+                  value={confirmEmail}
+                  onChange={(event) => setConfirmEmail(event.target.value)}
+                  placeholder={pending.email}
+                  autoComplete="off"
+                />
+              </label>
+            )}
+            {SECRET_GATED_ACTIONS.includes(pending.action) && (
+              <label className="modal-field">
+                <span>Owner secret — required for this change</span>
+                <input
+                  type="password"
+                  value={ownerSecretInput}
+                  onChange={(event) => setOwnerSecretInput(event.target.value)}
+                  placeholder="Enter your owner secret"
+                  autoComplete="current-password"
+                />
+              </label>
+            )}
             {actionError && <div className="alert" role="alert">{actionError}</div>}
             <div className="modal-actions">
               <button type="button" className="btn" onClick={() => setPending(null)} disabled={acting}>Cancel</button>
-              <button type="button" className="btn btn-primary" onClick={() => void runAction()} disabled={acting}>
+              <button type="button" className="btn btn-primary" onClick={() => void runAction()} disabled={!canConfirm}>
                 {acting ? "Working…" : "Confirm"}
               </button>
             </div>

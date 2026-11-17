@@ -252,10 +252,11 @@ async def admin_users(request: Request):
     if isinstance(gate, JSONResponse):
         return gate
     viewer_uid, _email, viewer_role = gate
+    query = request.query_params.get("q") or ""
     try:
         return {
             "success": True,
-            **admin.get_users(firestore_client(), viewer_uid, viewer_role),
+            **admin.get_users(firestore_client(), viewer_uid, viewer_role, query),
         }
     except Exception:
         return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
@@ -329,8 +330,15 @@ async def admin_users_patch(request: Request):
     if not isinstance(target, str) or not isinstance(action, str):
         return _error(400, "INVALID_ACTION", "A target user and action are required.")
     try:
+        provided_secret = body.get("ownerSecret")
         result = admin.patch_user(
-            firestore_client(), actor_uid, actor_role, actor_email, target, action
+            firestore_client(),
+            actor_uid,
+            actor_role,
+            actor_email,
+            target,
+            action,
+            owner_secret_value=provided_secret if isinstance(provided_secret, str) else None,
         )
     except admin.AdminAuthError as error:
         return _error(error.status, error.code, error.message)

@@ -5,7 +5,10 @@ export const runtime = "nodejs";
 export const maxDuration = 30;
 
 export async function GET(request: NextRequest) {
-  return proxyAdmin(request, "/v1/admin/users", { method: "GET" });
+  // Forward the directory-wide search query when present.
+  const q = request.nextUrl.searchParams.get("q");
+  const path = q ? `/v1/admin/users?q=${encodeURIComponent(q)}` : "/v1/admin/users";
+  return proxyAdmin(request, path, { method: "GET" });
 }
 
 export async function PATCH(request: NextRequest) {

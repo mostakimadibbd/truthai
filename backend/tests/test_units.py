@@ -393,6 +393,8 @@ def test_admin_gate_and_actions():
     original_verify = admin.verify_id_token_detailed
     original_secret = admin.settings.admin_api_secret
     original_token = admin.settings.service_token
+    original_owner_secret = os.environ.get("OWNER_SECRET")
+    os.environ["OWNER_SECRET"] = "test-owner-secret"
     admin.firebase_auth = lambda: fake_auth
     admin.verify_id_token_detailed = lambda token: (
         {
@@ -445,12 +447,12 @@ def test_admin_gate_and_actions():
         except admin.AdminAuthError as error:
             assert error.code == "OWNER_ONLY"
         # The owner grants: a registry entry appears, role admin.
-        admin.patch_user(db, "boss1", "owner", "boss@example.com", "plain1", "promote")
+        admin.patch_user(db, "boss1", "owner", "boss@example.com", "plain1", "promote", owner_secret_value="test-owner-secret")
         assert db.store[("admins", "plain1")]["role"] == "admin"
         assert db.store[("admins", "plain1")]["grantedBy"] == "boss1"
         assert any(coll == "adminActions" for (coll, _id) in db.store)
         # The owner revokes at any time: the entry is deleted.
-        admin.patch_user(db, "boss1", "owner", "boss@example.com", "plain1", "demote")
+        admin.patch_user(db, "boss1", "owner", "boss@example.com", "plain1", "demote", owner_secret_value="test-owner-secret")
         assert ("admins", "plain1") not in db.store
         # Self-demote is refused; the owner entry is protected.
         try:
@@ -473,6 +475,7 @@ def test_admin_gate_and_actions():
             "uid": "boss1",
             "role": "owner",
             "registered": True,
+            "ownerSecretConfigured": True,
         }
         assert directory["users"][0]["uid"] == "boss1"
         assert directory["users"][0]["role"] == "owner"
@@ -491,7 +494,7 @@ def test_admin_gate_and_actions():
             raise AssertionError("admin deleted an account")
         except admin.AdminAuthError as error:
             assert error.code == "OWNER_ONLY"
-        admin.patch_user(db, "boss1", "owner", "boss@example.com", "plain1", "delete")
+        admin.patch_user(db, "boss1", "owner", "boss@example.com", "plain1", "delete", owner_secret_value="test-owner-secret")
         assert ("plain1", "deleted") in fake_auth.updated
         assert ("users", "plain1") not in db.store
 
@@ -504,6 +507,10 @@ def test_admin_gate_and_actions():
         admin.verify_id_token_detailed = original_verify
         admin.settings.admin_api_secret = original_secret
         admin.settings.service_token = original_token
+        if original_owner_secret is None:
+            os.environ.pop("OWNER_SECRET", None)
+        else:
+            os.environ["OWNER_SECRET"] = original_owner_secret
 
 
 def test_key_normalization_repairs_pastes():
@@ -744,10 +751,14 @@ def test_admin_detail_logs_trash_and_ranges():
         except admin.AdminAuthError as error:
             assert error.status == 403
 
-        # Delete snapshots into the trash first.
+        # Delete snapshots into the trash first. (Delete is an
+        # owner-secret-gated action.)
+        os.environ["OWNER_SECRET"] = "test-owner-secret"
         admin.patch_user(
-            db, "boss1", "owner", "boss@example.com", "plain1", "delete"
+            db, "boss1", "owner", "boss@example.com", "plain1", "delete",
+            owner_secret_value="test-owner-secret",
         )
+        os.environ.pop("OWNER_SECRET", None)
         snapshot = db.store[("deletedUsers", "plain1")]
         assert snapshot["email"] == "plain@example.com"
         assert snapshot["stats"]["chats"] == 1
@@ -880,6 +891,66 @@ def test_cloudflare_targets_and_modes():
     assert models.MODEL_MODE_PROVIDERS["fast"] == "groq"
     assert models.MODEL_MODE_PROVIDERS["lightweight"] == "cloudflare"
     assert not models.is_model_mode("openrouter/free")
+
+
+def test_owner_secret_gate_and_directory_search():
+    from app import admin
+
+    db = _AdminDb()
+    db.store[("users", "target1")] = {"displayName": "Target One"}
+    db.store[("users", "other1")] = {"displayName": "Someone Else"}
+    records = {
+        "target1": _FakeUserRecord("target1", "target@example.com"),
+        "other1": _FakeUserRecord("other1", "other@example.com"),
+    }
+    fake_auth = _FakeAuthModule(records)
+    original_auth = admin.firebase_auth
+    admin.firebase_auth = lambda: fake_auth
+    saved = dict(os.environ)
+    try:
+        # No OWNER_SECRET configured: grants fail CLOSED.
+        os.environ.pop("OWNER_SECRET", None)
+        try:
+            admin.patch_user(db, "owner-uid", "owner", "o@x.com", "target1", "promote", owner_secret_value="anything")
+            raise AssertionError("promote should fail closed without OWNER_SECRET")
+        except admin.AdminAuthError as error:
+            assert error.code == "OWNER_SECRET_NOT_CONFIGURED", error.code
+        # Configured but wrong secret: 403, nothing written.
+        os.environ["OWNER_SECRET"] = "correct-horse"
+        try:
+            admin.patch_user(db, "owner-uid", "owner", "o@x.com", "target1", "promote", owner_secret_value="wrong")
+            raise AssertionError("promote should reject a wrong owner secret")
+        except admin.AdminAuthError as error:
+            assert error.code == "OWNER_SECRET_INVALID", error.code
+        assert ("admins", "target1") not in db.store
+        # Correct secret: the grant lands in the registry.
+        result = admin.patch_user(db, "owner-uid", "owner", "o@x.com", "target1", "promote", owner_secret_value="correct-horse")
+        assert result["success"] is True
+        assert db.store[("admins", "target1")]["role"] == "admin"
+        # A non-owner is refused even WITH the secret.
+        try:
+            admin.patch_user(db, "someone", "admin", "a@x.com", "target1", "demote", owner_secret_value="correct-horse")
+            raise AssertionError("non-owner demote should be OWNER_ONLY")
+        except admin.AdminAuthError as error:
+            assert error.code == "OWNER_ONLY", error.code
+        # Routine actions are NOT secret-gated.
+        result = admin.patch_user(db, "owner-uid", "owner", "o@x.com", "target1", "sign-out-all")
+        assert result["success"] is True
+
+        # Directory-wide search matches email, profile name and uid.
+        by_email = admin.get_users(db, "owner-uid", "owner", query="target@exam")
+        assert [row["uid"] for row in by_email["users"]] == ["target1"]
+        assert by_email["viewer"]["ownerSecretConfigured"] is True
+        by_name = admin.get_users(db, "owner-uid", "owner", query="someone")
+        assert [row["uid"] for row in by_name["users"]] == ["other1"]
+        by_uid = admin.get_users(db, "owner-uid", "owner", query="target1")
+        assert [row["uid"] for row in by_uid["users"]] == ["target1"]
+        no_match = admin.get_users(db, "owner-uid", "owner", query="zzz-no-match")
+        assert no_match["users"] == []
+    finally:
+        admin.firebase_auth = original_auth
+        os.environ.clear()
+        os.environ.update(saved)
 
 
 if __name__ == "__main__":
