@@ -30,6 +30,8 @@ export const PROVIDER_ENV_KEYS = [
   "SAMBANOVA_API_KEY",
   "NVIDIA_API_KEY",
   "NVIDIA_NIM_API_KEY",
+  "CLOUDFLARE_ACCOUNT_ID",
+  "CLOUDFLARE_API_TOKEN",
 ] as const;
 
 export const serverEnv = {

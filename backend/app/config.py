@@ -18,6 +18,12 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def cloudflare_account_id() -> str:
+    """Cloudflare account id (pairs with CLOUDFLARE_API_TOKEN for
+    Workers AI). Read here like every other credential."""
+    return os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+
+
 def provider_api_key(env_keys: list[str]) -> str:
     """First configured API key for a cross-provider spec ("" when
     none). THE place provider credentials are read — call sites in

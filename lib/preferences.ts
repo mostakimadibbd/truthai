@@ -34,7 +34,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   typingSpeed: "normal",
   sendWithEnter: true,
   showSuggestions: true,
-  defaultModel: "openrouter/free",
+  defaultModel: "fast",
   instructionsEnabled: false,
   memoryEnabled: true,
   instructionsAbout: "",

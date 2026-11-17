@@ -17,8 +17,8 @@ const features = [
   },
   {
     glyph: "⌘",
-    title: "Auto routing or pick your model",
-    copy: "Use Auto (Free) and let OpenRouter route your prompt to an available free model, or pick a specific one per chat from the live catalogue. If your pick is busy, chat falls back to Auto once instead of failing.",
+    title: "Three modes, zero fuss",
+    copy: "Pick Fast for quick answers, Thinking for deeper reasoning, or Lightweight for simple tasks. If one route is busy, chat falls back automatically instead of failing.",
     state: "Available",
   },
   {
@@ -55,8 +55,8 @@ const steps = [
   },
   {
     number: "02",
-    title: "Pick a model, or don't",
-    copy: "Start with Auto (Free) for zero decisions, or choose a named free model in the chat's model picker. Your default lives in Settings → General.",
+    title: "Pick a mode, or don't",
+    copy: "Start with Fast for zero decisions, or switch modes per chat from the picker at the top. Your default lives in Settings → General.",
   },
   {
     number: "03",
@@ -66,11 +66,9 @@ const steps = [
 ];
 
 const exampleModels = [
-  { name: "Llama 3.3 70B", maker: "Meta", note: "General chat and reasoning" },
-  { name: "Gemma 3 27B", maker: "Google", note: "Text and image understanding" },
-  { name: "DeepSeek V3", maker: "DeepSeek", note: "Chat and code" },
-  { name: "Qwen3 235B", maker: "Qwen", note: "Large general-purpose model" },
-  { name: "Mistral Small 3.1", maker: "Mistral AI", note: "Text and image understanding" },
+  { name: "Fast", maker: "Everyday answers", note: "Quick, low-latency replies for chat and everyday questions." },
+  { name: "Thinking", maker: "Hard problems", note: "Deeper reasoning for coding, analysis and long questions." },
+  { name: "Lightweight", maker: "Simple tasks", note: "Light, efficient models for short and simple requests." },
 ];
 
 const useCases = [
@@ -141,7 +139,7 @@ const faqTeaser = [
   },
   {
     q: "Which AI models can I use?",
-    a: "Any model OpenRouter currently offers for free. Auto (Free) routes each prompt to an available one; the model picker in chat lists the live free catalogue. Availability changes as providers adjust their free pools, so the in-app list is the source of truth.",
+    a: "Three modes, all free: Fast for everyday questions, Thinking for harder problems and code, and Lightweight for simple tasks. Behind the scenes each mode draws on a pool of free models and falls back automatically when one is busy, so an answer always arrives.",
   },
   {
     q: "What files can I analyse?",
@@ -179,7 +177,7 @@ export default function Home() {
         <div className="landing-mock" aria-label="Illustrative preview of the Xyro AI chat workspace">
           <div className="landing-mock-topbar">
             <span className="preview-brand"><span className="preview-mark">x</span> xyro<span>ai</span></span>
-            <span className="landing-mock-model"><i /> Auto (Free)</span>
+            <span className="landing-mock-model"><i /> Fast</span>
           </div>
           <div className="landing-mock-body">
             <div className="landing-mock-user">
@@ -284,13 +282,12 @@ export default function Home() {
           <span className="eyebrow">Models</span>
           <h2>Free models, routed honestly.</h2>
           <p>
-            Xyro AI only ever calls models OpenRouter lists as free. With
-            Auto (Free), OpenRouter routes each prompt to an available
-            free model; with the picker, you choose. Free pools change as
-            providers adjust them, and free models can be busy at peak
-            times — we show that honestly instead of quietly switching you
-            to anything paid. A few of the free models that regularly
-            appear in the catalogue:
+            Xyro AI only ever calls free models — never anything paid.
+            You choose the experience, not the machinery: Fast, Thinking
+            or Lightweight. Each mode draws on a pool of free models and
+            falls back automatically when one is busy, and we show busy
+            times honestly instead of quietly switching you to anything
+            paid. The three modes:
           </p>
         </div>
         <ul className="model-list">
@@ -303,10 +300,10 @@ export default function Home() {
           ))}
         </ul>
         <p className="model-note">
-          The live, current list is always in the app&apos;s model picker
-          and in Settings → General. We publish no benchmark scores —
-          free-model performance varies, and the honest test is trying
-          your own prompt.
+          Switch modes any time from the picker at the top of the chat,
+          and set your default in Settings → General. We publish no
+          benchmark scores — free-model performance varies, and the
+          honest test is trying your own prompt.
         </p>
         <Link href="/models" className="text-link">How models work in Xyro AI <span aria-hidden="true">→</span></Link>
       </section>

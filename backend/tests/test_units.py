@@ -816,7 +816,7 @@ def test_provider_presence_reports_keys():
         presence = chatjob.openrouter.provider_presence()
         assert presence == {
             "gemini": False, "groq": False, "requesty": False,
-            "sambanova": False, "nvidia": False,
+            "sambanova": False, "nvidia": False, "cloudflare": False,
         }, presence
         os.environ["GROQ_API_KEY"] = "test-key"
         assert chatjob.openrouter.provider_presence()["groq"] is True
@@ -857,6 +857,29 @@ def test_refusal_detection_and_providers_first():
     finally:
         os.environ.clear()
         os.environ.update(saved)
+
+
+def test_cloudflare_targets_and_modes():
+    saved = dict(os.environ)
+    try:
+        os.environ["CLOUDFLARE_API_TOKEN"] = "tok"
+        # Token without the account id: provider skipped entirely.
+        bare = [t for t in chatjob.openrouter.cross_provider_targets() if t["provider"] == "cloudflare"]
+        assert bare == []
+        os.environ["CLOUDFLARE_ACCOUNT_ID"] = "acc123"
+        cf = [t for t in chatjob.openrouter.cross_provider_targets() if t["provider"] == "cloudflare"]
+        assert len(cf) == 3
+        assert all("/accounts/acc123/" in t["url"] for t in cf)
+        assert chatjob.openrouter.provider_presence()["cloudflare"] is True
+        light = chatjob.openrouter.build_targets(["openrouter/free"], preferred_provider="cloudflare")
+        assert light[0]["provider"] == "cloudflare"
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    assert models.is_model_mode("fast")
+    assert models.MODEL_MODE_PROVIDERS["fast"] == "groq"
+    assert models.MODEL_MODE_PROVIDERS["lightweight"] == "cloudflare"
+    assert not models.is_model_mode("openrouter/free")
 
 
 if __name__ == "__main__":

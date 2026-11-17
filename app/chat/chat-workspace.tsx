@@ -43,6 +43,11 @@ import FirebasePresence from "@/components/firebase-presence";
 import SignOutDialog, { type SignOutVariant } from "@/components/sign-out-dialog";
 import { performSignOut } from "@/lib/firebase/sign-out";
 import { sortByConversationOrder } from "@/lib/message-order";
+import {
+  DEFAULT_MODEL_MODE_ID,
+  MODEL_MODES,
+  isModelModeId,
+} from "@/lib/model-modes";
 import { usePreferences } from "@/lib/preferences-client";
 import { useTypewriter } from "@/lib/typewriter";
 import { isFirebaseConfigured, tryGetFirebaseAuth } from "@/lib/firebase/auth-client";
@@ -102,7 +107,14 @@ const MAX_FILE_BYTES_PER_MESSAGE = 20 * 1024 * 1024;
 const MAX_FILES_PER_MESSAGE = 5;
 const ACCEPTED_FILE_TYPES = ".jpg,.jpeg,.png,.webp,.gif,.pdf,.txt,.md,.csv";
 const IMAGE_FILE_TYPES = ".jpg,.jpeg,.png,.webp,.gif";
-const AUTO_MODEL_OPTION = { id: "openrouter/free", name: "Auto (Free)" };
+// The picker offers three MODES (Fast / Thinking / Lightweight) —
+// never provider names. The server maps each mode to a preferred
+// provider inside the fallback chain (lib/model-modes.ts).
+const MODE_OPTIONS: ModelOption[] = MODEL_MODES.map((mode) => ({
+  id: mode.id,
+  name: mode.name,
+}));
+const AUTO_MODEL_OPTION = MODE_OPTIONS[0];
 // Attachment access URLs are signed server-side for 15 minutes;
 // they count as fresh for 12 so they are re-minted before expiry.
 const ATTACHMENT_URL_FRESH_MS = 12 * 60 * 1000;
@@ -404,7 +416,7 @@ export default function ChatWorkspace() {
   // stored per-device choice, then the default-model preference, and
   // is sent with every /api/chat request (the server re-validates it
   // against the free list and falls back to the preference/Auto).
-  const [availableModels, setAvailableModels] = useState<ModelOption[]>([AUTO_MODEL_OPTION]);
+  const [availableModels, setAvailableModels] = useState<ModelOption[]>(MODE_OPTIONS);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   // Image creation (Phase 7): when create mode is on, the composer
@@ -887,10 +899,17 @@ export default function ChatWorkspace() {
     } catch {
       stored = null;
     }
-    if (stored) {
+    if (stored && isModelModeId(stored)) {
       setSelectedModel(stored);
     } else if (preferencesLoaded) {
-      setSelectedModel(preferences.defaultModel);
+      // A stored legacy model id (pre-modes) is retired: the
+      // default-model preference wins when it names a mode, else
+      // the default mode.
+      setSelectedModel(
+        isModelModeId(preferences.defaultModel)
+          ? preferences.defaultModel
+          : DEFAULT_MODEL_MODE_ID,
+      );
     }
   }, [preferences.defaultModel, preferencesLoaded, selectedModel, user]);
 
@@ -2241,8 +2260,8 @@ export default function ChatWorkspace() {
           <label className="chat-model-picker">
             <span className="chat-model-dot" />
             <select
-              aria-label="Choose a free model"
-              title="Choose a free model"
+              aria-label="Choose a model"
+              title="Choose a model"
               value={selectedModel ?? AUTO_MODEL_OPTION.id}
               onChange={(event) => handleModelChange(event.target.value)}
             >

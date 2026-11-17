@@ -83,6 +83,10 @@ export type ChatCompletionArgs = {
    * cannot correct), the turn is re-asked provider-first so a
    * different provider's model answers instead. */
   providersFirst?: boolean;
+  /** Move this provider's targets to the front of the chain (the
+   * model modes: Fast prefers Groq, Lightweight prefers
+   * Cloudflare). Everything else remains as fallback. */
+  preferredProvider?: string;
 };
 
 /**
@@ -129,7 +133,10 @@ export type AttemptTarget = {
 
 type ProviderSpec = {
   provider: string;
-  url: string;
+  /** Fixed endpoint, or a builder for endpoints that embed an
+   * account id (Cloudflare). A builder returning null skips the
+   * provider (e.g. token present but account id missing). */
+  url: string | ((env: Record<string, string | undefined>) => string | null);
   envKeys: string[];
   models: string[];
   /** Subset of models that can actually SEE image attachments.
@@ -179,6 +186,26 @@ const CROSS_PROVIDERS: ProviderSpec[] = [
       "deepseek-ai/deepseek-v4-flash",
     ],
   },
+  {
+    // Cloudflare Workers AI (OpenAI-compatible endpoint). Powers
+    // the "Lightweight" mode and the image-generation chain; the
+    // free allocation needs no card. Needs BOTH the account id
+    // (in the URL) and an API token with Workers AI permission.
+    provider: "cloudflare",
+    url: (env) => {
+      const accountId = env.CLOUDFLARE_ACCOUNT_ID?.trim();
+      return accountId
+        ? `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/chat/completions`
+        : null;
+    },
+    envKeys: ["CLOUDFLARE_API_TOKEN"],
+    models: [
+      "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      "@cf/openai/gpt-oss-120b",
+      "@cf/meta/llama-4-scout-17b-16e-instruct",
+    ],
+    visionModels: ["@cf/meta/llama-4-scout-17b-16e-instruct"],
+  },
 ];
 
 export function crossProviderTargets(
@@ -191,13 +218,15 @@ export function crossProviderTargets(
       .map((name) => env[name]?.trim())
       .find((value) => value);
     if (!apiKey) continue;
+    const url = typeof spec.url === "function" ? spec.url(env) : spec.url;
+    if (!url) continue;
     const models = visionOnly ? (spec.visionModels ?? []) : spec.models;
     for (const model of models) {
       targets.push({
         provider: spec.provider,
         model,
         label: `${spec.provider}/${model}`,
-        url: spec.url,
+        url,
         apiKey,
       });
     }
@@ -211,6 +240,7 @@ export function buildAttemptTargets(
   env: Record<string, string | undefined> = serverEnv.providerEnv(),
   visionOnly = false,
   providersFirst = false,
+  preferredProvider?: string,
 ): AttemptTarget[] {
   const targets: AttemptTarget[] = openRouterAttempts.map((model) => ({
     provider: "openrouter",
@@ -220,7 +250,19 @@ export function buildAttemptTargets(
     apiKey: openRouterApiKey,
   }));
   const cross = crossProviderTargets(env, visionOnly);
-  return providersFirst ? [...cross, ...targets] : [...targets, ...cross];
+  let ordered = providersFirst
+    ? [...cross, ...targets]
+    : [...targets, ...cross];
+  // Model modes (Fast / Lightweight) prefer one provider: its
+  // targets move to the front, everything else keeps its order as
+  // fallback. A preference for an unconfigured provider is a no-op.
+  if (preferredProvider) {
+    ordered = [
+      ...ordered.filter((target) => target.provider === preferredProvider),
+      ...ordered.filter((target) => target.provider !== preferredProvider),
+    ];
+  }
+  return ordered;
 }
 
 const REFUSAL_PATTERNS: RegExp[] = [
@@ -276,6 +318,7 @@ export async function fetchChatCompletionWithFallback(
     serverEnv.providerEnv(),
     messagesHaveImages(args.messages),
     args.providersFirst ?? false,
+    args.preferredProvider,
   );
   const connectTimeoutMs = args.connectTimeoutMs ?? 25_000;
   let lastStatus: number | null = null;

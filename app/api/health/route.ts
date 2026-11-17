@@ -2,6 +2,7 @@ import { createPrivateKey } from "node:crypto";
 import { NextResponse } from "next/server";
 import { normalizeAdminPrivateKey } from "@/lib/server/private-key";
 import { checkCloudinaryLive } from "@/lib/server/cloudinary";
+import { checkCloudflareLive } from "@/lib/server/cloudflare";
 import { serverEnv } from "@/lib/server/env";
 
 export const runtime = "nodejs";
@@ -90,9 +91,18 @@ export async function GET() {
     requesty: present(providerKeys.REQUESTY_API_KEY),
     sambanova: present(providerKeys.SAMBANOVA_API_KEY),
     nvidia: present(providerKeys.NVIDIA_API_KEY) || present(providerKeys.NVIDIA_NIM_API_KEY),
+    cloudflare:
+      present(providerKeys.CLOUDFLARE_API_TOKEN) &&
+      present(providerKeys.CLOUDFLARE_ACCOUNT_ID),
+  };
+  const cloudflareLive = await checkCloudflareLive();
+  const cloudflareChecks = {
+    configured: cloudflareLive.configured,
+    credentialsLive: cloudflareLive.live,
+    liveError: cloudflareLive.errorKind,
   };
   return NextResponse.json(
-    { ok: true, integrations, adminChecks, cloudinaryChecks, providers },
+    { ok: true, integrations, adminChecks, cloudinaryChecks, cloudflareChecks, providers },
     { headers: { "Cache-Control": "no-store" } },
   );
 }

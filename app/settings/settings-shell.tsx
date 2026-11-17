@@ -678,7 +678,7 @@ function GeneralTab({
           )}
         </select>
         <p className="settings-hint">
-          Free models from OpenRouter. If a chosen model is busy, chat falls back to Auto (Free) once.
+          Fast for quick answers, Thinking for deeper reasoning, Lightweight for simple tasks. All modes are free, and every mode falls back automatically if its first choice is busy.
         </p>
         {modelsNote && <p className="settings-hint" role="status">{modelsNote}</p>}
       </div>

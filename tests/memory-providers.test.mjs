@@ -105,3 +105,33 @@ test("buildAttemptTargets providersFirst puts Groq ahead of OpenRouter", async (
   const normal = bat(["openrouter/free"], "or_key", { GROQ_API_KEY: "g" });
   assert.equal(normal[0].provider, "openrouter");
 });
+
+test("cloudflare targets need the account id + token pair and embed the id in the URL", async () => {
+  const { crossProviderTargets: cpt } = await import("../lib/server/openrouter.ts");
+  const withPair = cpt({ CLOUDFLARE_API_TOKEN: "tok", CLOUDFLARE_ACCOUNT_ID: "acc123" });
+  const cf = withPair.filter((t) => t.provider === "cloudflare");
+  assert.equal(cf.length, 3);
+  assert.ok(cf.every((t) => t.url.includes("/accounts/acc123/ai/v1/chat/completions")));
+  const tokenOnly = cpt({ CLOUDFLARE_API_TOKEN: "tok" });
+  assert.equal(tokenOnly.filter((t) => t.provider === "cloudflare").length, 0);
+});
+
+test("preferredProvider moves that provider's targets to the front", async () => {
+  const { buildAttemptTargets: bat } = await import("../lib/server/openrouter.ts");
+  const env = { GROQ_API_KEY: "g", CLOUDFLARE_API_TOKEN: "t", CLOUDFLARE_ACCOUNT_ID: "a" };
+  const fast = bat(["openrouter/free"], "k", env, false, false, "groq");
+  assert.equal(fast[0].provider, "groq");
+  const light = bat(["openrouter/free"], "k", env, false, false, "cloudflare");
+  assert.equal(light[0].provider, "cloudflare");
+  const plain = bat(["openrouter/free"], "k", env);
+  assert.equal(plain[0].provider, "openrouter");
+});
+
+test("model modes map to the right preferred providers", async () => {
+  const { isModelModeId, modePreferredProvider } = await import("../lib/model-modes.ts");
+  assert.equal(isModelModeId("fast"), true);
+  assert.equal(isModelModeId("openrouter/free"), false);
+  assert.equal(modePreferredProvider("fast"), "groq");
+  assert.equal(modePreferredProvider("lightweight"), "cloudflare");
+  assert.equal(modePreferredProvider("thinking"), undefined);
+});

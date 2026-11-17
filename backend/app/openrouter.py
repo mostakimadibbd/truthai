@@ -21,7 +21,7 @@ from typing import Awaitable, Callable
 
 import httpx
 
-from .config import provider_api_key, provider_configured, settings
+from .config import cloudflare_account_id, provider_api_key, provider_configured, settings
 from .models import free_only_attempts
 
 RETRYABLE_STATUSES = {400, 404, 413, 422, 429, 500, 502, 503, 504}
@@ -82,6 +82,20 @@ CROSS_PROVIDERS: list[dict] = [
             "deepseek-ai/deepseek-v4-flash",
         ],
     },
+    {
+        # Cloudflare Workers AI: the URL embeds the account id, so
+        # the target builder substitutes it; the provider is skipped
+        # unless BOTH the token and the account id are configured.
+        "provider": "cloudflare",
+        "url": "https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1/chat/completions",
+        "env_keys": ["CLOUDFLARE_API_TOKEN"],
+        "models": [
+            "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "@cf/openai/gpt-oss-120b",
+            "@cf/meta/llama-4-scout-17b-16e-instruct",
+        ],
+        "vision_models": ["@cf/meta/llama-4-scout-17b-16e-instruct"],
+    },
 ]
 
 
@@ -89,10 +103,15 @@ def provider_presence() -> dict[str, bool]:
     """Which cross-provider API keys are configured (presence only —
     values never leave the process). Surfaced on the token-gated
     /health so key setup can be verified without console access."""
-    return {
+    presence = {
         spec["provider"]: provider_configured(spec["env_keys"])
         for spec in CROSS_PROVIDERS
     }
+    if "cloudflare" in presence:
+        presence["cloudflare"] = bool(
+            presence["cloudflare"] and cloudflare_account_id()
+        )
+    return presence
 
 
 def cross_provider_targets(vision_only: bool = False) -> list[dict]:
@@ -101,6 +120,12 @@ def cross_provider_targets(vision_only: bool = False) -> list[dict]:
         api_key = provider_api_key(spec["env_keys"])
         if not api_key:
             continue
+        url = spec["url"]
+        if "{account}" in url:
+            account = cloudflare_account_id()
+            if not account:
+                continue
+            url = url.replace("{account}", account)
         models = spec.get("vision_models", []) if vision_only else spec["models"]
         for model in models:
             targets.append(
@@ -108,14 +133,14 @@ def cross_provider_targets(vision_only: bool = False) -> list[dict]:
                     "provider": spec["provider"],
                     "model": model,
                     "label": f"{spec['provider']}/{model}",
-                    "url": spec["url"],
+                    "url": url,
                     "api_key": api_key,
                 }
             )
     return targets
 
 
-def build_targets(openrouter_attempts: list[str], vision_only: bool = False, providers_first: bool = False) -> list[dict]:
+def build_targets(openrouter_attempts: list[str], vision_only: bool = False, providers_first: bool = False, preferred_provider: str | None = None) -> list[dict]:
     targets = [
         {
             "provider": "openrouter",
@@ -127,7 +152,12 @@ def build_targets(openrouter_attempts: list[str], vision_only: bool = False, pro
         for model in openrouter_attempts
     ]
     cross = cross_provider_targets(vision_only)
-    return cross + targets if providers_first else targets + cross
+    ordered = cross + targets if providers_first else targets + cross
+    if preferred_provider:
+        ordered = [t for t in ordered if t["provider"] == preferred_provider] + [
+            t for t in ordered if t["provider"] != preferred_provider
+        ]
+    return ordered
 
 _shared: httpx.AsyncClient | None = None
 
@@ -175,6 +205,7 @@ async def stream_completion(
     max_tokens: int = 4096,
     connect_timeout: float = 25.0,
     providers_first: bool = False,
+    preferred_provider: str | None = None,
 ) -> dict:
     """Stream a completion, calling on_text with the full text so
     far whenever it grows. Returns {model, text, usage} where usage
@@ -191,7 +222,7 @@ async def stream_completion(
         for message in messages
         if isinstance(message, dict)
     )
-    targets = build_targets(attempts, vision_only=has_images, providers_first=providers_first)
+    targets = build_targets(attempts, vision_only=has_images, providers_first=providers_first, preferred_provider=preferred_provider)
     last_status = 0
     last_body = ""
     last_retry_after: str | None = None

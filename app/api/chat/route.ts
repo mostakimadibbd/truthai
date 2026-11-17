@@ -1,4 +1,9 @@
 import { serverEnv } from "@/lib/server/env";
+import {
+  isModelModeId,
+  modePreferredProvider,
+  type ModelModeId,
+} from "@/lib/model-modes";
 import { Timestamp } from "firebase-admin/firestore";
 import { NextRequest, NextResponse } from "next/server";
 import { sortByConversationOrder } from "@/lib/message-order";
@@ -304,25 +309,38 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Model selection (Phase 3): an explicit model must be on the free
-  // list; when none is sent, the user's default-model preference is
-  // used (itself validated, falling back to Auto (Free) if the stored
-  // value is no longer a free model).
+  // Model selection: the picker sends a MODE (fast / thinking /
+  // lightweight — see lib/model-modes.ts); each mode prefers a
+  // provider inside the fallback chain and never names it. Legacy
+  // clients may still send a specific free-model id, which is
+  // honoured when it is on the free list. When nothing is sent, the
+  // user's default-model preference is used (mode or model id,
+  // itself validated, falling back to Auto if no longer valid).
   let requestedModel: string | null = null;
+  let requestedMode: ModelModeId | null = null;
   if (body.model !== undefined) {
     if (
       typeof body.model !== "string" ||
       body.model.length === 0 ||
-      body.model.length > 200 ||
-      !(await isAllowedFreeModel(body.model))
+      body.model.length > 200
     ) {
       return errorResponse(
         400,
         "INVALID_MODEL",
-        "Choose one of the free models from the model list.",
+        "Choose Fast, Thinking or Lightweight.",
       );
     }
-    requestedModel = body.model;
+    if (isModelModeId(body.model)) {
+      requestedMode = body.model;
+    } else if (await isAllowedFreeModel(body.model)) {
+      requestedModel = body.model;
+    } else {
+      return errorResponse(
+        400,
+        "INVALID_MODEL",
+        "Choose Fast, Thinking or Lightweight.",
+      );
+    }
   }
 
   const rateLimit = await checkRateLimit(auth.uid, "chat", 10, 60);
@@ -388,7 +406,7 @@ export async function POST(request: NextRequest) {
       userMessageId,
       assistantMessageId,
       content,
-      model: requestedModel,
+      model: requestedMode ?? requestedModel,
     });
     if (delegated) return delegated;
   }
@@ -753,12 +771,22 @@ export async function POST(request: NextRequest) {
     }
 
     let effectiveModel = requestedModel ?? AUTO_MODEL_ID;
-    if (!requestedModel) {
+    // The mode's preferred provider inside the fallback chain
+    // (Fast → Groq, Lightweight → Cloudflare, Thinking → the
+    // curated OpenRouter order). Unconfigured preferences no-op.
+    let preferredProvider = requestedMode
+      ? modePreferredProvider(requestedMode)
+      : undefined;
+    if (!requestedModel && !requestedMode) {
       try {
         const preferences = await readPreferences(auth.uid);
-        effectiveModel = (await isAllowedFreeModel(preferences.defaultModel))
-          ? preferences.defaultModel
-          : AUTO_MODEL_ID;
+        if (isModelModeId(preferences.defaultModel)) {
+          preferredProvider = modePreferredProvider(preferences.defaultModel);
+        } else {
+          effectiveModel = (await isAllowedFreeModel(preferences.defaultModel))
+            ? preferences.defaultModel
+            : AUTO_MODEL_ID;
+        }
       } catch (error) {
         console.error("Couldn’t read the default-model preference.", error);
         effectiveModel = AUTO_MODEL_ID;
@@ -878,6 +906,7 @@ export async function POST(request: NextRequest) {
         connectTimeoutMs: 25_000,
         includeUsage: true,
         providersFirst,
+        preferredProvider,
       });
       return result.response;
     };

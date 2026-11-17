@@ -124,3 +124,17 @@ def free_only_attempts(attempts: list[str]) -> list[str]:
     if dropped:
         print(f"Free-only guard dropped non-free model attempts: {', '.join(dropped)}")
     return kept or [AUTO_MODEL_ID]
+
+
+# User-facing model modes (parity with lib/model-modes.ts): the
+# picker sends a mode id, never a provider name. Each mode prefers
+# a provider inside the fallback chain.
+MODEL_MODE_PROVIDERS: dict[str, str | None] = {
+    "fast": "groq",
+    "thinking": None,
+    "lightweight": "cloudflare",
+}
+
+
+def is_model_mode(value) -> bool:
+    return isinstance(value, str) and value in MODEL_MODE_PROVIDERS

@@ -95,7 +95,7 @@ export const articles: Record<string, Article> = {
         title: "What you get",
         body: [
           "- Unlimited accounts: one per person, created with email/password or Google sign-in",
-          "- Chat with any model OpenRouter currently offers for free, or Auto (Free) routing",
+          "- Chat in three free modes — Fast, Thinking and Lightweight — with automatic fallback when a route is busy",
           "- File uploads and analysis: images, PDF, TXT, Markdown and CSV, up to 10 MB per file and five files per message",
           "- Image creation from the chat composer (10 creations per day), with an invisible watermark on every created picture",
           "- Chat history synced across your devices, with search, rename, export and delete",

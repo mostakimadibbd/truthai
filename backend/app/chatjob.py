@@ -98,11 +98,19 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
         total_length -= len(history.pop(0)["content"])
 
     # --- Resolve the model (free-only) ----------------------------
+    # The picker sends a MODE id (fast / thinking / lightweight);
+    # a mode resolves to the Auto attempt order plus a preferred
+    # provider inside the chain. A specific model id must be on
+    # the free list.
     requested = job.get("model")
-    if requested:
+    preferred_provider: str | None = None
+    if requested and model_lib.is_model_mode(requested):
+        effective_model = model_lib.AUTO_MODEL_ID
+        preferred_provider = model_lib.MODEL_MODE_PROVIDERS[requested]
+    elif requested:
         if not await model_lib.is_allowed_free_model(requested):
             raise ChatJobError(
-                400, "INVALID_MODEL", "Choose one of the free models from the model list."
+                400, "INVALID_MODEL", "Choose Fast, Thinking or Lightweight."
             )
         effective_model = requested
     else:
@@ -219,6 +227,7 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
             model_messages,
             on_text,
             max_tokens=4096,
+            preferred_provider=preferred_provider,
         )
         # Refusal gate (parity with the TS chat route): an
         # access-denial refusal is an HTTP 200 the fallback chain
@@ -235,6 +244,7 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
                 on_text,
                 max_tokens=4096,
                 providers_first=True,
+                preferred_provider=preferred_provider,
             )
     except openrouter.AttemptsExhausted as error:
         await _fail_turn(

@@ -66,11 +66,37 @@ async def health(
     except Exception as error:  # noqa: BLE001 - class name is the diagnostic
         admin_error = type(error).__name__
         admin_error_detail = str(error)[:160]
+    # Cloudflare Workers AI: presence is not proof — probe the
+    # account's model list so a bad token or a wrong account id is
+    # visible here instead of failing silently inside the chain.
+    cloudflare_live = None
+    cloudflare_error = None
+    try:
+        import httpx
+
+        from .config import cloudflare_account_id, provider_api_key
+
+        cf_token = provider_api_key(["CLOUDFLARE_API_TOKEN"])
+        cf_account = cloudflare_account_id()
+        if cf_token and cf_account:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                resp = await client.get(
+                    f"https://api.cloudflare.com/client/v4/accounts/{cf_account}/ai/models/search",
+                    headers={"Authorization": f"Bearer {cf_token}"},
+                )
+            cloudflare_live = resp.status_code == 200
+            if not cloudflare_live:
+                cloudflare_error = f"http_{resp.status_code}"
+    except Exception as error:  # noqa: BLE001 - class name is the diagnostic
+        cloudflare_live = False
+        cloudflare_error = type(error).__name__
     return {
         "ok": True,
         "service": "xyro-backend",
         "integrations": checks,
         "providers": openrouter_lib.provider_presence(),
+        "cloudflareLive": cloudflare_live,
+        "cloudflareError": cloudflare_error,
         "firebaseProject": settings.firebase_project,
         "adminReady": admin_ready,
         "adminError": admin_error,
