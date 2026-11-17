@@ -138,19 +138,23 @@ const CROSS_PROVIDERS: ProviderSpec[] = [
     provider: "groq",
     url: "https://api.groq.com/openai/v1/chat/completions",
     envKeys: ["GROQ_API_KEY"],
-    models: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.1-8b-instant"],
+    models: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
   },
   {
-    provider: "mistral",
-    url: "https://api.mistral.ai/v1/chat/completions",
-    envKeys: ["MISTRAL_API_KEY"],
-    models: ["mistral-small-latest", "open-mistral-nemo"],
+    provider: "sambanova",
+    url: "https://api.sambanova.ai/v1/chat/completions",
+    envKeys: ["SAMBANOVA_API_KEY"],
+    models: ["DeepSeek-V3.1", "Meta-Llama-3.3-70B-Instruct", "gpt-oss-120b"],
   },
   {
-    provider: "huggingface",
-    url: "https://router.huggingface.co/v1/chat/completions",
-    envKeys: ["HF_TOKEN", "HUGGINGFACE_API_KEY"],
-    models: ["Qwen/Qwen3-235B-A22B", "meta-llama/Llama-3.3-70B-Instruct"],
+    provider: "nvidia",
+    url: "https://integrate.api.nvidia.com/v1/chat/completions",
+    envKeys: ["NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"],
+    models: [
+      "meta/llama-3.3-70b-instruct",
+      "openai/gpt-oss-120b",
+      "deepseek-ai/deepseek-v4-flash",
+    ],
   },
 ];
 

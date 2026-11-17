@@ -144,6 +144,45 @@ async function getApiError(response: Response, fallback: string): Promise<string
   return fallback;
 }
 
+/**
+ * iPhone photos routinely exceed the 4 MB server-fallback cap
+ * (and are slow to push over mobile data). Images larger than
+ * that are downscaled in the browser — max 2048px on the long
+ * edge, JPEG at 0.85 — before upload. Any failure returns the
+ * original file untouched.
+ */
+async function maybeCompressImage(file: File): Promise<File> {
+  const LIMIT = 4 * 1024 * 1024;
+  if (
+    file.size <= LIMIT ||
+    !file.type.startsWith("image/") ||
+    file.type === "image/gif"
+  ) {
+    return file;
+  }
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, 2048 / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return file;
+    context.drawImage(bitmap, 0, 0, width, height);
+    bitmap.close();
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", 0.85),
+    );
+    if (!blob || blob.size >= file.size) return file;
+    const name = `${file.name.replace(/\.[^.]+$/, "")}.jpg`;
+    return new File([blob], name, { type: "image/jpeg" });
+  } catch {
+    return file;
+  }
+}
+
 function isUploadSignature(value: unknown): value is UploadSignature {
   if (typeof value !== "object" || value === null) return false;
   return (
@@ -1263,7 +1302,10 @@ export default function ChatWorkspace() {
       }
       await ensurePersistedChat(chat);
 
-      for (const file of validFiles) {
+      for (const rawFile of validFiles) {
+        // Oversized photos are downscaled in the browser first:
+        // they upload faster and always fit the server fallback.
+        const file = await maybeCompressImage(rawFile);
         const placeholder: Attachment = {
           id: `uploading-${crypto.randomUUID()}`,
           name: file.name,
