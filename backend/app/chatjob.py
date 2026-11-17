@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import time
 
-from . import analytics, memory as memory_lib, models as model_lib, openrouter
+from . import analytics, memory as memory_lib, models as model_lib, openrouter, safety
 
 MAX_MESSAGES = 30
 MAX_TOTAL_LENGTH = 36_000
@@ -103,6 +103,7 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
     # provider inside the chain. A specific model id must be on
     # the free list.
     requested = job.get("model")
+    open_router_only = job.get("openRouterOnly") is True
     preferred_provider: str | None = None
     if requested and model_lib.is_model_mode(requested):
         effective_model = model_lib.AUTO_MODEL_ID
@@ -228,6 +229,7 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
             on_text,
             max_tokens=4096,
             preferred_provider=preferred_provider,
+            open_router_only=open_router_only,
         )
         # Refusal gate (parity with the TS chat route): an
         # access-denial refusal is an HTTP 200 the fallback chain
@@ -235,7 +237,7 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
         # the refusal and re-ask provider-first (Groq / Gemini
         # ahead of OpenRouter); the published text resets first,
         # so the user only sees the replacement answer settle.
-        if openrouter.looks_like_refusal(result["text"]) and openrouter.cross_provider_targets():
+        if not open_router_only and openrouter.looks_like_refusal(result["text"]) and not safety.looks_like_safety_refusal(result["text"]) and openrouter.cross_provider_targets():
             stream_state["text"] = ""
             await publish(force=True)
             result = await openrouter.stream_completion(
@@ -245,6 +247,7 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
                 max_tokens=4096,
                 providers_first=True,
                 preferred_provider=preferred_provider,
+                open_router_only=open_router_only,
             )
     except openrouter.AttemptsExhausted as error:
         await _fail_turn(
@@ -275,15 +278,51 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
     final_text: str = result["text"]
     # Memory capture: strip the hidden markers from the stored
     # reply and persist the facts for future conversations.
+    # Delegated turns are plain-text only (no web results, no
+    # files), so the web/file capture ban from the TS route
+    # cannot trigger here; the sensitive-category filter inside
+    # save_memories still applies.
+    saved_memories: list[dict] = []
     if memory_on:
         final_text, new_facts = memory_lib.extract_memories(final_text)
         if new_facts:
             try:
-                await _run_sync(
+                saved_memories = await _run_sync(
                     memory_lib.save_memories, db, uid, new_facts, chat_id
                 )
             except Exception:
-                pass
+                saved_memories = []
+    # Safety flagging (silent; parity with the TS route): a
+    # high-confidence harmful request or a model safety refusal
+    # files a flag for admin review. The user is never told and
+    # nothing about their experience changes.
+    try:
+        harmful_category = safety.classify_harmful_request(content)
+        if harmful_category:
+            await _run_sync(
+                safety.write_flag,
+                db,
+                uid=uid,
+                chat_id=chat_id,
+                prompt=content,
+                category=harmful_category,
+                signal="prompt_pattern",
+                model=result.get("model"),
+            )
+        elif safety.looks_like_safety_refusal(final_text):
+            await _run_sync(
+                safety.write_flag,
+                db,
+                uid=uid,
+                chat_id=chat_id,
+                prompt=content,
+                category="other",
+                signal="model_refusal",
+                model=result.get("model"),
+            )
+    except Exception:
+        pass
+
     usage = result.get("usage")
     tokens_estimated = usage is None
     if tokens_estimated:
@@ -295,9 +334,12 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
 
     def _save_final():
         completed = firestore.SERVER_TIMESTAMP
-        assistant_ref.update(
-            {"content": final_text, "status": "complete", "updatedAt": completed}
-        )
+        final_fields = {"content": final_text, "status": "complete", "updatedAt": completed}
+        if result.get("provider"):
+            final_fields["provider"] = result["provider"]
+        if saved_memories:
+            final_fields["memoriesSaved"] = saved_memories
+        assistant_ref.update(final_fields)
         chat_ref.update(
             {
                 "searchText": f"{search_text}\n{final_text}"[-5000:],

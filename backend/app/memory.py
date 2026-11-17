@@ -18,6 +18,32 @@ MEMORY_INJECT_MAX_CHARS = 2400
 _MARKER = re.compile(r"\[\[memory:\s*([^\]]{1,240})\]\]", re.IGNORECASE)
 
 
+# Categories that must NEVER be stored as memories (parity with
+# lib/server/memory.ts): health, finances, government/financial
+# identifiers, and credentials or secrets.
+_SENSITIVE_PATTERNS = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\b(password|passcode|api[\s_-]?key|secret[\s_-]?key|access[\s_-]?token|credential)s?\b",
+        r"\bmy\s+(password|pin|passcode)\b",
+        r"\bpin\s*(is|:|=)\s*\d",
+        r"\b\d{3}-\d{2}-\d{4}\b",
+        r"\b(?:\d[ -]?){13,19}\b",
+        r"\b(passport|national\s+id|driver'?s\s+licen[cs]e|tax\s+id|social\s+security|ssn)\b",
+        r"\b(bank\s+account|account\s+number|routing\s+number|iban|sort\s+code|credit\s+card|debit\s+card)\b",
+        r"\b(salary|wages|income|paycheck)\b[^.]{0,40}(\$|€|£|\d)",
+        r"\b(earns|makes|owes|debt\s+of|loan\s+of|borrowed)\b[^.]{0,30}(\$|€|£|\d)",
+        r"\bbank\s+balance\b",
+        r"\b(diagnosed|diagnosis|diabetes|cancer|hiv|aids|epilepsy|hypertension|blood\s+pressure|chemotherapy|prescription|medication|dosage|pregnan\w+|mental\s+health|depression|anxiety\s+disorder|adhd|autism)\b",
+        r"\b\d+\s?(mg|mcg)\b[^.]{0,30}\b(daily|twice|once|tablet|dose|pill)\b",
+    )
+]
+
+
+def is_sensitive_memory(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _SENSITIVE_PATTERNS)
+
+
 def sanitize_memory_text(value: object) -> str:
     if not isinstance(value, str):
         return ""
@@ -60,7 +86,7 @@ def memory_system_block(memories: list[str]) -> str:
         [
             "Long-term memory — things you remember about this user from earlier conversations. Use them naturally when relevant; never recite the list unprompted:",
             facts or "(nothing saved yet)",
-            "When you learn a NEW durable fact about the user that would help future conversations (their name, work, projects, preferences, important people, goals, constraints), save it by ending your reply with a line [[memory: the fact in one short sentence]]. At most two per reply, only genuinely durable facts — never temporary details, never anything already listed above, and never mention this mechanism or the markers to the user.",
+            "When you learn a NEW durable fact about the user that would help future conversations (their name, work, projects, preferences, important people, goals, constraints), save it by ending your reply with a line [[memory: the fact in one short sentence]]. At most two per reply, only genuinely durable facts — never temporary details, never anything already listed above, and never mention this mechanism or the markers to the user. NEVER save health information, financial details, ID or account numbers, passwords, PINs or any other credentials or secrets, even if the user mentions them.",
         ]
     )
 
@@ -102,22 +128,24 @@ def load_memories(db, uid: str) -> list[str]:
     return texts
 
 
-def save_memories(db, uid: str, facts: list[str], chat_id: str | None = None) -> int:
+def save_memories(db, uid: str, facts: list[str], chat_id: str | None = None) -> list[dict]:
+    """Save facts (duplicates + sensitive categories filtered);
+    returns the saved entries [{id, text}] for the UI chip."""
     from firebase_admin import firestore
 
     clean = [sanitize_memory_text(fact) for fact in facts]
-    clean = [text for text in clean if text]
+    clean = [text for text in clean if text and not is_sensitive_memory(text)]
     if not clean:
-        return 0
+        return []
     ref = db.collection("users").document(uid).collection("memories")
     existing = list(ref.limit(MEMORY_LIMIT).stream())
     seen = {
         normalize_memory_key(str((snap.to_dict() or {}).get("text") or ""))
         for snap in existing
     }
-    saved = 0
+    saved: list[dict] = []
     for text in clean:
-        if len(existing) + saved >= MEMORY_LIMIT:
+        if len(existing) + len(saved) >= MEMORY_LIMIT:
             break
         key = normalize_memory_key(text)
         if not key or key in seen:
@@ -126,6 +154,7 @@ def save_memories(db, uid: str, facts: list[str], chat_id: str | None = None) ->
         doc: dict = {"text": text, "source": "auto", "createdAt": firestore.SERVER_TIMESTAMP}
         if chat_id:
             doc["chatId"] = chat_id
-        ref.add(doc)
-        saved += 1
+        result = ref.add(doc)
+        doc_ref = result[1] if isinstance(result, tuple) else result
+        saved.append({"id": getattr(doc_ref, "id", ""), "text": text})
     return saved

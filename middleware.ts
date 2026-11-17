@@ -1,10 +1,11 @@
-import { jwtVerify } from "jose";
 import { NextRequest, NextResponse } from "next/server";
+import { verifySessionTokenWebCrypto } from "@/lib/server/session-webcrypto";
 import { sanitizeNextPath } from "@/lib/auth-redirect";
 import { serverEnv } from "@/lib/server/env";
 
 // Phase 2 session redirects. The middleware verifies ONLY the session
-// cookie's signature and expiry (HS256 via jose, Edge-compatible). It
+// cookie's signature and expiry (HS256 via Web Crypto — no jose in
+// the Edge bundle; see lib/server/session-webcrypto.ts). It
 // deliberately makes no Redis or database calls: revocation is
 // enforced by the API routes through requireSession; the worst case
 // here is a revoked-but-unexpired cookie briefly passing a redirect
@@ -40,22 +41,12 @@ async function hasValidSessionCookie(request: NextRequest): Promise<boolean> {
   }
   if (!token) return false;
 
-  try {
-    const { payload } = await jwtVerify(token, new TextEncoder().encode(secret), {
-      algorithms: ["HS256"],
-    });
-    // jwtVerify has already enforced `exp`; also enforce the absolute
-    // expiry and the claims requireSession depends on.
-    if (typeof payload.sub !== "string" || typeof payload.sid !== "string") {
-      return false;
-    }
-    if (typeof payload.absExp === "number" && payload.absExp <= Date.now()) {
-      return false;
-    }
-    return true;
-  } catch {
-    return false; // tampered, expired, or malformed — treated as signed out
-  }
+  // Verified with Web Crypto (lib/server/session-webcrypto.ts)
+  // instead of jose, so the Edge bundle stays free of the jose
+  // dependency; the check enforces the HS256 signature, `exp`,
+  // the sub/sid claims and the absolute-expiry cap — the same
+  // contract the Node-side session code verifies.
+  return verifySessionTokenWebCrypto(token, secret);
 }
 
 export async function middleware(request: NextRequest) {

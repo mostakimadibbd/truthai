@@ -42,3 +42,22 @@ export function modePreferredProvider(mode: ModelModeId): string | undefined {
   if (mode === "lightweight") return "cloudflare";
   return undefined;
 }
+
+/** Display names for the providers that can answer a reply.
+ * Used for the per-reply attribution ("via …") — the provider
+ * itself is a fact users are entitled to see, even though the
+ * model picker speaks in modes, not providers. */
+export const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+  openrouter: "OpenRouter",
+  gemini: "Google Gemini",
+  groq: "Groq",
+  requesty: "Requesty",
+  sambanova: "SambaNova",
+  nvidia: "NVIDIA",
+  cloudflare: "Cloudflare",
+};
+
+export function providerDisplayName(provider: string | null | undefined): string | null {
+  if (!provider) return null;
+  return PROVIDER_DISPLAY_NAMES[provider] ?? null;
+}

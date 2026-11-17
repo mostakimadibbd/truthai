@@ -118,6 +118,32 @@ def decode_unverified_claims(id_token: str | None) -> dict:
         return {}
 
 
+# Identity claims gate for email-based authority (admin /
+# owner grants, and — through verify_id_token — chat sessions):
+# the token must carry a VERIFIED email and a sign-in provider
+# this product actually offers. An unverified-email token, or
+# one minted through an unexpected provider (anonymous, phone,
+# a custom provider), is never enough to establish who someone
+# is for a grant, no matter how valid its signature is.
+EXPECTED_SIGN_IN_PROVIDERS = frozenset({"password", "google.com"})
+
+
+def _claims_gate(claims: dict) -> str | None:
+    """None when the verified claims may back an email-based
+    grant, else the failure class name."""
+    if claims.get("email_verified") is not True:
+        return "EmailNotVerified"
+    firebase_claims = claims.get("firebase")
+    provider = (
+        firebase_claims.get("sign_in_provider")
+        if isinstance(firebase_claims, dict)
+        else None
+    )
+    if provider not in EXPECTED_SIGN_IN_PROVIDERS:
+        return "UnexpectedSignInProvider"
+    return None
+
+
 _CERTS_URL = (
     "https://www.googleapis.com/robot/v1/metadata/x509/"
     "securetoken@system.gserviceaccount.com"
@@ -172,6 +198,9 @@ def verify_id_token_public(
             audience=project,
             issuer=f"https://securetoken.google.com/{project}",
         )
+        gate = _claims_gate(claims)
+        if gate is not None:
+            return None, None, gate
         uid = claims.get("sub")
         email = claims.get("email")
         return (
@@ -196,6 +225,9 @@ def verify_id_token_detailed(id_token: str | None) -> tuple[str | None, str | No
 
         firebase_app()
         decoded = firebase_auth.verify_id_token(id_token)
+        gate = _claims_gate(decoded)
+        if gate is not None:
+            return None, gate
         uid = decoded.get("uid")
         return (uid if isinstance(uid, str) else None), None
     except Exception as error:  # noqa: BLE001 - the class name is the diagnostic

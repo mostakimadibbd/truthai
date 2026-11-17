@@ -188,7 +188,30 @@ type TrashEntry = {
 
 type RangeKey = "today" | "24h" | "48h" | "7d" | "lifetime";
 
-type Tab = "overview" | "users" | "owner" | "logs" | "activity" | "system";
+type Tab = "overview" | "users" | "owner" | "logs" | "safety" | "activity" | "system";
+
+type FlagEntry = {
+  id: string;
+  uid: string;
+  email: string | null;
+  chatId: string;
+  prompt: string;
+  category: string;
+  signal: string;
+  model: string | null;
+  status: string;
+  ts: number | null;
+  reviewedBy: string | null;
+};
+
+type ChatMessageRow = {
+  id: string;
+  role: string;
+  content: string;
+  status: string | null;
+  provider: string | null;
+  createdAt: number | null;
+};
 type ActionKind = "promote" | "demote" | "disable" | "enable" | "delete" | "sign-out-all";
 
 /** Actions the backend only performs for the owner AND with the
@@ -392,6 +415,7 @@ const ICONS = {
   activity: "M22 12h-4l-3 9L9 3l-3 9H2",
   system: "M4 17l6-6-6-6M12 19h8",
   owner: "M12 2l7 3v5c0 5-3.5 9.3-7 11-3.5-1.7-7-6-7-11V5l7-3zM9 12l2 2 4-4",
+  flag: "M4 21V4c4-2 8 2 12 0v9c-4 2-8-2-12 0",
   refresh: "M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6",
   out: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
 };
@@ -433,6 +457,12 @@ export default function ConsolePage() {
   } | null>(null);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [flags, setFlags] = useState<FlagEntry[]>([]);
+  const [flagsPending, setFlagsPending] = useState(0);
+  const [reviewingId, setReviewingId] = useState("");
+  const [openChatId, setOpenChatId] = useState<string | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessageRow[]>([]);
+  const [chatLoading, setChatLoading] = useState(false);
   const [storage, setStorage] = useState<StorageInfo | null>(null);
   const [trash, setTrash] = useState<{ entries: TrashEntry[]; totals: { accounts: number; chats: number; lifetimeTokens: number; lifetimeRequests: number } } | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "forbidden" | "error">("loading");
@@ -611,6 +641,71 @@ export default function ConsolePage() {
     }
   }, [user]);
 
+  const loadFlags = useCallback(async () => {
+    if (!user) return;
+    try {
+      const res = await panelApi(user, "/api/flags");
+      if (res.ok) {
+        const data = (await res.json()) as { flags: FlagEntry[]; pendingCount: number };
+        setFlags(data.flags);
+        setFlagsPending(data.pendingCount);
+      }
+    } catch {
+      /* best-effort */
+    }
+  }, [user]);
+
+  const reviewFlag = useCallback(
+    async (flagId: string, status: "dismissed" | "actioned") => {
+      if (!user) return;
+      setReviewingId(flagId);
+      try {
+        const res = await panelApi(user, "/api/flags", {
+          method: "POST",
+          body: { flagId, status },
+        });
+        if (res.ok) {
+          setFlags((current) =>
+            current.map((flag) => (flag.id === flagId ? { ...flag, status } : flag)),
+          );
+          setFlagsPending((count) => Math.max(0, count - 1));
+        }
+      } catch {
+        /* best-effort */
+      } finally {
+        setReviewingId("");
+      }
+    },
+    [user],
+  );
+
+  const loadChatMessages = useCallback(
+    async (uid: string, chatId: string) => {
+      if (!user) return;
+      if (openChatId === chatId) {
+        setOpenChatId(null);
+        return;
+      }
+      setOpenChatId(chatId);
+      setChatLoading(true);
+      setChatMessages([]);
+      try {
+        const res = await panelApi(
+          user,
+          `/api/user-chats?uid=${encodeURIComponent(uid)}&chatId=${encodeURIComponent(chatId)}`,
+        );
+        if (res.ok) {
+          setChatMessages(((await res.json()) as { messages: ChatMessageRow[] }).messages);
+        }
+      } catch {
+        /* best-effort */
+      } finally {
+        setChatLoading(false);
+      }
+    },
+    [user, openChatId],
+  );
+
   const loadStorageTrash = useCallback(async () => {
     if (!user) return;
     try {
@@ -667,13 +762,16 @@ export default function ConsolePage() {
     if (state !== "ready") return;
     if (tab === "system" || tab === "users") void loadStorageTrash();
     if (tab === "logs") void loadLogs();
-  }, [tab, state, loadStorageTrash, loadLogs]);
+    if (tab === "safety") void loadFlags();
+  }, [tab, state, loadStorageTrash, loadLogs, loadFlags]);
 
   const openDetail = useCallback(
     async (uid: string) => {
       if (!user) return;
       setDetailUid(uid);
       setDetail(null);
+      setOpenChatId(null);
+      setChatMessages([]);
       setResetLink(null);
       setDetailLoading(true);
       try {
@@ -916,6 +1014,7 @@ export default function ConsolePage() {
     { id: "overview", label: "Overview", icon: ICONS.overview },
     { id: "users", label: "Users & access", icon: ICONS.users },
     { id: "logs", label: "Logs", icon: ICONS.logs },
+    { id: "safety", label: "Safety flags", icon: ICONS.flag },
     { id: "activity", label: "Activity", icon: ICONS.activity },
     { id: "system", label: "System", icon: ICONS.system },
   ];
@@ -1428,6 +1527,65 @@ export default function ConsolePage() {
           </>
         )}
 
+        {tab === "safety" && (
+          <section className="card">
+            <div className="card-head">
+              <h2>Safety flags</h2>
+              <span className="live-pill">{flagsPending} awaiting review</span>
+            </div>
+            <p className="muted small">
+              Accounts are flagged silently when a message matches a harmful-request
+              pattern or the model refuses on safety grounds. The user is never told
+              and keeps using Xyro normally — review the prompt, open the account or
+              the chat, then dismiss the flag or mark it actioned and use the user
+              controls (disable / delete) if the behaviour warrants it.
+            </p>
+            {flags.length === 0 && <p className="muted small">No flags yet.</p>}
+            <div className="flag-list">
+              {flags.map((flag) => (
+                <div key={flag.id} className="flag-row">
+                  <div className="flag-main">
+                    <span className={`flag-chip ${flag.category}`}>{flag.category}</span>
+                    <span className="flag-chip signal">{flag.signal === "model_refusal" ? "model refused" : "prompt pattern"}</span>
+                    <span className={`flag-chip status-${flag.status}`}>{flag.status}</span>
+                    <span className="muted small">{flag.ts ? time(flag.ts) : ""}</span>
+                  </div>
+                  <p className="flag-prompt">“{flag.prompt}”</p>
+                  <div className="flag-actions">
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => flag.uid && void openDetail(flag.uid)}
+                    >
+                      {flag.email ?? flag.uid}
+                    </button>
+                    {flag.status === "pending" && (
+                      <>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          disabled={reviewingId === flag.id}
+                          onClick={() => void reviewFlag(flag.id, "dismissed")}
+                        >
+                          Dismiss
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          disabled={reviewingId === flag.id}
+                          onClick={() => void reviewFlag(flag.id, "actioned")}
+                        >
+                          Mark actioned
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
         {tab === "logs" && (
           <section className="card">
             <div className="card-head">
@@ -1641,11 +1799,35 @@ export default function ConsolePage() {
                 <WeekBars week={detail.week} field="totalTokens" />
 
                 <h3>Chats · {detail.chats.count}</h3>
+                <p className="muted small">Tap a chat to read its messages. Chat views are recorded in the audit log.</p>
                 {detail.chats.recent.length === 0 && <p className="muted small">No chats yet.</p>}
                 {detail.chats.recent.map((chat) => (
-                  <div key={chat.id} className="mini-row">
-                    <span>{chat.pinned ? "📌 " : ""}{chat.title || "Untitled chat"}</span>
-                    <span className="muted small">{date(chat.updatedAt)}</span>
+                  <div key={chat.id}>
+                    <button
+                      type="button"
+                      className="mini-row chat-open-row"
+                      onClick={() => void loadChatMessages(detail.uid, chat.id)}
+                    >
+                      <span>{chat.pinned ? "📌 " : ""}{chat.title || "Untitled chat"}</span>
+                      <span className="muted small">{openChatId === chat.id ? "hide" : date(chat.updatedAt)}</span>
+                    </button>
+                    {openChatId === chat.id && (
+                      <div className="chat-thread">
+                        {chatLoading && <p className="muted small">Loading messages…</p>}
+                        {!chatLoading && chatMessages.length === 0 && (
+                          <p className="muted small">No messages in this chat.</p>
+                        )}
+                        {chatMessages.map((message) => (
+                          <div key={message.id} className={`chat-msg ${message.role}`}>
+                            <span className="chat-msg-role">
+                              {message.role}
+                              {message.provider ? ` · via ${message.provider}` : ""}
+                            </span>
+                            <p>{message.content || <em className="muted">(no text)</em>}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))}
 

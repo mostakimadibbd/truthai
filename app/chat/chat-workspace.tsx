@@ -47,6 +47,7 @@ import {
   DEFAULT_MODEL_MODE_ID,
   MODEL_MODES,
   isModelModeId,
+  providerDisplayName,
 } from "@/lib/model-modes";
 import { usePreferences } from "@/lib/preferences-client";
 import { useTypewriter } from "@/lib/typewriter";
@@ -72,6 +73,12 @@ type Message = {
   status?: "generating" | "complete" | "failed" | "stopped";
   /** Web sources the reply drew on (set server-side on web turns). */
   sources?: { title: string; url: string }[];
+  /** Id of the provider that answered (server-recorded), shown
+   * as a small "via …" attribution under the reply. */
+  provider?: string;
+  /** Facts this reply saved to long-term memory (server-recorded),
+   * shown as "Saved to memory" chips with Undo. */
+  memoriesSaved?: { id: string; text: string }[];
 };
 
 type Chat = {
@@ -409,6 +416,7 @@ export default function ChatWorkspace() {
   const [signOutVariant, setSignOutVariant] = useState<SignOutVariant | null>(null);
   const [signingOut, setSigningOut] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState("");
+  const [undoneMemoryIds, setUndoneMemoryIds] = useState<ReadonlySet<string>>(new Set());
   const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
   const [uploadingFiles, setUploadingFiles] = useState(false);
   // Model picker (Phase 5): the live free-model list from /api/models
@@ -667,6 +675,20 @@ export default function ChatWorkspace() {
                 data.status === "stopped"
                   ? data.status
                   : "complete",
+              provider:
+                typeof data.provider === "string" ? data.provider : undefined,
+              memoriesSaved: Array.isArray(data.memoriesSaved)
+                ? data.memoriesSaved.flatMap((item: unknown) =>
+                    typeof item === "object" &&
+                    item !== null &&
+                    "id" in item &&
+                    typeof item.id === "string" &&
+                    "text" in item &&
+                    typeof item.text === "string"
+                      ? [{ id: item.id, text: item.text }]
+                      : [],
+                  )
+                : undefined,
               sources: Array.isArray(data.sources)
                 ? data.sources.flatMap((item: unknown) =>
                     typeof item === "object" &&
@@ -1898,6 +1920,32 @@ export default function ChatWorkspace() {
     setSignOutVariant(null);
   }
 
+  async function undoMemory(memoryId: string) {
+    if (!user) return;
+    // Optimistically hide the chip; restore it if the delete fails.
+    setUndoneMemoryIds((current) => new Set(current).add(memoryId));
+    try {
+      const idToken = await user.getIdToken();
+      const response = await fetch("/api/memory", {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          "Content-Type": "application/json",
+          "X-Requested-With": "xyro",
+        },
+        body: JSON.stringify({ id: memoryId }),
+      });
+      if (!response.ok) throw new Error("delete failed");
+    } catch {
+      setUndoneMemoryIds((current) => {
+        const next = new Set(current);
+        next.delete(memoryId);
+        return next;
+      });
+      setNotice("That memory couldn’t be removed. You can delete it in Settings → Personalization.");
+    }
+  }
+
   async function copyMessage(message: Message) {
     try {
       await navigator.clipboard.writeText(message.content);
@@ -2495,8 +2543,29 @@ export default function ChatWorkspace() {
                             Regenerate
                           </button>
                         )}
+                        {providerDisplayName(message.provider) && (
+                          <span className="chat-provider-note">
+                            via {providerDisplayName(message.provider)}
+                          </span>
+                        )}
                       </div>
                     )}
+                    {message.role === "assistant" &&
+                      message.memoriesSaved
+                        ?.filter((entry) => !undoneMemoryIds.has(entry.id))
+                        .map((entry) => (
+                          <div key={entry.id} className="chat-memory-chip">
+                            <span>
+                              Saved to memory: <em>{entry.text}</em>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => void undoMemory(entry.id)}
+                            >
+                              Undo
+                            </button>
+                          </div>
+                        ))}
                   </div>
                 </article>
               ))}
@@ -2753,7 +2822,10 @@ export default function ChatWorkspace() {
             </div>
           </form>
           <p className="chat-disclaimer">
-            AI can make mistakes. Prompts are processed by OpenRouter and its model providers.
+            AI can make mistakes. Replies may be generated by OpenRouter, Groq,
+            Google Gemini, Requesty, SambaNova, NVIDIA or Cloudflare; images may
+            also come via Pollinations or AI Horde. Each reply names its provider.
+            You can limit this to OpenRouter only in Settings → Data controls.
           </p>
         </div>
       </main>

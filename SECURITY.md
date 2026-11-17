@@ -583,7 +583,28 @@ apply to Google sign-ins unchanged.
   the backend on every request. The owner's email remains a
   permanent owner-level recovery path so the owner can never
   be locked out; claiming the panel writes the matching
-  registry entry. Failed attempts are throttled per client IP.
+  registry entry. Failed attempts are throttled per client IP:
+  the counter lives in the shared Upstash Redis store whenever
+  it is configured (the same store as session revocations), so
+  the 30-per-minute limit holds across all backend instances;
+  on a deployment without Upstash configured it falls back to
+  a per-instance in-memory counter. Before any grant, the
+  admin's ID token must also carry a verified email
+  (`email_verified == true`) and an expected sign-in provider
+  (`password` or `google.com`) — enforced in both token
+  verification paths (Admin SDK and Google public keys), so an
+  unverified or unexpectedly-minted token can never back an
+  owner or admin grant.
+- Safety flags: chat turns are screened by a deterministic
+  harmful-request classifier (intent + object patterns) and by
+  safety-refusal detection on the model's reply; either signal
+  writes a server-only `safetyFlags` record for admin review.
+  Flagging is invisible to the user and changes nothing about
+  their experience. A safety refusal is never retried against
+  another provider (the access-denial refusal retry explicitly
+  excludes it). Admins can read a user's chats from the panel
+  to review flagged content; every chat view is written to the
+  adminActions audit trail.
 - Only the OWNER can grant or revoke admin access — enforced
   by the backend (403 OWNER_ONLY), not just hidden in the UI.
   Revocation deletes the registry entry and takes effect on

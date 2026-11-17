@@ -140,7 +140,7 @@ def cross_provider_targets(vision_only: bool = False) -> list[dict]:
     return targets
 
 
-def build_targets(openrouter_attempts: list[str], vision_only: bool = False, providers_first: bool = False, preferred_provider: str | None = None) -> list[dict]:
+def build_targets(openrouter_attempts: list[str], vision_only: bool = False, providers_first: bool = False, preferred_provider: str | None = None, open_router_only: bool = False) -> list[dict]:
     targets = [
         {
             "provider": "openrouter",
@@ -151,7 +151,9 @@ def build_targets(openrouter_attempts: list[str], vision_only: bool = False, pro
         }
         for model in openrouter_attempts
     ]
-    cross = cross_provider_targets(vision_only)
+    # "Only use OpenRouter" (the user's privacy switch): no
+    # cross-provider targets are built at all.
+    cross = [] if open_router_only else cross_provider_targets(vision_only)
     ordered = cross + targets if providers_first else targets + cross
     if preferred_provider:
         ordered = [t for t in ordered if t["provider"] == preferred_provider] + [
@@ -206,6 +208,7 @@ async def stream_completion(
     connect_timeout: float = 25.0,
     providers_first: bool = False,
     preferred_provider: str | None = None,
+    open_router_only: bool = False,
 ) -> dict:
     """Stream a completion, calling on_text with the full text so
     far whenever it grows. Returns {model, text, usage} where usage
@@ -222,7 +225,7 @@ async def stream_completion(
         for message in messages
         if isinstance(message, dict)
     )
-    targets = build_targets(attempts, vision_only=has_images, providers_first=providers_first, preferred_provider=preferred_provider)
+    targets = build_targets(attempts, vision_only=has_images, providers_first=providers_first, preferred_provider=preferred_provider, open_router_only=open_router_only)
     last_status = 0
     last_body = ""
     last_retry_after: str | None = None
@@ -299,7 +302,7 @@ async def stream_completion(
                         }
             text = "".join(text_parts)
             if text.strip():
-                return {"model": target["label"], "text": text, "usage": usage}
+                return {"model": target["label"], "text": text, "usage": usage, "provider": target["provider"]}
             last_status = 502
             last_body = "Model returned an empty response."
         except httpx.HTTPError as error:

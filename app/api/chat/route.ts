@@ -52,8 +52,14 @@ import {
   liveVisibleText,
   memorySystemBlock,
   saveMemories,
+  shouldCaptureMemories,
 } from "@/lib/server/memory";
 import { recordUsageEvent } from "@/lib/server/analytics";
+import {
+  classifyHarmfulRequest,
+  looksLikeSafetyRefusal,
+  recordSafetyFlag,
+} from "@/lib/server/safety";
 import {
   buildWebContext,
   extractUrls,
@@ -391,6 +397,17 @@ export async function POST(request: NextRequest) {
   // apply identically; the service re-verifies the session and
   // re-checks the model itself. Any delegation failure falls back
   // to local execution below.
+  // The user's "Only use OpenRouter" privacy switch is needed
+  // before delegation (the backend must honour it too), so
+  // preferences are read once here and reused below.
+  let turnPrefs: Awaited<ReturnType<typeof readPreferences>> | null = null;
+  try {
+    turnPrefs = await readPreferences(auth.uid);
+  } catch {
+    turnPrefs = null;
+  }
+  const openRouterOnly = turnPrefs?.openRouterOnly ?? false;
+
   if (
     backendDelegationEnabled() &&
     !regenerate &&
@@ -408,6 +425,7 @@ export async function POST(request: NextRequest) {
       assistantMessageId,
       content,
       model: requestedMode ?? requestedModel,
+      openRouterOnly,
     });
     if (delegated) return delegated;
   }
@@ -638,7 +656,7 @@ export async function POST(request: NextRequest) {
     // step below extracts. Failures never block chat.
     let memoryEnabled = false;
     try {
-      const prefs = await readPreferences(auth.uid);
+      const prefs = turnPrefs ?? (await readPreferences(auth.uid));
       memoryEnabled = prefs.memoryEnabled;
       if (memoryEnabled) {
         const memories = await listMemories(auth.uid);
@@ -847,7 +865,8 @@ export async function POST(request: NextRequest) {
     const streamMeta: {
       usage: { promptTokens: number; completionTokens: number } | null;
       model: string | null;
-    } = { usage: null, model: null };
+      provider: string | null;
+    } = { usage: null, model: null, provider: null };
     // Refusal gate state: reply text is held from publication until
     // its opening has been judged (see handleLine). While held, the
     // stream node shows an empty generating state.
@@ -908,7 +927,9 @@ export async function POST(request: NextRequest) {
         includeUsage: true,
         providersFirst,
         preferredProvider,
+        openRouterOnly,
       });
+      streamMeta.provider = result.provider;
       return result.response;
     };
     let upstream: Response | null = null;
@@ -1043,6 +1064,7 @@ export async function POST(request: NextRequest) {
         if (
           !refusalRetried &&
           looksLikeRefusal(responseText) &&
+          !looksLikeSafetyRefusal(responseText) &&
           crossProviderTargets(serverEnv.providerEnv()).length > 0
         ) {
           throw new RefusalRetrySignal();
@@ -1111,6 +1133,7 @@ export async function POST(request: NextRequest) {
       streamDone = false;
       streamMeta.usage = null;
       streamMeta.model = null;
+      streamMeta.provider = null;
       holdPublishing = true;
       let retryUpstream: Response | null = null;
       try {
@@ -1136,16 +1159,63 @@ export async function POST(request: NextRequest) {
       throw new ChatRouteError(502, "EMPTY_MODEL_RESPONSE", "The model ended before returning a response. Please try again.");
     }
 
+    // Safety flagging (silent — the user is never told and
+    // nothing about their experience changes): a high-confidence
+    // harmful request, or a safety refusal from the model, files
+    // a flag in safetyFlags for admin review.
+    {
+      const harmful = classifyHarmfulRequest(content);
+      if (harmful) {
+        void recordSafetyFlag({
+          uid: auth.uid,
+          chatId,
+          prompt: content,
+          category: harmful.category,
+          signal: "prompt_pattern",
+          model: streamMeta.model ?? effectiveModel,
+        }).catch(() => undefined);
+      } else if (looksLikeSafetyRefusal(responseText)) {
+        void recordSafetyFlag({
+          uid: auth.uid,
+          chatId,
+          prompt: content,
+          category: "other",
+          signal: "model_refusal",
+          model: streamMeta.model ?? effectiveModel,
+        }).catch(() => undefined);
+      }
+    }
+
     // Memory capture: strip the hidden [[memory: …]] markers
     // from the reply before it is published or stored, and save
-    // the facts for future conversations.
+    // the facts for future conversations. Turns carrying web
+    // results or file text never capture (third-party content
+    // is an injection vector, not the user's own facts), and
+    // sensitive categories are filtered inside saveMemories.
+    // The saved entries ride on the message so the UI can show
+    // a "Saved to memory" chip with Undo.
+    let savedMemories: { id: string; text: string }[] = [];
     if (memoryEnabled) {
       const extracted = extractMemories(responseText);
       responseText = extracted.cleanText;
-      if (extracted.memories.length) {
-        void saveMemories(auth.uid, extracted.memories, "auto", chatId).catch(
-          (error) => console.error("Couldn't save long-term memories.", error),
-        );
+      if (
+        extracted.memories.length &&
+        shouldCaptureMemories({
+          enabled: memoryEnabled,
+          webContext: webContextInjected,
+          attachmentCount: attachmentIds.length,
+        })
+      ) {
+        try {
+          savedMemories = await saveMemories(
+            auth.uid,
+            extracted.memories,
+            "auto",
+            chatId,
+          );
+        } catch (error) {
+          console.error("Couldn't save long-term memories.", error);
+        }
       }
     }
 
@@ -1158,6 +1228,8 @@ export async function POST(request: NextRequest) {
         status: "complete",
         updatedAt: completedAt,
         ...(webSources.length ? { sources: webSources } : {}),
+        ...(streamMeta.provider ? { provider: streamMeta.provider } : {}),
+        ...(savedMemories.length ? { memoriesSaved: savedMemories } : {}),
       }),
       chatRef.update({
         searchText: finalSearchText,

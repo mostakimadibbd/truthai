@@ -17,6 +17,21 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000). Create a production build with `npm run build` and serve it with `npm run start`.
 
+## Test
+
+```sh
+npm test            # web app unit tests (Node test runner, tests/)
+npm run build       # production build — part of the gate
+cd backend && python -m pytest   # Python backend suite (the documented command)
+```
+
+The backend suite also runs under its legacy runner
+(`python tests/test_units.py`), but `python -m pytest` from
+`backend/` is the canonical command. GitHub Actions runs all
+three — `npm test`, `python -m pytest` and `npm run build`,
+plus the admin panel build — on every push and pull request
+(see `.github/workflows/ci.yml`).
+
 Copy `.env.example` to `.env.local` and fill in the Firebase Web App values,
 including the Realtime Database URL:
 

@@ -451,3 +451,18 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
 .admin-row-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .email-fill { background: none; border: none; padding: 0; font: inherit; font-weight: 700; color: var(--text); text-decoration: underline dotted; cursor: pointer; }
 .match-ok { color: var(--success-text, #7ee2a8); font-size: 0.85rem; }
+.flag-list { display: flex; flex-direction: column; }
+.flag-row { padding: 12px 0; border-top: 1px solid var(--line-soft); }
+.flag-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.flag-chip { font-size: 11px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; background: #3d2b12; color: #f5b95f; }
+.flag-chip.signal { background: var(--panel-2); color: var(--muted); text-transform: none; letter-spacing: 0; font-weight: 600; }
+.flag-chip.status-pending { background: #402020; color: #ff9c9c; }
+.flag-chip.status-dismissed { background: var(--panel-2); color: var(--muted); }
+.flag-chip.status-actioned { background: #14331f; color: #7ee2a8; }
+.flag-prompt { margin: 8px 0 6px; font-size: 0.92rem; word-break: break-word; }
+.flag-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.chat-open-row { width: 100%; background: none; border: none; font: inherit; color: inherit; cursor: pointer; text-align: left; }
+.chat-thread { margin: 6px 0 12px; padding: 10px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--panel-2); max-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.chat-msg-role { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.chat-msg p { margin: 3px 0 0; font-size: 0.9rem; white-space: pre-wrap; word-break: break-word; }
+.chat-msg.assistant p { color: var(--text); }

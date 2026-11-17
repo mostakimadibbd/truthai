@@ -243,7 +243,14 @@ export default function SettingsShell({ tab }: { tab: SettingsTabId }) {
                   onSave={savePreferences}
                 />
               )}
-              {tab === "data" && <DataTab user={user} onToast={showToast} />}
+              {tab === "data" && preferences && (
+                <DataTab
+                  user={user}
+                  onToast={showToast}
+                  preferences={preferences}
+                  onSave={savePreferences}
+                />
+              )}
               {tab === "security" && (
                 <SecurityTab
                   user={user}
@@ -907,9 +914,13 @@ type UploadedFile = {
 function DataTab({
   user,
   onToast,
+  preferences,
+  onSave,
 }: {
   user: User;
   onToast: (message: string) => void;
+  preferences: Preferences;
+  onSave: (patch: Partial<Preferences>) => void;
 }) {
   const [files, setFiles] = useState<UploadedFile[] | null>(null);
   const [filesError, setFilesError] = useState("");
@@ -1025,6 +1036,29 @@ function DataTab({
     <section className="settings-content" aria-labelledby="settings-data-heading">
       <h2 id="settings-data-heading">Data controls</h2>
       <p>Export, review and remove what Xyro AI stores for you.</p>
+
+      <div className="settings-field">
+        <label className="settings-switch-row">
+          <span>
+            <span className="settings-label">Only use OpenRouter</span>
+            <span className="settings-hint">
+              Privacy first: your prompts, files and memory are sent only to
+              OpenRouter. The other free providers in the fallback chain
+              (Groq, Google Gemini, Requesty, SambaNova, NVIDIA and
+              Cloudflare) and the community image services (Pollinations
+              and AI Horde) are never used for your account, so replies may
+              be slower or unavailable when OpenRouter’s free quota is busy,
+              and image creation is limited to OpenRouter image models.
+            </span>
+          </span>
+          <input
+            type="checkbox"
+            role="switch"
+            checked={preferences.openRouterOnly}
+            onChange={(event) => onSave({ openRouterOnly: event.target.checked })}
+          />
+        </label>
+      </div>
 
       <div className="settings-field">
         <span className="settings-label">Export my data</span>

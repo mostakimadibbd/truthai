@@ -3,6 +3,7 @@ import { guardMutationHeaders } from "@/lib/server/auth-guard";
 import {
   clearMemories,
   deleteMemory,
+  isSensitiveMemory,
   listMemories,
   sanitizeMemoryText,
   saveMemories,
@@ -51,6 +52,13 @@ export async function POST(request: NextRequest) {
   );
   if (!text) {
     return errorResponse(400, "INVALID_MEMORY", "Write the fact you want Xyro AI to remember.");
+  }
+  if (isSensitiveMemory(text)) {
+    return errorResponse(
+      400,
+      "SENSITIVE_MEMORY",
+      "That looks like health, financial, ID or credential information — Xyro AI doesn’t store those in memory, because memories are replayed into future chats.",
+    );
   }
   try {
     await saveMemories(auth.uid, [text], "user");

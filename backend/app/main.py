@@ -272,6 +272,7 @@ async def submit_chat_job(request: Request):
             "responseId": response_id,
             "content": content,
             "model": model,
+            "openRouterOnly": body.get("openRouterOnly") is True,
         },
         firestore_client(),
         rtdb_ref,
@@ -431,6 +432,75 @@ async def admin_user_detail(request: Request, uid: str):
         return {
             "success": True,
             **admin.get_user_detail(firestore_client(), uid),
+        }
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+    except Exception:
+        return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
+
+
+@app.get("/v1/admin/flags")
+async def admin_flags(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    try:
+        status = request.query_params.get("status") or ""
+        return {"success": True, **admin.get_flags(firestore_client(), status)}
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+    except Exception:
+        return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
+
+
+@app.post("/v1/admin/flags/{flag_id}/review")
+async def admin_flag_review(request: Request, flag_id: str):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    actor_uid, _actor_email, actor_role = gate
+    try:
+        body = await request.json()
+    except Exception:
+        return _error(400, "INVALID_JSON", "Send a JSON body.")
+    if not isinstance(body, dict) or not isinstance(body.get("status"), str):
+        return _error(400, "INVALID_BODY", "Send the review decision.")
+    try:
+        result = admin.review_flag(
+            firestore_client(), actor_uid, actor_role, flag_id, body["status"]
+        )
+        return {"success": True, **result}
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+    except Exception:
+        return _error(503, "ADMIN_UNAVAILABLE", "The review couldn’t be saved.")
+
+
+@app.get("/v1/admin/users/{uid}/chats")
+async def admin_user_chats(request: Request, uid: str):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    try:
+        return {"success": True, **admin.get_user_chats(firestore_client(), uid)}
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+    except Exception:
+        return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
+
+
+@app.get("/v1/admin/users/{uid}/chats/{chat_id}")
+async def admin_user_chat_messages(request: Request, uid: str, chat_id: str):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    actor_uid, _actor_email, actor_role = gate
+    try:
+        return {
+            "success": True,
+            **admin.get_user_chat_messages(
+                firestore_client(), actor_uid, actor_role, uid, chat_id
+            ),
         }
     except admin.AdminAuthError as error:
         return _error(error.status, error.code, error.message)

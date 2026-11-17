@@ -3310,3 +3310,10 @@ body:has(.chat-app) #main {
 .bot-check-card h1 { margin: 0; font-size: 1.5rem; }
 .bot-check-card p { margin: 0; line-height: 1.55; }
 .bot-check-done { color: var(--success-text); background: var(--success-bg); border: 1px solid var(--success-line); border-radius: 10px; padding: 12px 14px; }
+.chat-provider-note { margin-left: auto; font-size: 11.5px; color: var(--muted-3); white-space: nowrap; }
+.chat-memory-chip { display: flex; align-items: center; gap: 10px; margin-top: 8px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); font-size: 12.5px; color: var(--muted); max-width: 100%; }
+.chat-memory-chip em { color: var(--text); font-style: normal; }
+.chat-memory-chip button { margin-left: auto; background: none; border: none; color: var(--accent, #6ab0ff); font: inherit; font-weight: 600; cursor: pointer; padding: 2px 4px; }
+.docs-code { margin: 14px 0; padding: 14px 16px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--panel-2); overflow-x: auto; font-size: 0.82rem; line-height: 1.55; }
+.docs-code code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+.article-body code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.86em; }

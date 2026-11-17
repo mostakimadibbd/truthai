@@ -187,6 +187,12 @@ service cloud.firestore {
     match /chatJobs/{jobId} {
       allow read, write: if false;
     }
+    // Safety flags (harmful-request / safety-refusal signals for
+    // admin review). Server-written only; the flagged user gets
+    // NO client access — flagging is invisible to them by design.
+    match /safetyFlags/{flagId} {
+      allow read, write: if false;
+    }
     // Admin audit trail (promote/demote/disable/enable actions,
     // written by the backend's admin API). Server-only; no
     // client access.

@@ -25,6 +25,7 @@
 import { createHash } from "node:crypto";
 import * as jpeg from "jpeg-js";
 import { PNG } from "pngjs";
+import sharp from "sharp";
 import { sniffImageType } from "@/lib/server/image-sniff";
 
 const MAGIC = [0x58, 0x59, 0x52, 0x4f]; // "XYRO"
@@ -88,24 +89,12 @@ function jpegToPixels(buffer: Buffer): Pixels {
 
 async function webpToPixels(buffer: Buffer): Promise<Pixels> {
   try {
-    // Optional runtime dependency — see the file header. Not a
-    // declared package dependency; absence is handled. The variable
-    // specifier keeps the bundler from treating it as required.
-    const sharpSpecifier = "sharp";
-    const sharpModule = (await import(sharpSpecifier)) as {
-      default: (input: Buffer) => {
-        ensureAlpha: () => {
-          raw: () => {
-            toBuffer: (options: { resolveWithObject: true }) => Promise<{
-              data: Buffer;
-              info: { width: number; height: number; channels: number };
-            }>;
-          };
-        };
-      };
-    };
-    const { data, info } = await sharpModule
-      .default(buffer)
+    // sharp is a static import (declared in types/sharp.d.ts and
+    // externalised via serverExternalPackages in next.config.ts,
+    // so it loads from the runtime's node_modules — Next.js ships
+    // it for image optimisation). A failure here still degrades
+    // to the honest error below.
+    const { data, info } = await sharp(buffer)
       .ensureAlpha()
       .raw()
       .toBuffer({ resolveWithObject: true });

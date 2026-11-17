@@ -36,9 +36,13 @@ deny all client access to it), so nobody can self-promote.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
+
+import httpx
 
 from .auth import (
     check_service_token,
@@ -56,11 +60,53 @@ TOTAL_FIELDS = (
     "promptTokens", "completionTokens", "totalTokens", "costUsd",
 )
 
-# Per-IP failed-auth throttle (in-memory; per instance, which is
-# the same durability model as the job registry).
+# Per-IP failed-auth throttle. The counter lives in the shared
+# Upstash Redis store (the same one that holds session
+# revocations) whenever it is configured, so the limit holds
+# across every server instance; the in-memory map below is only
+# a fallback for deployments without Upstash configured, where
+# the limit is necessarily per-instance.
 _failures: dict[str, list[float]] = {}
 _FAILURE_LIMIT = 30
 _FAILURE_WINDOW = 60.0
+
+
+def _throttle_key(ip: str) -> str:
+    digest = hashlib.sha256(ip.encode()).hexdigest()[:32]
+    return f"adminauthfail:{digest}"
+
+
+def _upstash_command(*parts: str) -> object | None:
+    """Run one Redis command through the Upstash REST API.
+    Returns the command result, or None when Upstash is not
+    configured or unreachable (callers fall back to memory)."""
+    if not (settings.upstash_rest_url and settings.upstash_rest_token):
+        return None
+    try:
+        path = "/".join(quote(str(part), safe="") for part in parts)
+        with httpx.Client(timeout=2.0) as client:
+            response = client.post(
+                f"{settings.upstash_rest_url}/{path}",
+                headers={"Authorization": f"Bearer {settings.upstash_rest_token}"},
+            )
+            response.raise_for_status()
+            return response.json().get("result")
+    except Exception:
+        return None
+
+
+def _ms(value) -> int | None:
+    """Best-effort epoch-ms from a stored timestamp value
+    (int ms, or a Firestore datetime-like with .timestamp())."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    timestamp = getattr(value, "timestamp", None)
+    if callable(timestamp):
+        try:
+            return int(timestamp() * 1000)
+        except Exception:
+            return None
+    return None
 
 
 class AdminAuthError(Exception):
@@ -80,6 +126,12 @@ def firebase_auth():
 
 
 def _throttled(ip: str) -> bool:
+    shared = _upstash_command("get", _throttle_key(ip))
+    if shared is not None:
+        try:
+            return int(shared) >= _FAILURE_LIMIT
+        except (TypeError, ValueError):
+            pass
     now = time.time()
     recent = [t for t in _failures.get(ip, []) if now - t < _FAILURE_WINDOW]
     _failures[ip] = recent
@@ -88,6 +140,10 @@ def _throttled(ip: str) -> bool:
 
 def _record_failure(ip: str) -> None:
     _failures.setdefault(ip, []).append(time.time())
+    key = _throttle_key(ip)
+    count = _upstash_command("incr", key)
+    if count == 1:
+        _upstash_command("expire", key, str(int(_FAILURE_WINDOW)))
 
 
 def _is_admin_email(email: str | None) -> bool:
@@ -887,6 +943,156 @@ def get_trash(db) -> dict:
         totals["lifetimeTokens"] += entry["lifetimeTokens"]
         totals["lifetimeRequests"] += entry["lifetimeRequests"]
     return {"entries": entries, "totals": totals}
+
+
+FLAG_REVIEW_STATUSES = ("dismissed", "actioned")
+
+
+def get_flags(db, status_filter: str = "") -> dict:
+    """Safety flags for admin review, newest first. Emails are
+    resolved from the Auth directory; a flag whose account is
+    gone still lists (email null)."""
+    query = db.collection("safetyFlags").order_by(
+        "ts", direction="DESCENDING"
+    )
+    docs = query.limit(200).get()
+    auth = firebase_auth()
+    emails: dict[str, str | None] = {}
+    flags: list[dict] = []
+    pending = 0
+    for doc in docs:
+        data = doc.to_dict() or {}
+        status = data.get("status") if isinstance(data.get("status"), str) else "pending"
+        if status == "pending":
+            pending += 1
+        if status_filter and status != status_filter:
+            continue
+        uid = data.get("uid") if isinstance(data.get("uid"), str) else ""
+        if uid and uid not in emails:
+            try:
+                emails[uid] = auth.get_user(uid).email
+            except Exception:
+                emails[uid] = None
+        flags.append(
+            {
+                "id": doc.id,
+                "uid": uid,
+                "email": emails.get(uid),
+                "chatId": data.get("chatId") if isinstance(data.get("chatId"), str) else "",
+                "prompt": data.get("prompt") if isinstance(data.get("prompt"), str) else "",
+                "category": data.get("category") if isinstance(data.get("category"), str) else "other",
+                "signal": data.get("signal") if isinstance(data.get("signal"), str) else "",
+                "model": data.get("model") if isinstance(data.get("model"), str) else None,
+                "status": status,
+                "ts": data.get("ts") if isinstance(data.get("ts"), (int, float)) else None,
+                "reviewedBy": data.get("reviewedBy") if isinstance(data.get("reviewedBy"), str) else None,
+            }
+        )
+        if len(flags) >= 100:
+            break
+    return {"flags": flags, "pendingCount": pending}
+
+
+def review_flag(db, actor_uid: str, actor_role: str, flag_id: str, new_status: str) -> dict:
+    """Record the reviewing admin's decision on a flag."""
+    if new_status not in FLAG_REVIEW_STATUSES:
+        raise AdminAuthError(400, "INVALID_STATUS", "Choose dismissed or actioned.")
+    ref = db.collection("safetyFlags").document(flag_id)
+    snapshot = ref.get()
+    if not snapshot.exists:
+        raise AdminAuthError(404, "FLAG_NOT_FOUND", "That flag no longer exists.")
+    from firebase_admin import firestore
+
+    ref.set(
+        {
+            "status": new_status,
+            "reviewedBy": actor_uid,
+            "reviewedByRole": actor_role,
+            "reviewedAt": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
+    try:
+        db.collection("adminActions").add(
+            {
+                "action": "flag_review",
+                "actorUid": actor_uid,
+                "actorRole": actor_role,
+                "targetUid": (snapshot.to_dict() or {}).get("uid"),
+                "flagId": flag_id,
+                "decision": new_status,
+                "ts": int(time.time() * 1000),
+            }
+        )
+    except Exception:
+        pass
+    return {"flagId": flag_id, "status": new_status}
+
+
+def get_user_chats(db, uid: str) -> dict:
+    """A user's chat list for admin inspection (owner request:
+    admins may read user chats to review flagged content)."""
+    docs = (
+        db.collection("users")
+        .document(uid)
+        .collection("chats")
+        .order_by("updatedAt", direction="DESCENDING")
+        .limit(50)
+        .get()
+    )
+    chats = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        chats.append(
+            {
+                "id": doc.id,
+                "title": data.get("title") if isinstance(data.get("title"), str) else "Untitled chat",
+                "lastMessagePreview": data.get("lastMessagePreview")
+                if isinstance(data.get("lastMessagePreview"), str)
+                else "",
+                "updatedAt": _ms(data.get("updatedAt")),
+                "createdAt": _ms(data.get("createdAt")),
+            }
+        )
+    return {"chats": chats}
+
+
+def get_user_chat_messages(db, actor_uid: str, actor_role: str, uid: str, chat_id: str) -> dict:
+    """The messages of one user chat. Viewing a user's chat is
+    itself audited to adminActions — reading private
+    conversations must leave a trail."""
+    chat_ref = db.collection("users").document(uid).collection("chats").document(chat_id)
+    if not chat_ref.get().exists:
+        raise AdminAuthError(404, "CHAT_NOT_FOUND", "That chat no longer exists.")
+    docs = chat_ref.collection("messages").order_by("createdAt").limit(200).get()
+    messages = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        content = data.get("content") if isinstance(data.get("content"), str) else ""
+        messages.append(
+            {
+                "id": doc.id,
+                "role": data.get("role") if isinstance(data.get("role"), str) else "user",
+                "content": content[:4000],
+                "status": data.get("status") if isinstance(data.get("status"), str) else None,
+                "provider": data.get("provider") if isinstance(data.get("provider"), str) else None,
+                "createdAt": _ms(data.get("createdAt")),
+            }
+        )
+    try:
+        db.collection("adminActions").add(
+            {
+                "action": "view_chat",
+                "actorUid": actor_uid,
+                "actorRole": actor_role,
+                "targetUid": uid,
+                "chatId": chat_id,
+                "ts": int(time.time() * 1000),
+            }
+        )
+    except Exception:
+        pass
+    return {"messages": messages}
 
 
 def get_user_detail(db, uid: str) -> dict:

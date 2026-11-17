@@ -35,6 +35,9 @@ type DelegateArgs = {
   assistantMessageId: string;
   content: string;
   model: string | null;
+  /** The user's "Only use OpenRouter" privacy switch — the
+   * backend must run the turn without its cross-provider chain. */
+  openRouterOnly?: boolean;
 };
 
 function backendConfig(): { url: string; token: string } | null {
@@ -81,6 +84,7 @@ export async function tryDelegateChatTurn(
         assistantMessageId: args.assistantMessageId,
         content: args.content,
         model: args.model,
+        openRouterOnly: args.openRouterOnly ?? false,
       }),
       signal: AbortSignal.timeout(15_000),
       cache: "no-store",

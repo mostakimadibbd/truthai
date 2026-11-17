@@ -25,6 +25,12 @@ export type Preferences = {
   instructionsEnabled: boolean;
   /** ChatGPT-style long-term memory across conversations. */
   memoryEnabled: boolean;
+  /** Privacy: when true, prompts go ONLY to OpenRouter — the
+   * cross-provider fallback chain (Groq, Gemini, Requesty,
+   * SambaNova, NVIDIA, Cloudflare) and the community image
+   * sources (Pollinations, AI Horde) are never used for this
+   * user, so no file content or memory text can reach them. */
+  openRouterOnly: boolean;
   instructionsAbout: string;
   instructionsStyle: string;
 };
@@ -37,6 +43,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   defaultModel: "fast",
   instructionsEnabled: false,
   memoryEnabled: true,
+  openRouterOnly: false,
   instructionsAbout: "",
   instructionsStyle: "",
 };
@@ -92,6 +99,10 @@ export function sanitizePreferences(value: unknown): Preferences {
       DEFAULT_PREFERENCES.instructionsEnabled,
     ),
     memoryEnabled: boolOr("memoryEnabled", DEFAULT_PREFERENCES.memoryEnabled),
+    openRouterOnly: boolOr(
+      "openRouterOnly",
+      DEFAULT_PREFERENCES.openRouterOnly,
+    ),
     instructionsAbout: stringOr(
       "instructionsAbout",
       "",

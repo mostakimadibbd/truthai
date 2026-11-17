@@ -472,7 +472,10 @@ Object.assign(articles, {
       {
         title: "Who else processes your data",
         body: [
-          "To generate a reply, your prompt, conversation context and any relevant file content are sent to OpenRouter and the free model provider that serves the request. Those providers process data under their own terms and may retain it under their settings — Xyro AI can't delete data from a provider's systems, so don't send sensitive information. The full list of processors is on the [subprocessors](/subprocessors) page.",
+          "To generate a reply, your prompt, conversation context, saved memory (when memory is on), custom instructions and any relevant file content are sent to ONE of the free AI providers in Xyro AI's fallback chain. The complete list — there are no others — is: OpenRouter, Groq, Google Gemini, Requesty, SambaNova, NVIDIA and Cloudflare Workers AI. Image creation can additionally use Pollinations and AI Horde. Which provider answered is shown under every reply ('via …'), and the full list of processors is on the [subprocessors](/subprocessors) page.",
+          "Each provider's free-tier data terms, as published by the provider and checked in November 2026: OpenRouter does not train on your prompts and does not retain them unless prompt logging is opted into, but the model provider behind OpenRouter applies its own policy and some endpoints retain prompts briefly for abuse prevention. Groq does not retain prompts by default (up to 30 days for reliability and abuse logs) and its contract bars training on your inputs and outputs without your permission. Google Gemini's free tier is different: Google uses unpaid-tier content to improve its products and machine-learning technologies, and human reviewers may read and annotate it — Google itself advises not to submit sensitive or personal information to the free tier (this does not apply in the EEA, Switzerland or the UK, where paid-tier terms apply). Requesty logs prompts and outputs by default, encrypted in the EU for up to 30 days (logging can be turned off per API key), and its free-plan terms allow it to use content for its own training. SambaNova's data processing agreement says prompts are processed transiently, kept no more than 30 days solely for security, fraud and abuse monitoring, and never used to train on customer personal data. NVIDIA's free API is a trial: its terms allow NVIDIA to collect your prompts and generated content, de-identified, to improve its products and services including AI models. Cloudflare Workers AI does not retain inputs or outputs after a standard request and does not use customer content to train models.",
+          "The two community image services deserve a special warning: Pollinations processes prompts transiently but may cache generated responses for up to about 30 days and routes some models through independent community providers under their own policies, and AI Horde is a volunteer network — your image prompt is processed on a volunteer's own computer, where the volunteer could in principle see or log it. Never put anything sensitive in an image prompt.",
+          "If you would rather none of these providers sees your data, turn on 'Only use OpenRouter' in Settings → Data controls: your prompts, files and memory then go only to OpenRouter, the other providers and the community image services are never used for your account, and image creation is limited to OpenRouter's own image models. Whichever setting you choose: providers process data under their own terms and Xyro AI can't delete data from a provider's systems, so don't send sensitive information to any AI service, including this one.",
         ],
       },
       {
@@ -700,7 +703,45 @@ Object.assign(articles, {
         ],
       },
       {
-        title: "7. Contact",
+        title: "8. Your content",
+        body: [
+          "You keep ownership of the messages, files and other content you submit. You grant us and our providers the licence needed to operate the service for you: to store, transmit, process and display your content to provide the features you use, and nothing more — we do not claim ownership of your content and do not use it to train models, except where a model provider's own free-tier terms say otherwise (those are disclosed in the privacy notice and on the subprocessors page, and the 'Only use OpenRouter' setting exists to limit them).",
+          "Output the models generate for you is yours to use as between you and us, subject to the relevant provider's terms and to other people's rights: similar output may be generated for others, and output can be inaccurate, so check anything important before relying on it. You are responsible for your inputs: do not submit content you do not have the right to use, content that is unlawful, or other people's personal data without a proper basis.",
+        ],
+      },
+      {
+        title: "9. Acceptable use",
+        body: [
+          "The acceptable use policy is part of these terms. In short: no illegal activity, no attempts to make the service produce content that facilitates serious harm, no abuse of the free tiers (including creating accounts or keys to evade limits), no interference with the service or other users, and no using generated output to deceive people about its origin where that would mislead them. Violations can lead to warnings, feature limits, suspension or closure, with human review of automated safety flags before significant action.",
+        ],
+      },
+      {
+        title: "10. Availability and changes to the service",
+        body: [
+          "Xyro AI is a free service built on free tiers of its providers. It is provided without an uptime commitment: features may change, be limited (for example when a provider's free quota is exhausted) or be discontinued, and scheduled or emergency maintenance may interrupt access. We will try to give reasonable notice of material changes on this site or in the product, but the service may evolve without notice where a provider's terms or capacity force a change.",
+        ],
+      },
+      {
+        title: "11. Suspension and termination",
+        body: [
+          "You may stop using Xyro AI at any time and may close your account from Settings → Account, which deletes the account and its content from the live service subject to the privacy notice's retention section. We may suspend or close an account that violates these terms or the acceptable use policy, that creates a security or legal risk, or that appears abandoned under a prolonged-inactivity policy we publish in advance. Where the violation is not serious or urgent, we will warn first where practical. Termination ends the licence to use the service; sections that by their nature should survive (content ownership, liability, governing law) survive termination.",
+        ],
+      },
+      {
+        title: "12. Warranties and liability",
+        body: [
+          "The service is provided 'as is' and 'as available', without warranties of any kind to the maximum extent the law permits, including fitness for a particular purpose and non-infringement. AI output is generated by third-party models and may be wrong, incomplete or offensive; it is not professional advice. To the maximum extent permitted by law, our total liability arising from the service is limited to the greater of the amount you paid for the service in the twelve months before the claim (zero for the free service) and the minimum amount the applicable law requires. Nothing in these terms limits liability that cannot be limited by law, including for death or personal injury caused by negligence, or your statutory consumer rights.",
+          "You agree to indemnify us against claims arising from your content or your misuse of the service, to the extent permitted by law. If a provision of these terms is found unenforceable, the remaining provisions continue in full effect, and the unenforceable provision is modified only as much as needed to make it enforceable.",
+        ],
+      },
+      {
+        title: "13. General",
+        body: [
+          "These terms are the whole agreement between you and us about Xyro AI and replace any earlier understandings about the service. We may assign our rights under these terms as part of a merger, acquisition or asset transfer, with notice on this site; you may not assign yours without our consent. A failure to enforce a provision is not a waiver of it. Headings are for readability only. Where a provision requires notice, notice to you may be given in the product, on this site, or to the account email; notice to us goes through the contact page. The service is intended for users aged 18 and over, or the age of majority where you live if higher.",
+        ],
+      },
+      {
+        title: "14. Contact",
         body: [
           "Questions about these terms: see the [contact page](/contact).",
         ],
@@ -755,6 +796,29 @@ Object.assign(articles, {
           "Xyro AI is intended for users aged 18 and over. For privacy questions or requests that the self-serve controls don't cover, use the [contact page](/contact). Material changes to this notice will be announced here with a new 'last updated' date.",
         ],
       },
+      {
+        title: "How long we keep things",
+        body: [
+          "Chats and files: kept until you delete them or close your account. Deleting a chat removes its messages from your account; backups and replicas can take a short time to fully expire, and a minimal metadata snapshot of a deleted account is kept in a restricted trash archive so abuse and accidental-deletion cases can be reviewed.",
+          "Usage and analytics: per-request metering records and daily aggregates are kept so the usage dashboards and plan limits can be computed; aggregates without message content may be kept longer than individual events. Security records — sign-in events, device records and safety flags — are kept while the account is active and for a limited period afterwards, because they exist to investigate abuse; a safety flag records the flagged prompt, the category and the review outcome, never anything beyond the conversation it came from.",
+          "Developer API records: per-request API activity (timestamps, model, token counts, status) is kept for the life of the developer profile so the console can show it; API keys themselves are stored only as hashes and disappear when revoked. Backups: encrypted backups of the database are kept on a rolling basis and age out automatically; data deleted from the live service can persist in a backup until that backup ages out, and is not restored except for disaster recovery, after which deletions are re-applied.",
+        ],
+      },
+      {
+        title: "Your rights",
+        body: [
+          "Access and portability: Settings → Data controls exports your chats and account data in a machine-readable form at any time, without asking us. Correction: profile details, memories and preferences are editable in Settings, and anything you cannot edit yourself can be corrected through the contact page. Deletion: you can delete individual chats, files and memories, or close the whole account from Settings → Account; closure removes the account and its content from the live service, subject to the limited retention described above.",
+          "Objection and restriction: you can object to processing that is based on legitimate interests — including safety screening — through the contact page, and we will stop unless a compelling reason (such as an ongoing abuse investigation) requires otherwise. You can also restrict processing while a request is reviewed. We respond to rights requests within 30 days, verify identity against the account before acting on them, and never sell personal data or share it for cross-context behavioural advertising. Using your rights never changes the service you receive, except where the law requires otherwise.",
+          "Complaints: if you believe your data has been mishandled, contact us first so we can put it right; you also have the right to complain to your local data-protection authority. Where European or UK data-protection law applies, the rights above include the full set provided by that law, and the same self-serve controls are offered to every account regardless of location.",
+        ],
+      },
+      {
+        title: "International transfers and automated processing",
+        body: [
+          "Xyro AI is operated on infrastructure and model providers located mainly in the United States and the European Union, so your data may be processed in a country other than your own. Where the law requires a transfer safeguard, we rely on the providers' standard contractual terms and data-processing agreements, listed on the subprocessors page. You can reduce what leaves our own systems at any time with the 'Only use OpenRouter' switch described above.",
+          "No automated decision with legal or similarly significant effect is made about you. Model routing (choosing which free model answers) is not profiling for marketing, and we do not build advertising profiles. Safety screening is automated only at the detection step: a pattern match or a model's refusal can create a flag, but a human administrator reviews flags and decides any action, and flags are invisible to the flagged account unless action is taken.",
+        ],
+      },
     ],
   },
   "acceptable-use": {
@@ -793,6 +857,46 @@ Object.assign(articles, {
         title: "Reporting and enforcement",
         body: [
           "Report misuse via the [contact page](/contact). Violations may lead to rate limiting, suspension or termination under the [terms](/terms). The intended minimum age for the service is 18.",
+        ],
+      },
+      {
+        title: "Content that is never allowed",
+        body: [
+          "Sexual content involving minors, in any form and by any route, including fictional, drawn or generated material and any attempt to obtain it — this carries zero tolerance: accounts are closed and, where the law requires or permits, reports are made to the relevant authorities. Content that facilitates serious physical harm: instructions or facilitation for weapons, explosives, or violent wrongdoing; instructions for manufacturing illicit drugs; and content that praises or recruits for violent extremist organisations.",
+          "Cybercrime and fraud: malware, phishing, credential theft, hacking instructions aimed at systems you do not own or have permission to test, fraud and scam content, counterfeit documents, and impersonation intended to deceive. Privacy violations: disclosing other people's personal data, non-consensual intimate imagery, stalking or harassment content, and attempts to extract personal data about identifiable people. Intellectual-property abuse: reproducing large amounts of copyrighted text or uploading content you have no right to use. Spam and manipulation: bulk unsolicited content, fake engagement, deceptive impersonation of the service or its staff, and presenting generated output as human work where that deception matters (for example in reviews, testimonials or academic submissions).",
+        ],
+      },
+      {
+        title: "Misuse of the service itself",
+        body: [
+          "Do not evade the product's limits: creating multiple accounts or API keys to multiply free allowances, sharing keys publicly, reselling access, or scripting sign-ups. Do not probe, scan or attack the service or its providers beyond ordinary use, attempt to bypass bot protection, rate limits or safety systems, or try to extract other users' data, prompts or system instructions. Do not use the API or the app to build a competing dataset by bulk-harvesting outputs, and do not use generated output to train a model in a way that violates the underlying providers' terms. Automated access is allowed only through the documented public API with a valid key.",
+        ],
+      },
+      {
+        title: "How enforcement works",
+        body: [
+          "Detection is partly automated: a deterministic classifier screens prompts for high-confidence harmful requests, and a model's own safety refusal can also raise a flag. A flag is invisible to the account — it changes nothing about the person's experience — and exists only so a human administrator can review the flagged conversation in context. Admins can read the chats attached to a flag, and every such view is written to the audit log. Decisions are made by people, not by the classifier: outcomes range from dismissing the flag, to a warning, to limiting features, suspending the account, or closing it for serious or repeat violations.",
+          "If your account is limited or closed and you believe it was a mistake, contact us with the account email and what happened; a person will re-review the flags and the decision. Some content is removed or refused without any account action at all — a refusal by a model is the normal, expected behaviour for disallowed requests and is not a punishment. We may also act on reports from other users and from providers, and we cooperate with lawful requests from authorities.",
+        ],
+      },
+      {
+        title: "High-risk and regulated uses",
+        body: [
+          "The models can be wrong, including confidently wrong. Do not rely on output as medical, legal, financial or other professional advice, and do not use the service for decisions that significantly affect other people — employment, housing, credit, insurance, education admissions — without independent human review and a lawful basis. Emergency situations are out of scope entirely: if someone is in danger, contact local emergency services, not an AI chat. Self-harm content is handled with care rather than punishment: the service responds supportively and encourages professional help, and such conversations are not treated as violations by the person seeking help.",
+          "Political and civic content must not be used to deceive: no fabricated quotes, images or recordings of real people presented as genuine, no impersonation of officials or campaigns, and no coordinated inauthentic behaviour. Research, journalism, education and discussion about any of the topics in this policy are legitimate uses — context matters, and reviewing admins are instructed to distinguish a harmful request from a conversation about harm, which is one reason flags are reviewed by people before any significant action.",
+        ],
+      },
+      {
+        title: "Examples",
+        body: [
+          "Allowed: discussing how phishing works in order to defend against it; asking how to protect an account, a home network or a business from hackers; writing fiction in which crimes occur; studying the history of weapons, wars or drugs; asking for harm-reduction information; debating drug policy, gun policy or any other contested question; testing the security of systems you own or are authorised to test, described in those terms. The classifier and reviewing admins are both instructed that these are legitimate, and a flag raised by an ambiguous phrasing is dismissed on review.",
+          "Not allowed: step-by-step instructions for making a weapon, drug or fraudulent document, whoever they are for; help drafting a phishing message or a scam script; assistance planning a specific act of violence or evading detection afterwards; sexual content involving anyone under 18 in any framing; generating bulk reviews, comments or messages intended to look like genuine public opinion; and re-asking a refused request in slightly different words to shop for a model that will comply — the safety refusal is the answer, and repeated attempts are themselves a policy violation that flags will show.",
+        ],
+      },
+      {
+        title: "Generated media",
+        body: [
+          "Images created with Xyro AI carry an invisible provenance watermark and are stored with the generating account. Do not remove or obscure provenance signals, and do not use generated images to impersonate real people, fabricate evidence, or create non-consensual imagery of anyone — generated or otherwise. Synthetic media that could deceive (a fake screenshot of a real conversation, a fabricated document image) is treated as fraud content under this policy, whether it was made here or elsewhere and merely uploaded.",
         ],
       },
     ],
@@ -836,6 +940,45 @@ Object.assign(articles, {
           "Blocking the session cookie or Firebase storage will sign you out and prevent sign-in — the service cannot work without them. You can clear site data for this origin in your browser at any time; signing out from Settings → Account (or the header menu) also ends the server session, which clearing cookies alone does not do.",
         ],
       },
+      {
+        title: "The storage we actually use",
+        body: [
+          "Session cookie: when you sign in, the service sets a single strictly-necessary session cookie (named __Host-xyro_session, with a legacy fallback name) that carries a signed token identifying your session. It is HttpOnly, Secure and SameSite=Lax, so page scripts cannot read it and it is not sent on cross-site requests. The session slides with activity up to 30 days and ends absolutely at 90 days; signing out revokes the session on the server as well as clearing the cookie. Without this cookie the app cannot know who you are, so it cannot be declined while signed in — signing out is the opt-out.",
+          "Sign-in and bot protection: Google sign-in and Firebase Authentication store tokens in your browser's local storage and IndexedDB (not cookies) so you stay signed in across tabs; those stores are cleared on sign-out. Cloudflare Turnstile, which checks that sign-ups and sign-ins come from a person rather than a bot, sets its own cookies under Cloudflare's control when the check runs; the widget appears under the sign-in and sign-up forms and on the bot-check page, and Google accounts signing in are exempt from the check.",
+          "Preferences: choices such as theme, model mode and privacy switches are stored with your account and, for the pre-sign-in screens, in your browser's local storage. The site does not use fingerprinting to replace cookies, and a device hash computed at sign-in for security (recognising your own devices in Settings → Security) is stored server-side with your account, not as a tracking cookie.",
+        ],
+      },
+      {
+        title: "What we do not use",
+        body: [
+          "No advertising cookies. No cross-site trackers. No analytics cookies — usage is metered on our own servers (request counts and token totals, disclosed in the privacy notice) rather than by dropping third-party analytics beacons on your device. No social-media pixels, no session-replay tools, and no selling or sharing of cookie data, because there is no cookie data beyond the session and preference storage described here.",
+          "If that ever changes — for example, if an analytics or advertising tool were introduced — this page and the privacy notice would be updated first, the tool would be listed here with its purpose and lifetime, and consent would be requested where the law requires it before the tool is loaded.",
+        ],
+      },
+      {
+        title: "Managing cookies and similar storage",
+        body: [
+          "Every modern browser lets you view, block and delete cookies and site data per site. Blocking the session cookie means the app will treat you as signed out; deleting site data for this origin removes the locally stored sign-in tokens and preferences as well. Clearing cookies alone does not revoke a server session from other devices — use Settings → Security to review signed-in devices and sign out everywhere, and Settings → Account to sign out of this device completely.",
+          "We do not respond differently to Do Not Track signals, because the site does not track across sites in the first place. Where a browser sends a Global Privacy Control signal, we treat it consistently with this notice: there is no sale or sharing of personal data for it to opt out of. Questions about any of this go through the contact page.",
+        ],
+      },
+      {
+        title: "Itemised list",
+        body: [
+          "- __Host-xyro_session — the session cookie described above. Purpose: keeping you signed in securely. Lifetime: sliding 30 days, absolute cap 90 days, revoked server-side on sign-out. Set by: this site. Type: strictly necessary.",
+          "- xyro_session — legacy fallback name for the same session cookie on origins where the __Host- prefix cannot be used. Same purpose, same lifetime, same protections.",
+          "- Cloudflare Turnstile cookies (names vary, set under Cloudflare's control) — purpose: distinguishing people from bots during sign-up, sign-in and the bot-check page. Lifetime: set by Cloudflare, typically short. Type: strictly necessary security.",
+          "- Firebase Authentication local storage and IndexedDB entries — purpose: keeping your sign-in recognised across tabs and visits. Cleared on sign-out. Type: strictly necessary. These are browser storage, not cookies, but they serve the same function so they are listed here.",
+          "- Local preference storage — theme and interface choices for visitors who are not signed in. Purpose: remembering how you left the site. Lifetime: until you clear site data. Type: functional.",
+          "Anything not on this list is not set by us. If your browser shows other cookies for this origin, they will belong to an embedded provider named above (Cloudflare or Google, during sign-in) and are governed by that provider's own policy.",
+        ],
+      },
+      {
+        title: "Changes to this notice",
+        body: [
+          "This page is versioned by its 'last updated' date. If the storage the site uses changes materially — a new cookie, a new embedded provider, a new purpose — the itemised list above is updated before or as the change ships, and significant changes are also noted in the changelog. Older versions are not kept on the site; ask through the contact page if you need to know what this notice said at a particular time, for example for a compliance review.",
+        ],
+      },
     ],
   },
 });
@@ -877,6 +1020,39 @@ Object.assign(articles, {
           "Automated or abusive access may be rate-limited, blocked or have its accounts terminated under the [terms](/terms) and [acceptable use policy](/acceptable-use). API keys may be revoked and developer access withdrawn for abuse, including attempts to evade the daily token limit by creating multiple accounts.",
         ],
       },
+      {
+        title: "Keys and credential security",
+        body: [
+          "A key is a credential for your account: anyone holding it can spend your daily token allowance and act through the API as you. Keys are shown once at creation and stored by us only as SHA-256 hashes, so we cannot display a key again or recover a lost one — revoke it and create a replacement. Give each key a name that says where it is used, keep keys in server-side secret storage, never commit them to source control or ship them in browser or mobile apps, and rotate them if a leak is suspected. You are responsible for activity performed with your keys, including by people you share them with. Tell us through the contact page if you believe a key has been compromised; revocation in Settings → Developer takes effect immediately.",
+          "Developer access requires a verified account email and the activation questionnaire in Settings → Developer. We may refuse or withdraw activation where the stated use would breach these terms or the acceptable use policy. One person may not hold multiple accounts to multiply API allowances; allowances attach to the person, not the account.",
+        ],
+      },
+      {
+        title: "Metering, logs and the console",
+        body: [
+          "Every API call is metered: timestamps, key, requested model or mode, the provider and model that answered, token counts, latency class and success or error status are recorded and shown to you in Settings → Developer, including per-request activity with stored input and output for your own debugging. That logging is part of the service — it is how daily limits are enforced and how abuse is investigated — and it is disclosed in the privacy notice and the privacy center. Logs are retained for the life of the developer profile; deleting the account deletes the logs with it. Do not send personal data of third parties through the API unless you have the right to do so; as between you and us, you are the controller of content you send and we process it on your instructions to return a completion.",
+        ],
+      },
+      {
+        title: "Output, availability and changes",
+        body: [
+          "Completions are generated by third-party free models and may be inaccurate, incomplete or similar to output generated for others; you are responsible for reviewing output before relying on it and for complying with the underlying providers' terms, which the subprocessors page identifies. The API is a free service without an availability commitment: upstream free quotas are shared and finite, so calls can be throttled or fail when providers are saturated, and error responses distinguish that case (model_busy, model_unavailable) from problems with your request.",
+          "We may change the API — including models offered, limits and these terms — and will mark material changes on this page with a new date; breaking changes will be announced on the developers page where practical. Continued use after a change takes effect is acceptance of it. We may suspend keys or access that breach these terms, threaten the service's stability, or evade limits, and may terminate the API programme itself with reasonable notice where practical. On termination, keys stop working and stored logs are handled as described above.",
+        ],
+      },
+      {
+        title: "Limits in detail and support",
+        body: [
+          "The free plan's limits are enforced per account: 100,000 tokens per day across all keys combined (prompt and completion tokens both count, measured by the answering provider's own accounting or, where a provider does not report usage, a character-based estimate that the console flags as estimated), and 20 requests per minute per key. Requests that fail validation do not consume tokens; requests rejected by an upstream model after acceptance may still record the attempt in the activity log with an error status. The daily window resets at midnight UTC; the per-minute window is a rolling rate limit, and the error response for both cases includes the code that tells you which limit you hit, so clients can back off appropriately instead of guessing.",
+          "Support for the API is through the contact page and the help center; the status page reports known incidents affecting the app and, where they affect it, the API. There is no paid tier and no support SLA on the free plan — the developers page and this reference are the canonical documentation, and where sample code and behaviour disagree, the behaviour of the live API and the error codes in this reference govern.",
+        ],
+      },
+      {
+        title: "Privacy for API traffic",
+        body: [
+          "API prompts and completions pass through the same provider chain as the app and are governed by the same disclosures: the privacy notice lists every provider that can receive a prompt and each provider's free-tier logging and training terms, and the account-level 'Only use OpenRouter' switch also governs API traffic for keys on that account. Safety screening applies to API traffic as it does to app traffic, and the acceptable use policy binds API use in full. If you build a product on this API, you are responsible for your own users' notices and consents, and for telling them their prompts are processed by an AI service — do not present the API as your own model.",
+        ],
+      },
     ],
   },
   subprocessors: {
@@ -891,15 +1067,51 @@ Object.assign(articles, {
         ],
       },
       {
-        title: "OpenRouter and model providers",
+        title: "OpenRouter",
         body: [
-          "Purpose: generating AI replies. OpenRouter routes each request to a free model provider (for example Meta, Google, DeepSeek, Qwen or Mistral AI, depending on the model chosen and availability). The provider receives the prompt, conversation context, custom instructions if enabled, and relevant attached image or file content, and processes it under its own terms. The specific provider varies per request; the model picker always names the model being used.",
+          "Purpose: generating AI replies — the primary route. OpenRouter routes each request to a free model hosted by an upstream provider (for example Meta, Google, DeepSeek or Qwen, depending on the model and availability). The request carries your prompt, conversation context, saved memory and custom instructions when enabled, and relevant attached image or file content. OpenRouter states it does not train on your prompts and does not retain them unless prompt logging is opted into; the upstream model provider applies its own policy, and some endpoints retain prompts briefly for abuse prevention. Which provider answered is shown under every reply.",
+        ],
+      },
+      {
+        title: "Groq",
+        body: [
+          "Purpose: fallback AI replies when OpenRouter cannot answer (and the preferred route for Fast mode). Groq receives the same prompt payload as OpenRouter would. Per Groq's published data policy (checked November 2026): prompts are not retained by default, may be kept up to 30 days in reliability and abuse logs, and Groq's services agreement bars training on customer inputs and outputs without explicit permission.",
+        ],
+      },
+      {
+        title: "Google Gemini",
+        body: [
+          "Purpose: fallback AI replies and image analysis, and one of the image-generation sources. Per Google's Gemini API terms for the unpaid tier (checked November 2026): content submitted is used to provide, improve and develop Google products and machine-learning technologies, and human reviewers may read, annotate and process API input and output; Google advises not to submit sensitive, confidential or personal information to the unpaid services. In the EEA, Switzerland and the UK, the paid-tier terms (no improvement use) apply instead.",
+        ],
+      },
+      {
+        title: "Requesty",
+        body: [
+          "Purpose: fallback AI replies. Requesty is a routing gateway: the prompt passes through Requesty to the model provider serving it. Per Requesty's published security documentation (checked November 2026): prompt and output logging is on by default on self-serve plans, retained encrypted in the EU for up to 30 days, can be disabled per API key, and its free-plan privacy terms allow Requesty to use content for its own training.",
+        ],
+      },
+      {
+        title: "SambaNova",
+        body: [
+          "Purpose: fallback AI replies. Per SambaNova's data processing agreement (checked November 2026): prompts and completions are processed transiently and retained no more than 30 days solely for security, fraud and abuse monitoring, and SambaNova will not use customer personal data to train or fine-tune models.",
+        ],
+      },
+      {
+        title: "NVIDIA",
+        body: [
+          "Purpose: fallback AI replies. NVIDIA's hosted API catalog is offered under its API Trial Terms (checked November 2026): the free tier is licensed for trial and evaluation use, and NVIDIA may collect user content and generated content, without identifying specific users, to improve NVIDIA products and services, including AI models.",
         ],
       },
       {
         title: "Pollinations",
         body: [
-          "Purpose: fallback image generation. When no free image-capable model is available through OpenRouter, image creation requests are served by the Pollinations free generation service. It receives only the image description you wrote — no account details, no chat history — and returns the generated picture, which is then watermarked and stored in Cloudinary like every created image.",
+          "Purpose: image generation (the first source tried). Pollinations receives only the image description you wrote — no account details, no chat history — and returns the generated picture, which is then watermarked and stored like every created image. Per Pollinations' privacy policy (checked November 2026): prompts and outputs are processed transiently, generated responses may be cached for up to about 30 days, Pollinations does not train on your prompts without opt-in, and some models run on independent community providers whose own policies apply.",
+        ],
+      },
+      {
+        title: "AI Horde",
+        body: [
+          "Purpose: fallback image generation. AI Horde is a volunteer-run network: your image prompt is processed on a volunteer's own computer, and that volunteer could in principle see or log the prompt. It receives only the image description — no account details, no chat history — but you should treat image prompts sent to community services as effectively public and never include anything sensitive in them.",
         ],
       },
       {
@@ -917,7 +1129,7 @@ Object.assign(articles, {
       {
         title: "Cloudflare",
         body: [
-          "Purpose: abuse prevention. Cloudflare Turnstile verifies the human checks at sign-up, sign-in and password reset, processing the challenge token and browser/network signals under Cloudflare's policies.",
+          "Purpose: abuse prevention and fallback AI. Cloudflare Turnstile verifies the human checks at sign-up, sign-in and password reset, processing the challenge token and browser/network signals under Cloudflare's policies. Cloudflare Workers AI also serves fallback chat replies (the preferred route for Lightweight mode) and one of the image-generation models; per Cloudflare's Workers AI data-usage commitments (checked November 2026), inputs and outputs are not retained after a standard request and customer content is not used to train models.",
         ],
       },
       {
@@ -942,6 +1154,13 @@ Object.assign(articles, {
         title: "Changes",
         body: [
           "If a subprocessor is added or replaced, this page will be updated. Questions: see the [contact page](/contact).",
+        ],
+      },
+      {
+        title: "How subprocessors are chosen and changed",
+        body: [
+          "A subprocessor is added only when a feature needs it, and only after its data practices are reviewed against three questions: does it receive the minimum data the feature requires, does it commit to not using customer content beyond providing the service (or, where a free tier cannot commit to that, is the exception disclosed in the privacy notice and in the per-provider notes above), and does it offer deletion and security controls proportionate to what it receives. Free tiers constrain these choices — that trade-off is disclosed rather than hidden, and the 'Only use OpenRouter' setting in Settings → Data controls exists so any user can narrow the set of processors that can receive their prompts to a single router.",
+          "This list is the live record: when a subprocessor is added, replaced or removed, this page is updated with a new date before or as the change takes effect, and material changes are also noted in the changelog. Data locations follow each provider's own infrastructure — mainly the United States and the European Union for the providers above; the per-provider notes link to each provider's own documentation, which governs where that provider processes data. Questions about any subprocessor go through the contact page.",
         ],
       },
     ],
@@ -1076,6 +1295,7 @@ Object.assign(articles, {
         title: "Endpoints",
         body: [
           "`POST /api/v1/chat/completions` — OpenAI-shaped: send `model` (optional; defaults to Auto free) and `messages`, get back a `chat.completion` with `choices` and `usage`. Up to 50 messages and `max_tokens` up to 4096 per call; streaming is not supported yet.",
+          "The full [API documentation](/developers/docs) is the complete reference: authentication, both endpoints, limits, every error code, and copy-paste examples in cURL, JavaScript and Python.",
           "`GET /api/v1/models` — the free models your key can use right now, in the OpenAI list shape.",
           "Errors use the OpenAI error shape (`error.message`, `error.type`, `error.code`). The free plan allows 100,000 tokens per day (prompt + completion, resetting at midnight UTC) and 20 requests per minute per key; hitting the daily cap returns `daily_token_limit_exceeded`. The governing terms are the [API terms](/api-terms) and [acceptable use policy](/acceptable-use).",
         ],

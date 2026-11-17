@@ -87,6 +87,11 @@ export type ChatCompletionArgs = {
    * model modes: Fast prefers Groq, Lightweight prefers
    * Cloudflare). Everything else remains as fallback. */
   preferredProvider?: string;
+  /** The user's "Only use OpenRouter" privacy switch: when true
+   * the chain contains OpenRouter attempts ONLY — no other
+   * provider can receive the prompt, file content or memory
+   * text for this turn. */
+  openRouterOnly?: boolean;
 };
 
 /**
@@ -241,6 +246,7 @@ export function buildAttemptTargets(
   visionOnly = false,
   providersFirst = false,
   preferredProvider?: string,
+  openRouterOnly = false,
 ): AttemptTarget[] {
   const targets: AttemptTarget[] = openRouterAttempts.map((model) => ({
     provider: "openrouter",
@@ -249,7 +255,10 @@ export function buildAttemptTargets(
     url: "https://openrouter.ai/api/v1/chat/completions",
     apiKey: openRouterApiKey,
   }));
-  const cross = crossProviderTargets(env, visionOnly);
+  // "Only use OpenRouter" (the user's privacy switch): the chain
+  // is OpenRouter attempts alone — cross-provider targets are
+  // never built, so nothing can be sent to another provider.
+  const cross = openRouterOnly ? [] : crossProviderTargets(env, visionOnly);
   let ordered = providersFirst
     ? [...cross, ...targets]
     : [...targets, ...cross];
@@ -307,7 +316,7 @@ export function messagesHaveImages(messages: unknown): boolean {
 
 export async function fetchChatCompletionWithFallback(
   args: ChatCompletionArgs,
-): Promise<{ response: Response; model: string }> {
+): Promise<{ response: Response; model: string; provider: string }> {
   args = { ...args, attempts: freeOnlyAttempts(args.attempts) };
   // Media turns: cross-provider attempts are restricted to models
   // that can see images, so an uploaded photo is always analysed by
@@ -319,6 +328,7 @@ export async function fetchChatCompletionWithFallback(
     messagesHaveImages(args.messages),
     args.providersFirst ?? false,
     args.preferredProvider,
+    args.openRouterOnly ?? false,
   );
   const connectTimeoutMs = args.connectTimeoutMs ?? 25_000;
   let lastStatus: number | null = null;
@@ -389,7 +399,7 @@ export async function fetchChatCompletionWithFallback(
     clearTimeout(connectTimer);
 
     if (response.ok) {
-      return { response, model: target.label };
+      return { response, model: target.label, provider: target.provider };
     }
 
     const retryable =
@@ -408,7 +418,7 @@ export async function fetchChatCompletionWithFallback(
           response.status === 402 ||
           response.status === 403));
     if (!retryable) {
-      return { response, model: target.label };
+      return { response, model: target.label, provider: target.provider };
     }
     lastStatus = response.status;
     lastRetryAfter = response.headers.get("retry-after");

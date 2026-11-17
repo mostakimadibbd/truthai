@@ -12,6 +12,7 @@ import { limitDeniedResponse, limit as rateLimit } from "@/lib/server/limit";
 import { getFreeImageModels } from "@/lib/server/models";
 import { recordUsageEvent } from "@/lib/server/analytics";
 import { authenticateVerifiedUser } from "@/lib/server/request-auth";
+import { readPreferences } from "@/lib/server/settings";
 import { buildWatermarkPayload, embedWatermark } from "@/lib/server/watermark";
 
 // Image creation (Phase 7, extended in the robustness round).
@@ -654,7 +655,20 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    for (const source of sources) {
+    // "Only use OpenRouter" privacy switch: community and other
+    // providers' image sources are skipped entirely for this
+    // user — only OpenRouter image models may see the prompt.
+    let openRouterOnly = false;
+    try {
+      openRouterOnly = (await readPreferences(auth.uid)).openRouterOnly;
+    } catch {
+      openRouterOnly = false;
+    }
+    const effectiveSources = openRouterOnly
+      ? sources.filter((source) => source.label === "openrouter")
+      : sources;
+
+    for (const source of effectiveSources) {
       let produced: { bytes: Buffer; model: string };
       try {
         produced = await source.run();

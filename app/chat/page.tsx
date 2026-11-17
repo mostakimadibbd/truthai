@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import ChatWorkspace from "./chat-workspace";
+import ChatShell from "./chat-shell";
 
 export const metadata: Metadata = {
   title: "Chat",
@@ -8,5 +8,5 @@ export const metadata: Metadata = {
 };
 
 export default function ChatPage() {
-  return <ChatWorkspace />;
+  return <ChatShell />;
 }
