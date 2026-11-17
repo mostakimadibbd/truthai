@@ -688,12 +688,14 @@ export default function ConsolePage() {
     [user],
   );
 
-  // Fresh confirmation fields for every new pending action.
+  // Fresh confirmation fields for every new pending action —
+  // keyed on the action's identity, not the object, so a
+  // re-render can never wipe fields the owner is typing into.
   useEffect(() => {
     setConfirmEmail("");
     setOwnerSecretInput("");
     setActionError("");
-  }, [pending]);
+  }, [pending?.uid, pending?.action]);
 
   const runAction = useCallback(async () => {
     if (!user || !pending) return;
@@ -925,7 +927,8 @@ export default function ConsolePage() {
   const pendingEmailOk =
     pending?.action !== "promote" ||
     (pending?.email != null &&
-      confirmEmail.trim().toLowerCase() === pending.email.toLowerCase());
+      confirmEmail.replace(/\s+/g, "").toLowerCase() ===
+        pending.email.replace(/\s+/g, "").toLowerCase());
   const pendingSecretOk = !pendingGated || ownerSecretInput.trim().length >= 4;
   const canConfirm = pendingEmailOk && pendingSecretOk && !acting;
 
@@ -1743,16 +1746,32 @@ export default function ConsolePage() {
             <h2>Are you sure?</h2>
             <p>{pending.label}</p>
             {pending.action === "promote" && pending.email && (
-              <label className="modal-field">
-                <span>Type the account’s email to confirm: <strong>{pending.email}</strong></span>
+              <div className="modal-field">
+                <span>
+                  Type the account’s email to confirm (or tap it):{" "}
+                  <button
+                    type="button"
+                    className="email-fill"
+                    onClick={() => pending.email && setConfirmEmail(pending.email)}
+                  >
+                    {pending.email}
+                  </button>
+                </span>
                 <input
                   type="email"
                   value={confirmEmail}
                   onChange={(event) => setConfirmEmail(event.target.value)}
-                  placeholder={pending.email}
+                  placeholder="Type the email here to confirm"
                   autoComplete="off"
                 />
-              </label>
+                {pendingEmailOk ? (
+                  <span className="match-ok">✓ Email matches — you can confirm.</span>
+                ) : (
+                  <span className="muted small">
+                    Confirm stays disabled until the email matches exactly.
+                  </span>
+                )}
+              </div>
             )}
             {SECRET_GATED_ACTIONS.includes(pending.action) &&
               viewer?.ownerSecretConfigured === false && (
