@@ -8,19 +8,17 @@ import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
 
 /**
  * Fallback media storage (2026-11-17): chunked blob storage in
- * Firestore, used automatically when Cloudinary rejects an
- * upload (the account is currently limited at the account level
- * — every upload 403s). Files are split into ≤700 KB chunks
- * (Firestore's per-document limit is ~1 MiB) under
- * mediaBlobs/{id}/chunks, with a metadata document and a global
- * counter document (mediaStats/global) the admin panel reads.
- *
- * This is a bridge, not a destination: Firestore on the Spark
- * plan holds ~1 GiB in total, so the durable fix remains a
- * healthy Cloudinary account (or another object store). The
- * moment Cloudinary accepts uploads again it becomes primary
- * once more — callers always try it first — and blob-backed
- * files keep working through /api/media.
+ * Firestore. It briefly served as the automatic fallback while
+ * the Cloudinary API key lacked the permissions the Admin and
+ * upload APIs need (every call 403'd). The owner fixed the key
+ * (master permissions) the same day and directed that uploads
+ * go ONLY to Cloudinary, so saveBlob has no production callers
+ * now. The read/delete paths stay live for any files stored
+ * during the outage window (served via /api/media, deleted via
+ * the usual cleanup flows), and mediaStats/global still feeds
+ * the admin panel's fallback view if Cloudinary ever fails
+ * again. Files are split into ≤700 KB chunks (Firestore's
+ * per-document limit is ~1 MiB) under mediaBlobs/{id}/chunks.
  *
  * Blob ids are 128-bit random: possession of an id is the
  * capability for avatar-kind blobs (public profile pictures,

@@ -1,17 +1,16 @@
 import { v2 as cloudinary } from "cloudinary";
 import { serverEnv } from "./env";
-import { deleteBlob, saveBlob } from "@/lib/server/blob-store";
-import { IMAGE_MIME_BY_SNIFF, sniffImageType } from "@/lib/server/image-sniff";
+import { deleteBlob } from "@/lib/server/blob-store";
 
 /**
- * Fallback storage routing (2026-11-17): when Cloudinary
- * rejects an upload — the account is currently limited at the
- * account level — the file is stored in the Firestore blob
- * store instead and its publicId carries the `blob:` prefix.
- * Every read/delete path in this module (and the media route)
- * routes on that prefix, so callers never need to know which
- * store holds a file. Cloudinary is always tried first and
- * becomes primary again automatically when it recovers.
+ * Storage routing (2026-11-17): uploads go ONLY to Cloudinary
+ * (owner instruction — the earlier automatic Firestore
+ * fallback was retired once the Cloudinary API key got its
+ * master permissions and the account answered again). The
+ * `blob:` publicId routing below is READ/DELETE-only: it keeps
+ * files that were stored in the Firestore blob store during
+ * the outage window reachable (/api/media) and deletable, so
+ * nothing a user saved that day breaks.
  */
 export const BLOB_PREFIX = "blob:";
 
@@ -21,14 +20,6 @@ export function isBlobPublicId(publicId: string): boolean {
 
 export function blobIdFromPublicId(publicId: string): string {
   return publicId.slice(BLOB_PREFIX.length);
-}
-
-async function saveFallbackBlob(
-  buffer: Buffer,
-  meta: { contentType: string; uid: string; kind: "avatar" | "generated" | "file" },
-): Promise<{ publicId: string; bytes: number }> {
-  const { blobId, bytes } = await saveBlob(buffer, meta);
-  return { publicId: `${BLOB_PREFIX}${blobId}`, bytes };
 }
 
 export type CloudinaryResourceType = "image" | "raw";
@@ -369,37 +360,23 @@ export async function uploadAvatarImage(
   buffer: Buffer,
   uid: string,
 ): Promise<{ url: string; publicId: string }> {
-  try {
-    const publicId = `avatar-${Date.now().toString(36)}-${Math.random()
-      .toString(36)
-      .slice(2, 10)}`;
-    const result = await withCloudinaryCandidates(() =>
-      uploadStreamWithRetry(
-        {
-          public_id: publicId,
-          folder: `xyro/avatars/${uid}`,
-          type: "upload",
-          overwrite: true,
-          invalidate: true,
-          resource_type: "image",
-        },
-        buffer,
-      ),
-    );
-    return { url: result.secure_url ?? "", publicId: result.public_id };
-  } catch (error) {
-    const sniffed = sniffImageType(buffer);
-    const fallback = await saveFallbackBlob(buffer, {
-      contentType: sniffed ? IMAGE_MIME_BY_SNIFF[sniffed] : "image/png",
-      uid,
-      kind: "avatar",
-    }).catch(() => null);
-    if (!fallback) throw error;
-    return {
-      url: `/api/media/${blobIdFromPublicId(fallback.publicId)}`,
-      publicId: fallback.publicId,
-    };
-  }
+  const publicId = `avatar-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+  const result = await withCloudinaryCandidates(() =>
+    uploadStreamWithRetry(
+      {
+        public_id: publicId,
+        folder: `xyro/avatars/${uid}`,
+        type: "upload",
+        overwrite: true,
+        invalidate: true,
+        resource_type: "image",
+      },
+      buffer,
+    ),
+  );
+  return { url: result.secure_url ?? "", publicId: result.public_id };
 }
 
 /**
@@ -415,30 +392,20 @@ export async function uploadGeneratedImage(
   uid: string,
   generationId: string,
 ): Promise<{ publicId: string; bytes: number }> {
-  try {
-    const result = await withCloudinaryCandidates(() =>
-      uploadStreamWithRetry(
-        {
-          public_id: generationId,
-          folder: `xyro/generated/${uid}`,
-          type: "authenticated",
-          resource_type: "image",
-          format: "png",
-          overwrite: false,
-        },
-        buffer,
-      ),
-    );
-    return { publicId: result.public_id, bytes: result.bytes };
-  } catch (error) {
-    const fallback = await saveFallbackBlob(buffer, {
-      contentType: "image/png",
-      uid,
-      kind: "generated",
-    }).catch(() => null);
-    if (!fallback) throw error;
-    return fallback;
-  }
+  const result = await withCloudinaryCandidates(() =>
+    uploadStreamWithRetry(
+      {
+        public_id: generationId,
+        folder: `xyro/generated/${uid}`,
+        type: "authenticated",
+        resource_type: "image",
+        format: "png",
+        overwrite: false,
+      },
+      buffer,
+    ),
+  );
+  return { publicId: result.public_id, bytes: result.bytes };
 }
 
 /**
@@ -455,36 +422,24 @@ export async function uploadUserFile(
     publicId: string;
     resourceType: CloudinaryResourceType;
     format: string;
-    /** The file owner's uid and real mime type — used only by
-     * the fallback store (ownership + serving content type). */
-    uid?: string;
-    mimeType?: string;
   },
 ): Promise<{ publicId: string; bytes: number }> {
-  try {
-    const result = await withCloudinaryCandidates(() =>
-      uploadStreamWithRetry(
-        {
-          public_id: options.publicId,
-          type: "authenticated",
-          resource_type: options.resourceType,
-          format: options.resourceType === "image" ? undefined : options.format,
-          overwrite: false,
-        },
-        buffer,
-      ),
-    );
-    return { publicId: result.public_id, bytes: result.bytes };
-  } catch (error) {
-    if (!options.uid) throw error;
-    const fallback = await saveFallbackBlob(buffer, {
-      contentType: options.mimeType ?? "application/octet-stream",
-      uid: options.uid,
-      kind: "file",
-    }).catch(() => null);
-    if (!fallback) throw error;
-    return fallback;
-  }
+  // Cloudinary-only uploads (owner instruction, 2026-11-17):
+  // the credential candidates are tried in order, and a failure
+  // surfaces to the caller instead of rerouting storage.
+  const result = await withCloudinaryCandidates(() =>
+    uploadStreamWithRetry(
+      {
+        public_id: options.publicId,
+        type: "authenticated",
+        resource_type: options.resourceType,
+        format: options.resourceType === "image" ? undefined : options.format,
+        overwrite: false,
+      },
+      buffer,
+    ),
+  );
+  return { publicId: result.public_id, bytes: result.bytes };
 }
 
 export async function deleteCloudinaryResource(
