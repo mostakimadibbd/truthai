@@ -191,7 +191,19 @@ type TrashEntry = {
 
 type RangeKey = "today" | "24h" | "48h" | "7d" | "lifetime";
 
-type Tab = "overview" | "users" | "owner" | "logs" | "safety" | "activity" | "system";
+type Tab = "overview" | "users" | "owner" | "logs" | "safety" | "media" | "activity" | "system";
+
+type MediaEntry = {
+  publicId: string;
+  resourceType: string;
+  deliveryType: string;
+  format?: string | null;
+  bytes?: number | null;
+  createdAt?: string | null;
+  ownerUid?: string | null;
+  ownerEmail?: string | null;
+  previewUrl?: string | null;
+};
 
 type FlagEntry = {
   id: string;
@@ -419,6 +431,7 @@ const ICONS = {
   system: "M4 17l6-6-6-6M12 19h8",
   owner: "M12 2l7 3v5c0 5-3.5 9.3-7 11-3.5-1.7-7-6-7-11V5l7-3zM9 12l2 2 4-4",
   flag: "M4 21V4c4-2 8 2 12 0v9c-4 2-8-2-12 0",
+  image: "M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5Z M8.5 7a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z M21 15l-5-5L5 21",
   refresh: "M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6",
   out: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
 };
@@ -462,6 +475,12 @@ export default function ConsolePage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [flags, setFlags] = useState<FlagEntry[]>([]);
   const [flagsPending, setFlagsPending] = useState(0);
+  const [media, setMedia] = useState<MediaEntry[]>([]);
+  const [mediaError, setMediaError] = useState("");
+  const [mediaConfigured, setMediaConfigured] = useState(true);
+  const [mediaSearch, setMediaSearch] = useState("");
+  const [mediaConfirmDelete, setMediaConfirmDelete] = useState("");
+  const [mediaBusy, setMediaBusy] = useState("");
   const [reviewingId, setReviewingId] = useState("");
   const [openChatId, setOpenChatId] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessageRow[]>([]);
@@ -658,6 +677,90 @@ export default function ConsolePage() {
     }
   }, [user]);
 
+  const loadMedia = useCallback(async () => {
+    if (!user) return;
+    try {
+      const res = await panelApi(user, "/api/media");
+      if (res.ok) {
+        const data = (await res.json()) as {
+          configured: boolean;
+          resources: MediaEntry[];
+          error?: string;
+        };
+        setMediaConfigured(data.configured);
+        setMedia(data.resources ?? []);
+        setMediaError(data.error ?? "");
+      }
+    } catch {
+      /* best-effort */
+    }
+  }, [user]);
+
+  const deleteMedia = async (entry: MediaEntry) => {
+    if (!user) return;
+    setMediaBusy(entry.publicId);
+    try {
+      const res = await panelApi(user, "/api/media", {
+        method: "POST",
+        body: {
+          publicId: entry.publicId,
+          resourceType: entry.resourceType,
+          deliveryType: entry.deliveryType,
+        },
+      });
+      if (res.ok) {
+        setMedia((current) => current.filter((item) => item.publicId !== entry.publicId));
+        setMediaConfirmDelete("");
+      }
+    } finally {
+      setMediaBusy("");
+    }
+  };
+
+  const downloadMedia = async (entry: MediaEntry) => {
+    if (!user) return;
+    const params = new URLSearchParams({
+      publicId: entry.publicId,
+      resourceType: entry.resourceType,
+      type: entry.deliveryType,
+    });
+    if (entry.format) params.set("format", entry.format);
+    const res = await panelApi(user, `/api/media/download?${params.toString()}`);
+    if (!res.ok) return;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = entry.publicId.split("/").pop() ?? "download";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const uploadMedia = async (file: File) => {
+    if (!user) return;
+    setMediaBusy("upload");
+    try {
+      const token = await user.getIdToken();
+      const form = new FormData();
+      form.append("file", file, file.name);
+      form.append("resourceType", file.type.startsWith("image/") ? "image" : "raw");
+      const res = await fetch("/api/media/upload", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+        cache: "no-store",
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { resource?: MediaEntry };
+        if (data.resource) {
+          setMedia((current) => [data.resource as MediaEntry, ...current]);
+        }
+      }
+    } finally {
+      setMediaBusy("");
+    }
+  };
+
   const reviewFlag = useCallback(
     async (flagId: string, status: "dismissed" | "actioned") => {
       if (!user) return;
@@ -766,7 +869,8 @@ export default function ConsolePage() {
     if (tab === "system" || tab === "users") void loadStorageTrash();
     if (tab === "logs") void loadLogs();
     if (tab === "safety") void loadFlags();
-  }, [tab, state, loadStorageTrash, loadLogs, loadFlags]);
+    if (tab === "media") void loadMedia();
+  }, [tab, state, loadStorageTrash, loadLogs, loadFlags, loadMedia]);
 
   const openDetail = useCallback(
     async (uid: string) => {
@@ -1018,6 +1122,7 @@ export default function ConsolePage() {
     { id: "users", label: "Users & access", icon: ICONS.users },
     { id: "logs", label: "Logs", icon: ICONS.logs },
     { id: "safety", label: "Safety flags", icon: ICONS.flag },
+    { id: "media", label: "Media", icon: ICONS.image },
     { id: "activity", label: "Activity", icon: ICONS.activity },
     { id: "system", label: "System", icon: ICONS.system },
   ];
@@ -1585,6 +1690,122 @@ export default function ConsolePage() {
                   </div>
                 </div>
               ))}
+            </div>
+          </section>
+        )}
+
+        {tab === "media" && (
+          <section className="card">
+            <div className="card-head">
+              <h2>Media library</h2>
+              <div className="flag-actions">
+                <label className="btn btn-primary media-upload-btn">
+                  {mediaBusy === "upload" ? "Uploading…" : "Upload file"}
+                  <input
+                    type="file"
+                    hidden
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = "";
+                      if (file) void uploadMedia(file);
+                    }}
+                  />
+                </label>
+                <button type="button" className="btn btn-ghost" onClick={() => void loadMedia()}>
+                  Refresh
+                </button>
+              </div>
+            </div>
+            <p className="muted small">
+              Every file in Cloudinary — generated images, avatars and user uploads.
+              Downloads and deletions are written to the audit log. Deleting a file
+              here removes the Cloudinary asset; the user’s chat keeps a reference
+              that will simply stop loading.
+            </p>
+            {!mediaConfigured && (
+              <p className="muted">
+                Media lights up when the backend can see your Cloudinary account —
+                add <code>CLOUDINARY_URL</code> (or the cloud name / key / secret
+                variables) to the <strong>backend</strong> project and redeploy it.
+              </p>
+            )}
+            {mediaError && <div className="alert" role="alert">{mediaError}</div>}
+            <input
+              className="input media-search"
+              type="search"
+              placeholder="Search by file name or owner email…"
+              value={mediaSearch}
+              onChange={(event) => setMediaSearch(event.target.value)}
+            />
+            {mediaConfigured && media.length === 0 && !mediaError && (
+              <p className="muted small">No media files yet.</p>
+            )}
+            <div className="media-grid">
+              {media
+                .filter((entry) => {
+                  const query = mediaSearch.trim().toLowerCase();
+                  if (!query) return true;
+                  return (
+                    entry.publicId.toLowerCase().includes(query) ||
+                    (entry.ownerEmail ?? "").toLowerCase().includes(query)
+                  );
+                })
+                .map((entry) => (
+                  <div key={`${entry.resourceType}/${entry.deliveryType}/${entry.publicId}`} className="media-card">
+                    {entry.previewUrl && entry.resourceType === "image" ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img className="media-thumb" src={entry.previewUrl} alt="" loading="lazy" />
+                    ) : (
+                      <div className="media-thumb media-tile">
+                        <span>{(entry.format ?? entry.resourceType).toUpperCase()}</span>
+                      </div>
+                    )}
+                    <div className="media-meta">
+                      <strong title={entry.publicId}>{entry.publicId.split("/").pop()}</strong>
+                      <span className="muted small">
+                        {entry.resourceType} · {entry.deliveryType} · {bytes(entry.bytes)}
+                      </span>
+                      <span className="muted small">
+                        {entry.createdAt ? new Date(entry.createdAt).toLocaleString("en-GB") : ""}
+                      </span>
+                      {entry.ownerUid ? (
+                        <button
+                          type="button"
+                          className="media-owner"
+                          onClick={() => void openDetail(entry.ownerUid as string)}
+                        >
+                          {entry.ownerEmail ?? entry.ownerUid}
+                        </button>
+                      ) : (
+                        <span className="muted small">admin upload</span>
+                      )}
+                    </div>
+                    <div className="flag-actions">
+                      <button type="button" className="btn btn-ghost" onClick={() => void downloadMedia(entry)}>
+                        Download
+                      </button>
+                      {mediaConfirmDelete === entry.publicId ? (
+                        <>
+                          <button
+                            type="button"
+                            className="btn btn-danger"
+                            disabled={mediaBusy === entry.publicId}
+                            onClick={() => void deleteMedia(entry)}
+                          >
+                            Confirm delete
+                          </button>
+                          <button type="button" className="btn btn-ghost" onClick={() => setMediaConfirmDelete("")}>
+                            Keep
+                          </button>
+                        </>
+                      ) : (
+                        <button type="button" className="btn btn-ghost" onClick={() => setMediaConfirmDelete(entry.publicId)}>
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
             </div>
           </section>
         )}

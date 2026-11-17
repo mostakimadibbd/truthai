@@ -1519,6 +1519,86 @@ def test_admin_storage_fallback():
         ) = originals
 
 
+def test_admin_media_management():
+    import hashlib
+
+    import httpx as httpx_module
+
+    from app import admin
+    from app.config import settings
+
+    # Signing matches Cloudinary's documented scheme.
+    expected = hashlib.sha1(("folder=xyro/admin-uploads&timestamp=123" + "s3" + "cr3t").encode()).hexdigest()
+    assert admin._cloudinary_sign({"timestamp": 123, "folder": "xyro/admin-uploads"}, "s3cr3t") == expected
+    # Owner parsing for every asset shape the app writes.
+    assert admin._media_owner("xyro/avatars/UID123/a1") == "UID123"
+    assert admin._media_owner("xyro/generated/UID123/g1") == "UID123"
+    assert admin._media_owner("xyro_UID123_chat_asset") == "UID123"
+    assert admin._media_owner("xyro/admin-uploads/x") is None
+    assert admin._media_owner("random/thing") is None
+
+    originals = (
+        settings.cloudinary_url,
+        settings.cloudinary_cloud_name,
+        settings.cloudinary_api_key,
+        settings.cloudinary_api_secret,
+    )
+    settings.cloudinary_url = ""
+    settings.cloudinary_cloud_name = "cloud-x"
+    settings.cloudinary_api_key = "key-x"
+    settings.cloudinary_api_secret = "secret-x"
+    calls = []
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    real_get, real_request = httpx_module.get, httpx_module.request
+    original_auth = admin.firebase_auth
+    admin.firebase_auth = lambda: _FakeAuthModule([_FakeUserRecord("UID9", "nine@example.com")])
+    httpx_module.get = lambda url, **kw: (calls.append(url), _Resp({"resources": [
+        {"public_id": "xyro/avatars/UID9/pic", "resource_type": "image", "type": "upload",
+         "format": "png", "bytes": 100, "created_at": "2026-11-17T10:00:00Z",
+         "secure_url": "https://res.cloudinary.com/x/pic.png"},
+        {"public_id": "xyro/generated/UID9/g1", "resource_type": "image", "type": "authenticated",
+         "format": "png", "bytes": 200, "created_at": "2026-11-17T11:00:00Z",
+         "secure_url": "https://res.cloudinary.com/x/g1.png"},
+    ]}))[1]
+    httpx_module.request = lambda method, url, **kw: _Resp({"deleted": {"xyro/generated/UID9/g1": "deleted"}})
+    try:
+        result = admin.list_media()
+        assert result["configured"] is True
+        rows = {row["publicId"]: row for row in result["resources"]}
+        assert rows["xyro/avatars/UID9/pic"]["previewUrl"] is not None  # public delivery previews
+        assert rows["xyro/generated/UID9/g1"]["previewUrl"] is None  # private stays gated
+        assert rows["xyro/generated/UID9/g1"]["ownerUid"] == "UID9"
+        db = _AdminDb()
+        deleted = admin.delete_media(db, "admin-1", "owner", "xyro/generated/UID9/g1", "image", "authenticated")
+        assert deleted["deleted"] is True
+        audits = [data for (collection, _), data in db.store.items() if collection == "adminActions"]
+        assert any(entry.get("action") == "media_delete" for entry in audits)
+        try:
+            admin.delete_media(db, "admin-1", "owner", "x", "video", "authenticated")
+            raise AssertionError("invalid resource type accepted")
+        except admin.AdminAuthError as error:
+            assert error.code == "INVALID_MEDIA"
+    finally:
+        httpx_module.get, httpx_module.request = real_get, real_request
+        admin.firebase_auth = original_auth
+        (
+            settings.cloudinary_url,
+            settings.cloudinary_cloud_name,
+            settings.cloudinary_api_key,
+            settings.cloudinary_api_secret,
+        ) = originals
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):

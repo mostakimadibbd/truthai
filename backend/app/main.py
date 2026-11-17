@@ -380,6 +380,101 @@ async def admin_logs(request: Request):
         return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
 
 
+@app.get("/v1/admin/media")
+async def admin_media_list(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    try:
+        return {"success": True, **admin.list_media(request.query_params.get("prefix", ""))}
+    except Exception:
+        return _error(503, "MEDIA_UNAVAILABLE", "Media couldn’t be loaded.")
+
+
+@app.post("/v1/admin/media/delete")
+async def admin_media_delete(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    actor_uid, _actor_email, actor_role = gate
+    try:
+        body = await request.json()
+    except Exception:
+        return _error(400, "INVALID_JSON", "Send a JSON body.")
+    if not isinstance(body, dict) or not isinstance(body.get("publicId"), str):
+        return _error(400, "INVALID_BODY", "Send the media reference to delete.")
+    try:
+        result = admin.delete_media(
+            firestore_client(),
+            actor_uid,
+            actor_role,
+            body["publicId"],
+            body.get("resourceType") if isinstance(body.get("resourceType"), str) else "",
+            body.get("deliveryType") if isinstance(body.get("deliveryType"), str) else "",
+        )
+        return {"success": True, **result}
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+
+
+@app.post("/v1/admin/media/upload")
+async def admin_media_upload(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    actor_uid, _actor_email, actor_role = gate
+    try:
+        form = await request.form()
+        upload = form.get("file")
+        from starlette.datastructures import UploadFile
+
+        if not isinstance(upload, UploadFile):
+            return _error(400, "INVALID_BODY", "Attach a file to upload.")
+        data = await upload.read()
+        resource_type = form.get("resourceType")
+        result = admin.upload_media(
+            firestore_client(),
+            actor_uid,
+            actor_role,
+            upload.filename or "upload",
+            data,
+            resource_type if isinstance(resource_type, str) else "",
+        )
+        return {"success": True, "resource": result}
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+
+
+@app.get("/v1/admin/media/download")
+async def admin_media_download(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    params = request.query_params
+    public_id = params.get("publicId", "")
+    resource_type = params.get("resourceType", "")
+    delivery_type = params.get("type", "authenticated")
+    format_ = params.get("format", "") if resource_type == "image" else ""
+    if not public_id or resource_type not in ("image", "raw"):
+        return _error(400, "INVALID_MEDIA", "That media reference isn’t valid.")
+    try:
+        content, content_type = admin.download_media(
+            public_id, resource_type, format_, delivery_type
+        )
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+    from fastapi.responses import Response
+
+    filename = public_id.rsplit("/", 1)[-1]
+    if format_ and not filename.endswith(f".{format_}"):
+        filename = f"{filename}.{format_}"
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/v1/admin/storage")
 async def admin_storage(request: Request):
     gate = await _admin_gate(request)

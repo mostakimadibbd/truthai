@@ -701,6 +701,216 @@ def get_storage(db=None) -> dict:
     }
 
 
+def _cloudinary_sign(params: dict, api_secret: str) -> str:
+    """Cloudinary's api_sign_request: SHA-1 of the sorted
+    key=value pairs joined with &, with the secret appended."""
+    parts = []
+    for key in sorted(params):
+        value = params[key]
+        if value is None or value == "" or key in ("file", "api_key", "signature", "resource_type", "cloud_name"):
+            continue
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        parts.append(f"{key}={value}")
+    return hashlib.sha1(("&".join(parts) + api_secret).encode("utf-8")).hexdigest()
+
+
+def _media_owner(public_id: str) -> str | None:
+    """Every app asset names its owner: xyro/avatars/{uid}/…,
+    xyro/generated/{uid}/…, or xyro_{uid}_{chatId}_{assetId}."""
+    parts = public_id.split("/")
+    if len(parts) >= 3 and parts[0] == "xyro" and parts[1] in ("avatars", "generated"):
+        return parts[2]
+    if public_id.startswith("xyro_"):
+        segments = public_id.split("_")
+        if len(segments) >= 2 and segments[1]:
+            return segments[1]
+    return None
+
+
+def list_media(prefix: str = "") -> dict:
+    """Cloudinary asset inventory for the panel's Media tab:
+    generated images, avatars and user files across delivery
+    types, newest first, with owner uids/emails resolved.
+    Previews are only exposed for public-delivery assets;
+    private assets are downloaded through the gated proxy."""
+    credentials = settings.cloudinary_credentials
+    if credentials is None:
+        return {"configured": False, "resources": []}
+    cloud_name, api_key, api_secret = credentials
+    resources: list[dict] = []
+    errors: list[str] = []
+    for resource_type, delivery_type in (
+        ("image", "authenticated"),
+        ("image", "upload"),
+        ("raw", "authenticated"),
+        ("raw", "upload"),
+    ):
+        try:
+            params: dict = {"max_results": 100}
+            if prefix:
+                params["prefix"] = prefix
+            response = httpx.get(
+                f"https://api.cloudinary.com/v1_1/{cloud_name}/resources/{resource_type}/{delivery_type}",
+                params=params,
+                auth=(api_key, api_secret),
+                timeout=20,
+            )
+            response.raise_for_status()
+            for item in response.json().get("resources", []):
+                public_id = item.get("public_id")
+                if not isinstance(public_id, str):
+                    continue
+                resources.append(
+                    {
+                        "publicId": public_id,
+                        "resourceType": item.get("resource_type") or resource_type,
+                        "deliveryType": item.get("type") or delivery_type,
+                        "format": item.get("format"),
+                        "bytes": item.get("bytes") if isinstance(item.get("bytes"), (int, float)) else None,
+                        "createdAt": item.get("created_at"),
+                        "ownerUid": _media_owner(public_id),
+                        "previewUrl": item.get("secure_url")
+                        if (item.get("type") or delivery_type) == "upload"
+                        else None,
+                    }
+                )
+        except Exception as error:  # noqa: BLE001 - partial inventory beats none
+            errors.append(f"{resource_type}/{delivery_type}: {type(error).__name__}")
+    resources.sort(key=lambda row: row.get("createdAt") or "", reverse=True)
+    emails = _resolve_emails(list({row["ownerUid"] for row in resources if row["ownerUid"]}))
+    for row in resources:
+        row["ownerEmail"] = emails.get(row["ownerUid"]) if row["ownerUid"] else None
+    result: dict = {"configured": True, "resources": resources[:200]}
+    if errors and not resources:
+        result["error"] = (
+            "Cloudinary rejected the media listing (" + "; ".join(errors) + ")."
+        )
+    elif errors:
+        result["error"] = "Some media couldn’t be listed (" + "; ".join(errors) + ")."
+    return result
+
+
+def _audit_media(db, actor_uid: str, actor_role: str, action: str, public_id: str, owner_uid) -> None:
+    try:
+        db.collection("adminActions").add(
+            {
+                "action": action,
+                "actorUid": actor_uid,
+                "actorRole": actor_role,
+                "targetUid": owner_uid,
+                "publicId": public_id,
+                "ts": int(time.time() * 1000),
+            }
+        )
+    except Exception:
+        pass
+
+
+def delete_media(db, actor_uid: str, actor_role: str, public_id: str, resource_type: str, delivery_type: str) -> dict:
+    """Delete one Cloudinary asset (audited)."""
+    credentials = settings.cloudinary_credentials
+    if credentials is None:
+        raise AdminAuthError(503, "MEDIA_NOT_CONFIGURED", "Cloudinary isn’t configured on the backend.")
+    if resource_type not in ("image", "raw") or delivery_type not in ("authenticated", "upload"):
+        raise AdminAuthError(400, "INVALID_MEDIA", "That media reference isn’t valid.")
+    cloud_name, api_key, api_secret = credentials
+    try:
+        response = httpx.request(
+            "DELETE",
+            f"https://api.cloudinary.com/v1_1/{cloud_name}/resources/{resource_type}/{delivery_type}",
+            params=[("public_ids[]", public_id)],
+            auth=(api_key, api_secret),
+            timeout=20,
+        )
+        response.raise_for_status()
+        deleted = (response.json().get("deleted") or {}).get(public_id)
+    except AdminAuthError:
+        raise
+    except Exception as error:  # noqa: BLE001
+        raise AdminAuthError(502, "MEDIA_DELETE_FAILED", f"Cloudinary couldn’t delete that file ({type(error).__name__}).") from error
+    if deleted != "deleted":
+        raise AdminAuthError(404, "MEDIA_NOT_FOUND", "That file is no longer in Cloudinary.")
+    _audit_media(db, actor_uid, actor_role, "media_delete", public_id, _media_owner(public_id))
+    return {"deleted": True, "publicId": public_id}
+
+
+def upload_media(db, actor_uid: str, actor_role: str, filename: str, data: bytes, resource_type: str) -> dict:
+    """Admin upload into xyro/admin-uploads (signed, audited)."""
+    credentials = settings.cloudinary_credentials
+    if credentials is None:
+        raise AdminAuthError(503, "MEDIA_NOT_CONFIGURED", "Cloudinary isn’t configured on the backend.")
+    if resource_type not in ("image", "raw"):
+        raise AdminAuthError(400, "INVALID_MEDIA", "Choose an image or a raw file upload.")
+    if len(data) > 10 * 1024 * 1024:
+        raise AdminAuthError(413, "FILE_TOO_LARGE", "Admin uploads are capped at 10 MB.")
+    cloud_name, api_key, api_secret = credentials
+    timestamp = int(time.time())
+    sign_params = {"folder": "xyro/admin-uploads", "timestamp": timestamp}
+    form = {
+        "api_key": api_key,
+        "timestamp": str(timestamp),
+        "folder": "xyro/admin-uploads",
+        "signature": _cloudinary_sign(sign_params, api_secret),
+    }
+    try:
+        response = httpx.post(
+            f"https://api.cloudinary.com/v1_1/{cloud_name}/{resource_type}/upload",
+            data=form,
+            files={"file": (filename or "upload", data)},
+            timeout=30,
+        )
+        response.raise_for_status()
+        item = response.json()
+    except Exception as error:  # noqa: BLE001
+        raise AdminAuthError(502, "MEDIA_UPLOAD_FAILED", f"Cloudinary couldn’t take that upload ({type(error).__name__}).") from error
+    public_id = item.get("public_id")
+    _audit_media(db, actor_uid, actor_role, "media_upload", str(public_id), None)
+    return {
+        "publicId": public_id,
+        "resourceType": item.get("resource_type") or resource_type,
+        "deliveryType": item.get("type") or "upload",
+        "format": item.get("format"),
+        "bytes": item.get("bytes"),
+        "createdAt": item.get("created_at"),
+        "ownerUid": None,
+        "ownerEmail": None,
+        "previewUrl": item.get("secure_url"),
+    }
+
+
+def download_media(public_id: str, resource_type: str, format_: str, delivery_type: str) -> tuple[bytes, str]:
+    """Fetch an asset's bytes through Cloudinary's signed
+    download endpoint (works for authenticated assets too)."""
+    credentials = settings.cloudinary_credentials
+    if credentials is None:
+        raise AdminAuthError(503, "MEDIA_NOT_CONFIGURED", "Cloudinary isn’t configured on the backend.")
+    cloud_name, api_key, api_secret = credentials
+    timestamp = int(time.time())
+    sign_params = {
+        "public_id": public_id,
+        "format": format_,
+        "type": delivery_type,
+        "timestamp": timestamp,
+    }
+    query = {
+        **sign_params,
+        "api_key": api_key,
+        "signature": _cloudinary_sign(sign_params, api_secret),
+    }
+    try:
+        response = httpx.get(
+            f"https://api.cloudinary.com/v1_1/{cloud_name}/{resource_type}/download",
+            params=query,
+            timeout=30,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+    except Exception as error:  # noqa: BLE001
+        raise AdminAuthError(502, "MEDIA_DOWNLOAD_FAILED", f"Cloudinary couldn’t deliver that file ({type(error).__name__}).") from error
+    return response.content, response.headers.get("content-type", "application/octet-stream")
+
+
 def _live_streams() -> dict:
     """What's happening right now in the Realtime Database:
     how many chat stream nodes exist and how many are actively
