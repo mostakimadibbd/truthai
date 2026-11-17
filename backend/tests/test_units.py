@@ -842,6 +842,23 @@ def test_vision_targets_only_include_vision_models():
         os.environ.update(saved)
 
 
+def test_refusal_detection_and_providers_first():
+    assert chatjob.openrouter.looks_like_refusal("I can't browse the internet, sorry.")
+    assert chatjob.openrouter.looks_like_refusal("As an AI language model, I don't have real-time access.")
+    assert not chatjob.openrouter.looks_like_refusal("Here is the answer you asked for.")
+    assert not chatjob.openrouter.looks_like_refusal("I can't recommend one brand, but here are options.")
+    saved = dict(os.environ)
+    try:
+        os.environ["GROQ_API_KEY"] = "g"
+        targets = chatjob.openrouter.build_targets(["openrouter/free"], providers_first=True)
+        assert targets[0]["provider"] == "groq"
+        normal = chatjob.openrouter.build_targets(["openrouter/free"])
+        assert normal[0]["provider"] == "openrouter"
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):

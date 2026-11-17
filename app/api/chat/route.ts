@@ -37,7 +37,9 @@ import {
 } from "@/lib/server/upload-policy";
 import {
   OpenRouterAttemptsExhausted,
+  crossProviderTargets,
   fetchChatCompletionWithFallback,
+  looksLikeRefusal,
 } from "@/lib/server/openrouter";
 import {
   extractMemories,
@@ -817,6 +819,11 @@ export async function POST(request: NextRequest) {
       usage: { promptTokens: number; completionTokens: number } | null;
       model: string | null;
     } = { usage: null, model: null };
+    // Refusal gate state: reply text is held from publication until
+    // its opening has been judged (see handleLine). While held, the
+    // stream node shows an empty generating state.
+    let holdPublishing = true;
+    let refusalRetried = false;
     async function publishLive(force: boolean) {
       const currentTime = Date.now();
       if (!force && currentTime - lastPublishedAt < LIVE_UPDATE_INTERVAL_MS) return;
@@ -825,7 +832,7 @@ export async function POST(request: NextRequest) {
         responseId,
         messageId: assistantMessageId,
         status: "generating",
-        text: liveVisibleText(responseText),
+        text: holdPublishing ? "" : liveVisibleText(responseText),
         phase: streamPhase,
         seq: streamSeq,
         updatedAt: currentTime,
@@ -855,7 +862,10 @@ export async function POST(request: NextRequest) {
     const attempts = webContextInjected
       ? webModelAttemptOrder(effectiveModel)
       : modelAttemptOrder(effectiveModel);
-    const acquireUpstream = async (messages: typeof prepared.messages) => {
+    const acquireUpstream = async (
+      messages: typeof prepared.messages,
+      providersFirst = false,
+    ) => {
       const result = await fetchChatCompletionWithFallback({
         apiKey,
         attempts,
@@ -867,6 +877,7 @@ export async function POST(request: NextRequest) {
         title: "Xyro AI",
         connectTimeoutMs: 25_000,
         includeUsage: true,
+        providersFirst,
       });
       return result.response;
     };
@@ -973,7 +984,10 @@ export async function POST(request: NextRequest) {
       throw new ChatRouteError(502, "MODEL_UNAVAILABLE", "The free model service is temporarily unavailable.");
     }
 
-    const reader = upstream.body.getReader();
+    // Thrown by handleLine when the refusal gate fires; caught by
+    // the stream consumer below to swap in a provider-first retry.
+    class RefusalRetrySignal extends Error {}
+    let reader = upstream.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     async function handleLine(line: string) {
@@ -986,6 +1000,23 @@ export async function POST(request: NextRequest) {
       if (delta.model) streamMeta.model = delta.model;
       if (delta.text) {
         responseText += delta.text;
+        if (!holdPublishing) await publishLive(false);
+      }
+      // Refusal gate: the reply's opening is held back (never
+      // published) until it can be judged. An access-denial refusal
+      // is discarded and the turn is re-asked provider-first (Groq /
+      // Gemini ahead of OpenRouter) — the user only ever sees the
+      // replacement answer. With no provider key configured there
+      // is nothing better to retry with, so the reply stands.
+      if (holdPublishing && (responseText.length >= 160 || streamDone)) {
+        holdPublishing = false;
+        if (
+          !refusalRetried &&
+          looksLikeRefusal(responseText) &&
+          crossProviderTargets(serverEnv.providerEnv()).length > 0
+        ) {
+          throw new RefusalRetrySignal();
+        }
         await publishLive(false);
       }
     }
@@ -1014,26 +1045,60 @@ export async function POST(request: NextRequest) {
         if (timer) clearTimeout(timer);
       }
     }
-    while (true) {
-      let chunk: Awaited<ReturnType<typeof reader.read>>;
-      try {
-        chunk = await readWithIdleTimeout();
-      } catch (error) {
-        if (error instanceof Error && error.message === "STREAM_IDLE_TIMEOUT") {
-          idleTimedOut = true;
-          await reader.cancel().catch(() => undefined);
-          break;
+    async function consumeStream() {
+      for (;;) {
+        let chunk: Awaited<ReturnType<typeof reader.read>>;
+        try {
+          chunk = await readWithIdleTimeout();
+        } catch (error) {
+          if (error instanceof Error && error.message === "STREAM_IDLE_TIMEOUT") {
+            idleTimedOut = true;
+            await reader.cancel().catch(() => undefined);
+            break;
+          }
+          throw error;
         }
-        throw error;
+        const { done, value } = chunk;
+        buffer += decoder.decode(value, { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) await handleLine(line.trimEnd());
+        if (done) break;
       }
-      const { done, value } = chunk;
-      buffer += decoder.decode(value, { stream: !done });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) await handleLine(line.trimEnd());
-      if (done) break;
+      if (buffer) await handleLine(buffer.trimEnd());
     }
-    if (buffer) await handleLine(buffer.trimEnd());
+    try {
+      await consumeStream();
+    } catch (error) {
+      if (!(error instanceof RefusalRetrySignal)) throw error;
+      // The first model's reply was an access-denial refusal and
+      // none of it was ever published. Discard it and re-ask the
+      // turn provider-first (Groq / Gemini ahead of OpenRouter).
+      refusalRetried = true;
+      await reader.cancel().catch(() => undefined);
+      responseText = "";
+      buffer = "";
+      streamDone = false;
+      streamMeta.usage = null;
+      streamMeta.model = null;
+      holdPublishing = true;
+      let retryUpstream: Response | null = null;
+      try {
+        retryUpstream = await acquireUpstream(prepared.messages, true);
+      } catch {
+        retryUpstream = null;
+      }
+      if (!retryUpstream || !retryUpstream.ok || !retryUpstream.body) {
+        throw new ChatRouteError(
+          502,
+          "MODEL_UNAVAILABLE",
+          "The free model service is temporarily unavailable.",
+        );
+      }
+      reader = retryUpstream.body.getReader();
+      await consumeStream();
+    }
+    holdPublishing = false;
     if (request.signal.aborted) {
       throw new ChatRouteError(499, "RESPONSE_STOPPED", "Response stopped.");
     }

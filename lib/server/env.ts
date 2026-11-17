@@ -126,6 +126,23 @@ export const serverEnv = {
     return read("VERCEL_PROJECT_PRODUCTION_URL");
   },
 
+  // Image generation sources (all optional, env-gated).
+  get geminiApiKey() {
+    return read("GEMINI_API_KEY") ?? read("GOOGLE_AI_API_KEY");
+  },
+  get cloudflareAccountId() {
+    return read("CLOUDFLARE_ACCOUNT_ID");
+  },
+  get cloudflareApiToken() {
+    return read("CLOUDFLARE_API_TOKEN");
+  },
+  get pollinationsToken() {
+    return read("POLLINATIONS_TOKEN");
+  },
+  get aiHordeApiKey() {
+    return read("AIHORDE_API_KEY");
+  },
+
   // Python backend delegation.
   get backendUrl() {
     return read("BACKEND_URL")?.replace(/\/+$/, "");

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from typing import Awaitable, Callable
 
@@ -114,7 +115,7 @@ def cross_provider_targets(vision_only: bool = False) -> list[dict]:
     return targets
 
 
-def build_targets(openrouter_attempts: list[str], vision_only: bool = False) -> list[dict]:
+def build_targets(openrouter_attempts: list[str], vision_only: bool = False, providers_first: bool = False) -> list[dict]:
     targets = [
         {
             "provider": "openrouter",
@@ -125,7 +126,8 @@ def build_targets(openrouter_attempts: list[str], vision_only: bool = False) -> 
         }
         for model in openrouter_attempts
     ]
-    return targets + cross_provider_targets(vision_only)
+    cross = cross_provider_targets(vision_only)
+    return cross + targets if providers_first else targets + cross
 
 _shared: httpx.AsyncClient | None = None
 
@@ -146,12 +148,33 @@ def _shared_client() -> httpx.AsyncClient:
     return _shared
 
 
+_REFUSAL_PATTERNS = [
+    r"\bi (?:can'?t|cannot|can not) browse\b",
+    r"\bi (?:can'?t|cannot|can not) access the (?:internet|web)\b",
+    r"\bi (?:don'?t|do not) have (?:access to )?(?:the )?(?:internet|web|real[- ]?time|browsing)\b",
+    r"\bi (?:don'?t|do not) have browsing\b",
+    r"\bi'?m unable to (?:browse|access)\b",
+    r"\bi am unable to (?:browse|access)\b",
+    r"\bas an ai language model\b",
+    r"\bno (?:internet|browsing) access\b",
+]
+
+
+def looks_like_refusal(text: str) -> bool:
+    """True when a reply opens with an access-denial refusal (the
+    weak free-model habit of claiming it cannot browse/reach the
+    internet). Parity with the TS chain's looksLikeRefusal."""
+    head = text[:400].lower()
+    return any(re.search(pattern, head) for pattern in _REFUSAL_PATTERNS)
+
+
 async def stream_completion(
     attempts: list[str],
     messages: list[dict],
     on_text: Callable[[str], Awaitable[None]],
     max_tokens: int = 4096,
     connect_timeout: float = 25.0,
+    providers_first: bool = False,
 ) -> dict:
     """Stream a completion, calling on_text with the full text so
     far whenever it grows. Returns {model, text, usage} where usage
@@ -168,7 +191,7 @@ async def stream_completion(
         for message in messages
         if isinstance(message, dict)
     )
-    targets = build_targets(attempts, vision_only=has_images)
+    targets = build_targets(attempts, vision_only=has_images, providers_first=providers_first)
     last_status = 0
     last_body = ""
     last_retry_after: str | None = None

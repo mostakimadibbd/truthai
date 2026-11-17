@@ -220,6 +220,22 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
             on_text,
             max_tokens=4096,
         )
+        # Refusal gate (parity with the TS chat route): an
+        # access-denial refusal is an HTTP 200 the fallback chain
+        # cannot correct. When cross-provider keys exist, discard
+        # the refusal and re-ask provider-first (Groq / Gemini
+        # ahead of OpenRouter); the published text resets first,
+        # so the user only sees the replacement answer settle.
+        if openrouter.looks_like_refusal(result["text"]) and openrouter.cross_provider_targets():
+            stream_state["text"] = ""
+            await publish(force=True)
+            result = await openrouter.stream_completion(
+                model_lib.model_attempt_order(effective_model),
+                model_messages,
+                on_text,
+                max_tokens=4096,
+                providers_first=True,
+            )
     except openrouter.AttemptsExhausted as error:
         await _fail_turn(
             db, assistant_ref, stream_ref, uid, chat_id,

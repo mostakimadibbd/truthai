@@ -77,6 +77,12 @@ export type ChatCompletionArgs = {
   connectTimeoutMs?: number;
   /** Ask OpenRouter to include token usage in the stream's final chunk. */
   includeUsage?: boolean;
+  /** Walk cross-provider targets (Groq, Gemini, …) BEFORE the
+   * OpenRouter attempts. Used by the refusal retry: when a model
+   * answers with an access-denial refusal (an HTTP 200 the chain
+   * cannot correct), the turn is re-asked provider-first so a
+   * different provider's model answers instead. */
+  providersFirst?: boolean;
 };
 
 /**
@@ -204,6 +210,7 @@ export function buildAttemptTargets(
   openRouterApiKey: string,
   env: Record<string, string | undefined> = serverEnv.providerEnv(),
   visionOnly = false,
+  providersFirst = false,
 ): AttemptTarget[] {
   const targets: AttemptTarget[] = openRouterAttempts.map((model) => ({
     provider: "openrouter",
@@ -212,7 +219,34 @@ export function buildAttemptTargets(
     url: "https://openrouter.ai/api/v1/chat/completions",
     apiKey: openRouterApiKey,
   }));
-  return [...targets, ...crossProviderTargets(env, visionOnly)];
+  const cross = crossProviderTargets(env, visionOnly);
+  return providersFirst ? [...cross, ...targets] : [...targets, ...cross];
+}
+
+const REFUSAL_PATTERNS: RegExp[] = [
+  /\bi (?:can'?t|cannot|can not) browse\b/,
+  /\bi (?:can'?t|cannot|can not) access the (?:internet|web)\b/,
+  /\bi (?:don'?t|do not) have (?:access to )?(?:the )?(?:internet|web|real[- ]?time|browsing)\b/,
+  /\bi (?:don'?t|do not) have browsing\b/,
+  /\bi'?m unable to (?:browse|access)\b/,
+  /\bi am unable to (?:browse|access)\b/,
+  /\bas an ai language model\b/,
+  /\bno (?:internet|browsing) access\b/,
+];
+
+/**
+ * True when a reply opens with an access-denial refusal — the weak
+ * free-model habit of claiming it cannot browse or reach the
+ * internet (often while search results sit in its context). Only
+ * the head of the reply is judged, and only this specific refusal
+ * class: a different provider's model usually just answers, so the
+ * chat route retries provider-first when this fires. Genuine
+ * answers and policy refusals (which every provider would repeat)
+ * are deliberately not matched.
+ */
+export function looksLikeRefusal(text: string): boolean {
+  const head = text.slice(0, 400).toLowerCase();
+  return REFUSAL_PATTERNS.some((pattern) => pattern.test(head));
 }
 
 /** True when any message carries an image content part. */
@@ -241,6 +275,7 @@ export async function fetchChatCompletionWithFallback(
     args.apiKey,
     serverEnv.providerEnv(),
     messagesHaveImages(args.messages),
+    args.providersFirst ?? false,
   );
   const connectTimeoutMs = args.connectTimeoutMs ?? 25_000;
   let lastStatus: number | null = null;

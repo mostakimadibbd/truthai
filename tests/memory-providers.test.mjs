@@ -88,3 +88,20 @@ test("vision turns only target models that can see images", async () => {
   assert.equal(messagesHaveImages([{ role: "user", content: "hi" }]), false);
   assert.equal(messagesHaveImages([{ role: "user", content: [{ type: "text", text: "look" }, { type: "image_url", image_url: { url: "https://x/y.jpg" } }] }]), true);
 });
+
+test("looksLikeRefusal catches access-denial openers only", async () => {
+  const { looksLikeRefusal } = await import("../lib/server/openrouter.ts");
+  assert.equal(looksLikeRefusal("I can't browse the web, but here's what I know."), true);
+  assert.equal(looksLikeRefusal("As an AI language model, I don't have access to real-time data."), true);
+  assert.equal(looksLikeRefusal("Here is a summary of the article you shared."), false);
+  assert.equal(looksLikeRefusal("I can't recommend a specific brand, but these three are popular."), false);
+});
+
+test("buildAttemptTargets providersFirst puts Groq ahead of OpenRouter", async () => {
+  const { buildAttemptTargets: bat } = await import("../lib/server/openrouter.ts");
+  const targets = bat(["openrouter/free"], "or_key", { GROQ_API_KEY: "g" }, false, true);
+  assert.equal(targets[0].provider, "groq");
+  assert.ok(targets.some((t) => t.provider === "openrouter"));
+  const normal = bat(["openrouter/free"], "or_key", { GROQ_API_KEY: "g" });
+  assert.equal(normal[0].provider, "openrouter");
+});

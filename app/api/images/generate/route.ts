@@ -18,14 +18,18 @@ import { buildWatermarkPayload, embedWatermark } from "@/lib/server/watermark";
 //
 // POST { chatId, prompt, userMessageId, assistantMessageId } creates
 // one image in a chat:
-//  1. Image sources, in order — both free, no paid model is ever
-//     called: (a) the Pollinations free generation service FIRST
-//     (no key, no quota bookkeeping, answers immediately — the
-//     owner asked for instant switching to Pollinations); (b) a
-//     FREE image-generation model from the live OpenRouter
-//     catalogue (output modality "image") as backup, when one
-//     exists. If both sources fail the route answers 503 and the
-//     UI says so plainly — no result is faked.
+//  1. Image sources, in order — all free, no paid model is ever
+//     called: (a) Pollinations (instant, keyless; a free
+//     POLLINATIONS_TOKEN raises its limits); (b) Gemini image
+//     generation when GEMINI_API_KEY is set; (c) Cloudflare
+//     Workers AI (FLUX) when CLOUDFLARE_ACCOUNT_ID +
+//     CLOUDFLARE_API_TOKEN are set; (d) AI Horde (keyless,
+//     community GPUs, queued); (e) a FREE image model from the
+//     live OpenRouter catalogue when one exists. Watermarking is
+//     attempted per source, so a source whose bytes this runtime
+//     cannot decode falls through to the next. If every source
+//     fails the route answers 503 and the UI says so plainly —
+//     no result is faked.
 //  2. The returned image is downloaded server-side, passed through
 //     the invisible LSB watermark (lib/server/watermark.ts), and the
 //     WATERMARKED PNG is stored in Cloudinary as an authenticated
@@ -219,9 +223,11 @@ async function fetchPollinationsImage(prompt: string): Promise<Buffer> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const seed = Math.floor(Math.random() * 1_000_000) + 1;
+      const token = serverEnv.pollinationsToken;
       const url =
         `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
-        `?width=1024&height=1024&seed=${seed}&nologo=true`;
+        `?width=1024&height=1024&seed=${seed}&nologo=true` +
+        (token ? `&token=${encodeURIComponent(token)}` : "");
       const response = await fetch(url, {
         cache: "no-store",
         redirect: "follow",
@@ -263,6 +269,225 @@ async function fetchPollinationsImage(prompt: string): Promise<Buffer> {
     }
   }
   throw lastError ?? new Error("Pollinations failed.");
+}
+
+/**
+ * Gemini image generation (env-gated by GEMINI_API_KEY): the same
+ * free key that boosts chat and vision also unlocks Google's image
+ * model. Returns PNG bytes from the inlineData part.
+ */
+async function fetchGeminiImage(prompt: string, apiKey: string): Promise<Buffer> {
+  const response = await fetch(
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { responseModalities: ["IMAGE"] },
+      }),
+      signal: AbortSignal.timeout(90_000),
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`Gemini image generation answered ${response.status}.`);
+  }
+  const payload: unknown = await response.json().catch(() => null);
+  const parts =
+    (payload as { candidates?: { content?: { parts?: unknown[] } }[] } | null)
+      ?.candidates?.[0]?.content?.parts ?? [];
+  for (const part of parts) {
+    const data = (part as { inlineData?: { data?: unknown } })?.inlineData?.data;
+    if (typeof data === "string" && data) {
+      const bytes = Buffer.from(data, "base64");
+      if (bytes.byteLength === 0 || bytes.byteLength > MAX_IMAGE_BYTES) {
+        throw new Error("Gemini returned an unusable image.");
+      }
+      return bytes;
+    }
+  }
+  throw new Error("Gemini did not return an image.");
+}
+
+/**
+ * Cloudflare Workers AI image generation (env-gated): FLUX.1
+ * Schnell on Cloudflare's free tier (10k neurons/day). Answers
+ * with a base64 JPEG in JSON.
+ */
+async function fetchCloudflareImage(
+  prompt: string,
+  accountId: string,
+  apiToken: string,
+): Promise<Buffer> {
+  const response = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/run/@cf/black-forest-labs/flux-1-schnell`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ prompt, steps: 4 }),
+      signal: AbortSignal.timeout(90_000),
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`Cloudflare image generation answered ${response.status}.`);
+  }
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    const payload: unknown = await response.json().catch(() => null);
+    const data = (payload as { result?: { image?: unknown } } | null)?.result?.image;
+    if (typeof data === "string" && data) {
+      const bytes = Buffer.from(data, "base64");
+      if (bytes.byteLength === 0 || bytes.byteLength > MAX_IMAGE_BYTES) {
+        throw new Error("Cloudflare returned an unusable image.");
+      }
+      return bytes;
+    }
+    throw new Error("Cloudflare did not return an image.");
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_IMAGE_BYTES) {
+    throw new Error("Cloudflare returned an unusable image.");
+  }
+  return bytes;
+}
+
+/**
+ * AI Horde image generation: the community-powered free pool.
+ * Works anonymously (shared key, longer queue); a free personal
+ * key (AIHORDE_API_KEY) shortens the wait. Submit, poll, download.
+ */
+async function fetchHordeImage(prompt: string): Promise<Buffer> {
+  const clientAgent = "xyro-ai:1.0:truthai-six.vercel.app";
+  const submit = await fetch("https://aihorde.net/api/v2/generate/async", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: serverEnv.aiHordeApiKey ?? "0000000000",
+      "Client-Agent": clientAgent,
+    },
+    body: JSON.stringify({
+      prompt,
+      params: {
+        n: 1,
+        width: 1024,
+        height: 1024,
+        steps: 25,
+        sampler_name: "k_euler_a",
+      },
+      nsfw: false,
+      censor_nsfw: true,
+      slow_workers: true,
+    }),
+    signal: AbortSignal.timeout(30_000),
+    cache: "no-store",
+  });
+  if (!submit.ok) {
+    throw new Error(`AI Horde answered ${submit.status}.`);
+  }
+  const submitPayload: unknown = await submit.json().catch(() => null);
+  const id = (submitPayload as { id?: unknown } | null)?.id;
+  if (typeof id !== "string" || !id) {
+    throw new Error("AI Horde did not accept the request.");
+  }
+  const deadline = Date.now() + 150_000;
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+    const check = await fetch(
+      `https://aihorde.net/api/v2/generate/check/${encodeURIComponent(id)}`,
+      {
+        headers: { "Client-Agent": clientAgent },
+        signal: AbortSignal.timeout(20_000),
+        cache: "no-store",
+      },
+    );
+    if (!check.ok) {
+      throw new Error(`AI Horde check answered ${check.status}.`);
+    }
+    const checkPayload: unknown = await check.json().catch(() => null);
+    const state = checkPayload as { done?: unknown; faulted?: unknown } | null;
+    if (state?.faulted) {
+      throw new Error("AI Horde could not generate this image.");
+    }
+    if (state?.done) break;
+    if (Date.now() > deadline) {
+      throw new Error("AI Horde took too long.");
+    }
+  }
+  const status = await fetch(
+    `https://aihorde.net/api/v2/generate/status/${encodeURIComponent(id)}`,
+    {
+      headers: { "Client-Agent": clientAgent },
+      signal: AbortSignal.timeout(20_000),
+      cache: "no-store",
+    },
+  );
+  if (!status.ok) {
+    throw new Error(`AI Horde status answered ${status.status}.`);
+  }
+  const statusPayload: unknown = await status.json().catch(() => null);
+  const img = (
+    statusPayload as { generations?: { img?: unknown }[] } | null
+  )?.generations?.[0]?.img;
+  if (typeof img !== "string" || !img) {
+    throw new Error("AI Horde did not return an image.");
+  }
+  if (img.startsWith("https://")) {
+    return downloadImage(img);
+  }
+  const bytes = Buffer.from(img, "base64");
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_IMAGE_BYTES) {
+    throw new Error("AI Horde returned an unusable image.");
+  }
+  return bytes;
+}
+
+/** Free OpenRouter image models (last-resort source). */
+async function fetchOpenRouterImage(
+  prompt: string,
+  apiKey: string,
+  candidates: { id: string }[],
+  origin: string,
+): Promise<{ bytes: Buffer; model: string }> {
+  for (const candidate of candidates.slice(0, 2)) {
+    let response: Response;
+    try {
+      response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": origin,
+          "X-Title": "Xyro AI",
+        },
+        body: JSON.stringify({
+          model: candidate.id,
+          messages: [{ role: "user", content: prompt }],
+          modalities: ["image", "text"],
+        }),
+        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+        cache: "no-store",
+      });
+    } catch {
+      break; // Network trouble: this source is done.
+    }
+    if (!response.ok) {
+      await response.body?.cancel();
+      if (response.status === 429 || response.status >= 500) continue;
+      break;
+    }
+    const payload: unknown = await response.json().catch(() => null);
+    const imageReference = findImageReference(payload);
+    if (imageReference) {
+      const bytes = await downloadImage(imageReference);
+      return { bytes, model: candidate.id };
+    }
+  }
+  throw new Error("No free OpenRouter image model answered.");
 }
 
 export async function POST(request: NextRequest) {
@@ -369,85 +594,88 @@ export async function POST(request: NextRequest) {
       return errorResponse(409, "MESSAGE_ALREADY_EXISTS", "This image has already been created.");
     }
 
-    // Produce the original image bytes from the first source that
-    // answers: Pollinations FIRST (instant, keyless), then a free
-    // OpenRouter image model as backup when the catalogue has one.
-    // A source that answers without an image is a failure of that
-    // source, never a reason to fabricate a result.
-    let originalBytes: Buffer | null = null;
+    // Produce + watermark the image from the first source that
+    // yields a processable picture (see the source list at the top
+    // of this file). Watermarking happens INSIDE the loop: a source
+    // whose bytes this runtime cannot decode (e.g. WebP without
+    // sharp) falls through to the next source instead of failing
+    // the whole creation.
+    const generationId = randomUUID();
+    const watermarkPayload = buildWatermarkPayload(generationId, auth.uid);
+    let watermarked: Buffer | null = null;
     let usedModel = "";
+    let anySourceAnswered = false;
 
-    try {
-      originalBytes = await fetchPollinationsImage(prompt);
-      usedModel = "pollinations/free";
-    } catch (error) {
-      console.error("Pollinations image generation failed; trying OpenRouter.", error);
-      originalBytes = null;
+    type ImageSource = {
+      label: string;
+      run: () => Promise<{ bytes: Buffer; model: string }>;
+    };
+    const sources: ImageSource[] = [
+      {
+        label: "pollinations",
+        run: async () => ({
+          bytes: await fetchPollinationsImage(prompt),
+          model: "pollinations/free",
+        }),
+      },
+    ];
+    const geminiKey = serverEnv.geminiApiKey;
+    if (geminiKey) {
+      sources.push({
+        label: "gemini",
+        run: async () => ({
+          bytes: await fetchGeminiImage(prompt, geminiKey),
+          model: "gemini/gemini-2.5-flash-image",
+        }),
+      });
+    }
+    const cfAccount = serverEnv.cloudflareAccountId;
+    const cfToken = serverEnv.cloudflareApiToken;
+    if (cfAccount && cfToken) {
+      sources.push({
+        label: "cloudflare",
+        run: async () => ({
+          bytes: await fetchCloudflareImage(prompt, cfAccount, cfToken),
+          model: "cloudflare/flux-1-schnell",
+        }),
+      });
+    }
+    sources.push({
+      label: "aihorde",
+      run: async () => ({
+        bytes: await fetchHordeImage(prompt),
+        model: "aihorde/free",
+      }),
+    });
+    if (apiKey && imageModels.length > 0) {
+      sources.push({
+        label: "openrouter",
+        run: () => fetchOpenRouterImage(prompt, apiKey, imageModels, request.nextUrl.origin),
+      });
     }
 
-    if (!originalBytes && apiKey && imageModels.length > 0) {
-      let imageReference: string | null = null;
-      for (const candidate of imageModels.slice(0, 2)) {
-        let response: Response;
-        try {
-          response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${apiKey}`,
-              "Content-Type": "application/json",
-              "HTTP-Referer": request.nextUrl.origin,
-              "X-Title": "Xyro AI",
-            },
-            body: JSON.stringify({
-              model: candidate.id,
-              messages: [{ role: "user", content: prompt }],
-              modalities: ["image", "text"],
-            }),
-            signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-            cache: "no-store",
-          });
-        } catch {
-          break; // Network trouble: fall through to the fallback source.
-        }
-        if (!response.ok) {
-          await response.body?.cancel();
-          if (response.status === 429 || response.status >= 500) continue;
-          break;
-        }
-        const payload: unknown = await response.json().catch(() => null);
-        imageReference = findImageReference(payload);
-        if (imageReference) {
-          try {
-            originalBytes = await downloadImage(imageReference);
-            usedModel = candidate.id;
-          } catch {
-            originalBytes = null;
-          }
-          break;
-        }
+    for (const source of sources) {
+      let produced: { bytes: Buffer; model: string };
+      try {
+        produced = await source.run();
+        anySourceAnswered = true;
+      } catch (error) {
+        console.error(`Image source ${source.label} failed.`, error);
+        continue;
+      }
+      try {
+        watermarked = await embedWatermark(produced.bytes, watermarkPayload);
+        usedModel = produced.model;
+        break;
+      } catch (error) {
+        console.error(`Image from ${source.label} could not be processed.`, error);
       }
     }
 
-    if (!originalBytes) {
-      return errorResponse(503, "IMAGE_MODEL_UNAVAILABLE", IMAGE_UNAVAILABLE_MESSAGE);
-    }
-
-    // Watermark → store. The watermark is applied BEFORE storage
-    // and the original bytes are discarded.
-    const generationId = randomUUID();
-    let watermarked: Buffer;
-    try {
-      watermarked = await embedWatermark(
-        originalBytes,
-        buildWatermarkPayload(generationId, auth.uid),
-      );
-    } catch (error) {
-      console.error("Generated image processing failed.", error);
-      return errorResponse(
-        502,
-        "IMAGE_PROCESSING_FAILED",
-        "The generated image couldn’t be processed.",
-      );
+    if (!watermarked) {
+      return anySourceAnswered
+        ? errorResponse(502, "IMAGE_PROCESSING_FAILED", "The generated image couldn’t be processed.")
+        : errorResponse(503, "IMAGE_MODEL_UNAVAILABLE", IMAGE_UNAVAILABLE_MESSAGE);
     }
 
     let stored: { publicId: string; bytes: number };
