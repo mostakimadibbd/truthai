@@ -50,10 +50,24 @@ class FakeQuery:
         self._prefix = prefix
         self._limit = None
         self._limit_to_last = False
+        self._filters: list = []
+
+    def limit(self, n: int) -> "FakeQuery":
+        self._limit = n
+        self._limit_to_last = False
+        return self
 
     def limit_to_last(self, n: int) -> "FakeQuery":
         self._limit = n
         self._limit_to_last = True
+        return self
+
+    def where(self, field: str, op: str, value) -> "FakeQuery":
+        # Parity: the real client supports field filters on
+        # queries; only equality is modelled (all the app uses).
+        if op != "==":
+            raise ValueError(f"FakeQuery only models == filters, got {op}")
+        self._filters.append((field, value))
         return self
 
     def _select(self) -> list:
@@ -61,9 +75,16 @@ class FakeQuery:
             p for p in self._store if p.startswith(self._prefix + "/")
             and p.count("/") == self._prefix.count("/") + 1
         )
+        snapshots = [FakeSnapshot(self._store[path]) for path in paths]
+        for field, value in self._filters:
+            snapshots = [
+                snap
+                for snap in snapshots
+                if (snap.to_dict() or {}).get(field) == value
+            ]
         if self._limit:
-            paths = paths[-self._limit:] if self._limit_to_last else paths[: self._limit]
-        return [FakeSnapshot(self._store[path]) for path in paths]
+            snapshots = snapshots[-self._limit:] if self._limit_to_last else snapshots[: self._limit]
+        return snapshots
 
     def stream(self):
         # Parity with the real client: streaming a limit_to_last
@@ -91,8 +112,22 @@ class FakeCollection:
             doc_id = f"auto{len(self._store)}"
         return FakeDocRef(self._store, f"{self._path}/{doc_id}")
 
-    def order_by(self, _field: str) -> FakeQuery:
+    def order_by(self, _field: str, direction=None) -> FakeQuery:
         return FakeQuery(self._store, self._path)
+
+    # Parity: in the real client a Collection IS a Query, so
+    # limit/where/get/stream are available directly on it.
+    def limit(self, n: int) -> FakeQuery:
+        return FakeQuery(self._store, self._path).limit(n)
+
+    def where(self, field: str, op: str, value) -> FakeQuery:
+        return FakeQuery(self._store, self._path).where(field, op, value)
+
+    def get(self) -> list:
+        return FakeQuery(self._store, self._path).get()
+
+    def stream(self):
+        return FakeQuery(self._store, self._path).stream()
 
 
 class FakeBatch:

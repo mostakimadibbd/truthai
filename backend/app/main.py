@@ -191,6 +191,22 @@ async def health(
     except Exception as error:  # noqa: BLE001 - class name is the diagnostic
         cloudflare_live = False
         cloudflare_error = type(error).__name__
+    # Live data-plane probes: initialising the Admin SDK is not
+    # proof it can read — a deleted or revoked service-account
+    # key still initialises. These make real (tiny) calls so a
+    # dead credential is visible here instead of surfacing as a
+    # generic panel failure.
+    data_plane = None
+    try:
+        import asyncio
+
+        from .firebase import firebase_auth
+
+        data_plane = await asyncio.to_thread(
+            admin.data_plane_status, firestore_client(), firebase_auth()
+        )
+    except Exception as error:  # noqa: BLE001 - class name is the diagnostic
+        data_plane = {"error": type(error).__name__}
     return {
         "ok": True,
         "service": "xyro-backend",
@@ -202,6 +218,7 @@ async def health(
         "adminReady": admin_ready,
         "adminError": admin_error,
         "adminErrorDetail": admin_error_detail,
+        "dataPlane": data_plane,
         "watermarkEngine": "c" if watermark.using_c_core() else "python",
         "executionMode": settings.execution_mode,
     }

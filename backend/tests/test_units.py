@@ -1847,6 +1847,57 @@ def test_execute_chat_job_with_image_uses_vision_model_and_parts():
     assert stored_user["attachments"][0]["name"] == "pic.png"
 
 
+def test_overview_degrades_instead_of_raising():
+    """A dead data plane (revoked service-account key, quota,
+    outage) must degrade the overview section by section and
+    NAME the failures in dataIssues — never take the whole
+    panel down with a 503."""
+    from app import admin
+
+    class ExplodingDb:
+        def collection(self, name):
+            raise RuntimeError("data plane down")
+
+    overview = admin.get_overview(ExplodingDb())
+    assert overview["totals"]["totalTokens"] == 0
+    assert len(overview["minutes"]) == 60
+    assert len(overview["week"]) == 7
+    assert overview["models"] == [] and overview["topUsers"] == []
+    assert overview["recentEvents"] == [] and overview["recentErrors"] == []
+    assert overview["lifetime"]["totalTokens"] == 0
+    assert overview["lifetimeDays"] == 0
+    sections = {issue["section"] for issue in overview["dataIssues"]}
+    assert {"totals", "minutes", "models", "topUsers", "lifetime"} <= sections
+    assert all(
+        issue["error"] == "RuntimeError" for issue in overview["dataIssues"]
+    )
+
+
+def test_data_plane_status_reports_live_and_dead():
+    from app import admin
+    from tests.fakes import FakeFirestore
+
+    class StubAuth:
+        def list_users(self, max_results=1):
+            return []
+
+    ok = admin.data_plane_status(FakeFirestore(), StubAuth())
+    assert ok["firestore"] == {"live": True, "error": None}
+    assert ok["auth"] == {"live": True, "error": None}
+
+    class ExplodingDb:
+        def collection(self, name):
+            raise RuntimeError("nope")
+
+    class ExplodingAuth:
+        def list_users(self, max_results=1):
+            raise ValueError("dead key")
+
+    dead = admin.data_plane_status(ExplodingDb(), ExplodingAuth())
+    assert dead["firestore"] == {"live": False, "error": "RuntimeError"}
+    assert dead["auth"] == {"live": False, "error": "ValueError"}
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):

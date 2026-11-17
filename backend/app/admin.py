@@ -310,119 +310,189 @@ def _resolve_emails(uids: list[str]) -> dict[str, str]:
     return resolved
 
 
+def _section(issues: list, name: str, load, fallback):
+    """Fault isolation for panel reads: a section whose backend
+    read fails degrades to its empty shape and records the
+    failure (exception class only) in issues, instead of taking
+    the whole panel down with a 503."""
+    try:
+        return load()
+    except Exception as error:  # noqa: BLE001 - the class name is the diagnostic
+        issues.append({"section": name, "error": type(error).__name__})
+        return fallback
+
+
+def data_plane_status(db, auth_module) -> dict:
+    """Live proof - beyond initialisation - that the Admin SDK
+    can actually read Firestore and the Auth directory right
+    now. A service-account key that was deleted or revoked
+    still initialises cleanly, so only a real call tells the
+    truth. Error class names only; never messages or values."""
+    status: dict = {}
+    try:
+        db.collection("admins").limit(1).get()
+        status["firestore"] = {"live": True, "error": None}
+    except Exception as error:  # noqa: BLE001
+        status["firestore"] = {"live": False, "error": type(error).__name__}
+    try:
+        auth_module.list_users(max_results=1)
+        status["auth"] = {"live": True, "error": None}
+    except Exception as error:  # noqa: BLE001
+        status["auth"] = {"live": False, "error": type(error).__name__}
+    return status
+
+
 def get_overview(db) -> dict:
     now = datetime.now(timezone.utc)
     today = _day_key(now)
+    issues: list[dict] = []
 
-    totals_doc = db.collection("analytics_days").document(today).get()
-    totals = _totals(totals_doc.to_dict() if totals_doc.exists else None)
+    def totals_for(day_key: str) -> dict:
+        doc = db.collection("analytics_days").document(day_key).get()
+        return _totals(doc.to_dict() if doc.exists else None)
 
-    minutes = []
-    for offset in range(59, -1, -1):
-        key = _minute_key(now - timedelta(minutes=offset))
-        doc = db.collection("analytics_minutes").document(key).get()
-        minutes.append(
-            {"minute": key, **_totals(doc.to_dict() if doc.exists else None)}
-        )
+    totals = _section(issues, "totals", lambda: totals_for(today), _totals(None))
 
-    models = []
-    for doc in db.collection("analytics_model_days").where("day", "==", today).get():
-        data = doc.to_dict() or {}
-        models.append(
-            {"model": data.get("model") or "unknown", **_totals(data)}
-        )
-    models.sort(key=lambda row: row["totalTokens"], reverse=True)
+    minute_keys = [
+        _minute_key(now - timedelta(minutes=offset)) for offset in range(59, -1, -1)
+    ]
 
-    user_days = []
-    for doc in db.collection("analytics_user_days").where("day", "==", today).get():
-        data = doc.to_dict() or {}
-        uid = data.get("uid") if isinstance(data.get("uid"), str) else doc.id
-        user_days.append({"uid": uid, **_totals(data)})
-    user_days.sort(key=lambda row: row["totalTokens"], reverse=True)
-    top_users = user_days[:10]
+    def load_minutes() -> list:
+        rows = []
+        for key in minute_keys:
+            doc = db.collection("analytics_minutes").document(key).get()
+            rows.append(
+                {"minute": key, **_totals(doc.to_dict() if doc.exists else None)}
+            )
+        return rows
 
-    events = []
-    event_docs = (
-        db.collection("usageEvents")
-        .order_by("ts", direction="DESCENDING")
-        .limit(50)
-        .get()
+    minutes = _section(
+        issues,
+        "minutes",
+        load_minutes,
+        [{"minute": key, **_totals(None)} for key in minute_keys],
     )
-    for doc in event_docs:
-        data = doc.to_dict() or {}
-        events.append(
-            {
-                "id": doc.id,
-                "ts": data.get("ts") if isinstance(data.get("ts"), (int, float)) else 0,
-                "uid": data.get("uid") or "",
-                "surface": data.get("surface") or "",
-                "model": data.get("model"),
-                "promptTokens": data.get("promptTokens") or 0,
-                "completionTokens": data.get("completionTokens") or 0,
-                "totalTokens": data.get("totalTokens") or 0,
-                "costUsd": data.get("costUsd") or 0,
-                "status": data.get("status") or "",
-            }
-        )
 
-    emails = _resolve_emails(
-        list({*[row["uid"] for row in top_users], *[row["uid"] for row in events]})
-    )
+    def load_models() -> list:
+        rows = []
+        for doc in db.collection("analytics_model_days").where("day", "==", today).get():
+            data = doc.to_dict() or {}
+            rows.append({"model": data.get("model") or "unknown", **_totals(data)})
+        rows.sort(key=lambda row: row["totalTokens"], reverse=True)
+        return rows
+
+    models = _section(issues, "models", load_models, [])
+
+    def load_top_users() -> list:
+        rows = []
+        for doc in db.collection("analytics_user_days").where("day", "==", today).get():
+            data = doc.to_dict() or {}
+            uid = data.get("uid") if isinstance(data.get("uid"), str) else doc.id
+            rows.append({"uid": uid, **_totals(data)})
+        rows.sort(key=lambda row: row["totalTokens"], reverse=True)
+        return rows[:10]
+
+    top_users = _section(issues, "topUsers", load_top_users, [])
+
+    def load_events() -> list:
+        rows = []
+        event_docs = (
+            db.collection("usageEvents")
+            .order_by("ts", direction="DESCENDING")
+            .limit(50)
+            .get()
+        )
+        for doc in event_docs:
+            data = doc.to_dict() or {}
+            rows.append(
+                {
+                    "id": doc.id,
+                    "ts": data.get("ts") if isinstance(data.get("ts"), (int, float)) else 0,
+                    "uid": data.get("uid") or "",
+                    "surface": data.get("surface") or "",
+                    "model": data.get("model"),
+                    "promptTokens": data.get("promptTokens") or 0,
+                    "completionTokens": data.get("completionTokens") or 0,
+                    "totalTokens": data.get("totalTokens") or 0,
+                    "costUsd": data.get("costUsd") or 0,
+                    "status": data.get("status") or "",
+                }
+            )
+        return rows
+
+    events = _section(issues, "recentEvents", load_events, [])
+
+    try:
+        emails = _resolve_emails(
+            list({*[row["uid"] for row in top_users], *[row["uid"] for row in events]})
+        )
+    except Exception as error:  # noqa: BLE001
+        issues.append({"section": "emails", "error": type(error).__name__})
+        emails = {}
     for row in top_users:
         row["email"] = emails.get(row["uid"])
     for row in events:
         row["email"] = emails.get(row["uid"])
 
-    searches = []
-    for doc in (
-        db.collection("searchEvents")
-        .order_by("ts", direction="DESCENDING")
-        .limit(20)
-        .get()
-    ):
-        data = doc.to_dict() or {}
-        searches.append(
-            {
-                "query": data.get("query") or "",
-                "trigger": data.get("trigger") or "",
-                "provider": data.get("provider"),
-                "resultCount": data.get("resultCount") or 0,
-                "ts": data.get("ts") or 0,
-            }
-        )
+    def load_searches() -> list:
+        rows = []
+        for doc in (
+            db.collection("searchEvents")
+            .order_by("ts", direction="DESCENDING")
+            .limit(20)
+            .get()
+        ):
+            data = doc.to_dict() or {}
+            rows.append(
+                {
+                    "query": data.get("query") or "",
+                    "trigger": data.get("trigger") or "",
+                    "provider": data.get("provider"),
+                    "resultCount": data.get("resultCount") or 0,
+                    "ts": data.get("ts") or 0,
+                }
+            )
+        return rows
 
-    errors = []
-    for doc in (
-        db.collection("chatErrors")
-        .order_by("ts", direction="DESCENDING")
-        .limit(20)
-        .get()
-    ):
-        data = doc.to_dict() or {}
-        errors.append(
-            {
-                "status": data.get("status"),
-                "model": data.get("model"),
-                "webInjected": data.get("webInjected") is True,
-                "error": (data.get("error") or "")[:240] or None,
-                "ts": data.get("ts") or 0,
-            }
-        )
+    searches = _section(issues, "recentSearches", load_searches, [])
 
-    yesterday_doc = (
-        db.collection("analytics_days")
-        .document(_day_key(now - timedelta(days=1)))
-        .get()
+    def load_errors() -> list:
+        rows = []
+        for doc in (
+            db.collection("chatErrors")
+            .order_by("ts", direction="DESCENDING")
+            .limit(20)
+            .get()
+        ):
+            data = doc.to_dict() or {}
+            rows.append(
+                {
+                    "status": data.get("status"),
+                    "model": data.get("model"),
+                    "webInjected": data.get("webInjected") is True,
+                    "error": (data.get("error") or "")[:240] or None,
+                    "ts": data.get("ts") or 0,
+                }
+            )
+        return rows
+
+    errors = _section(issues, "recentErrors", load_errors, [])
+
+    yesterday = _section(
+        issues,
+        "yesterday",
+        lambda: totals_for(_day_key(now - timedelta(days=1))),
+        _totals(None),
     )
-    yesterday = _totals(yesterday_doc.to_dict() if yesterday_doc.exists else None)
 
-    week = []
-    for offset in range(6, -1, -1):
-        day = _day_key(now - timedelta(days=offset))
-        doc = db.collection("analytics_days").document(day).get()
-        week.append(
-            {"day": day, **_totals(doc.to_dict() if doc.exists else None)}
-        )
+    week_keys = [_day_key(now - timedelta(days=offset)) for offset in range(6, -1, -1)]
+
+    def load_week() -> list:
+        return [{"day": day, **totals_for(day)} for day in week_keys]
+
+    week = _section(
+        issues, "week", load_week, [{"day": day, **_totals(None)} for day in week_keys]
+    )
 
     from . import watermark
 
@@ -433,16 +503,22 @@ def get_overview(db) -> dict:
         "integrations": checks,
         "integrationsOk": all(checks.values()),
     }
-    # Lifetime: every day of metering, summed.
-    lifetime = _totals(None)
-    days_with_data = 0
-    for doc in db.collection("analytics_days").limit(1000).get():
-        data = doc.to_dict() or {}
-        days_with_data += 1
-        for field in TOTAL_FIELDS:
-            value = data.get(field)
-            if isinstance(value, (int, float)):
-                lifetime[field] += value
+
+    def load_lifetime():
+        lifetime = _totals(None)
+        days = 0
+        for doc in db.collection("analytics_days").limit(1000).get():
+            data = doc.to_dict() or {}
+            days += 1
+            for field in TOTAL_FIELDS:
+                value = data.get(field)
+                if isinstance(value, (int, float)):
+                    lifetime[field] += value
+        return lifetime, days
+
+    lifetime, days_with_data = _section(
+        issues, "lifetime", load_lifetime, (_totals(None), 0)
+    )
 
     return {
         "today": today,
@@ -460,6 +536,7 @@ def get_overview(db) -> dict:
         "lifetime": lifetime,
         "lifetimeDays": days_with_data,
         "ranges": _ranges(db, now),
+        "dataIssues": issues,
     }
 
 
