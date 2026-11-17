@@ -1881,7 +1881,7 @@ def test_data_plane_status_reports_live_and_dead():
         def list_users(self, max_results=1):
             return []
 
-    ok = admin.data_plane_status(FakeFirestore(), StubAuth())
+    ok = admin.data_plane_status(lambda: FakeFirestore(), lambda: StubAuth())
     assert ok["firestore"] == {"live": True, "error": None}
     assert ok["auth"] == {"live": True, "error": None}
 
@@ -1893,7 +1893,7 @@ def test_data_plane_status_reports_live_and_dead():
         def list_users(self, max_results=1):
             raise ValueError("dead key")
 
-    dead = admin.data_plane_status(ExplodingDb(), ExplodingAuth())
+    dead = admin.data_plane_status(lambda: ExplodingDb(), lambda: ExplodingAuth())
     assert dead["firestore"] == {"live": False, "error": "RuntimeError"}
     assert dead["auth"] == {"live": False, "error": "ValueError"}
 

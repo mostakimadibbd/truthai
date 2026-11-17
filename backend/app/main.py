@@ -200,10 +200,8 @@ async def health(
     try:
         import asyncio
 
-        from .firebase import firebase_auth
-
         data_plane = await asyncio.to_thread(
-            admin.data_plane_status, firestore_client(), firebase_auth()
+            admin.data_plane_status, firestore_client, admin.firebase_auth
         )
     except Exception as error:  # noqa: BLE001 - class name is the diagnostic
         data_plane = {"error": type(error).__name__}

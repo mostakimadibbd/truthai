@@ -322,20 +322,22 @@ def _section(issues: list, name: str, load, fallback):
         return fallback
 
 
-def data_plane_status(db, auth_module) -> dict:
+def data_plane_status(db_factory, auth_factory) -> dict:
     """Live proof - beyond initialisation - that the Admin SDK
     can actually read Firestore and the Auth directory right
     now. A service-account key that was deleted or revoked
     still initialises cleanly, so only a real call tells the
-    truth. Error class names only; never messages or values."""
+    truth. Factories are called inside the guards so a client
+    that fails to even build is reported per-branch too.
+    Error class names only; never messages or values."""
     status: dict = {}
     try:
-        db.collection("admins").limit(1).get()
+        db_factory().collection("admins").limit(1).get()
         status["firestore"] = {"live": True, "error": None}
     except Exception as error:  # noqa: BLE001
         status["firestore"] = {"live": False, "error": type(error).__name__}
     try:
-        auth_module.list_users(max_results=1)
+        auth_factory().list_users(max_results=1)
         status["auth"] = {"live": True, "error": None}
     except Exception as error:  # noqa: BLE001
         status["auth"] = {"live": False, "error": type(error).__name__}
