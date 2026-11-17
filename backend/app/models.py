@@ -47,6 +47,57 @@ def is_free_entry(model: dict) -> bool:
     return pricing.get("prompt") == "0" and pricing.get("completion") == "0"
 
 
+# Vision capability for the curated fallbacks (mirrors the
+# capabilities column in lib/server/models.ts — the live
+# catalogue carries it in architecture.input_modalities, the
+# curated entries are static).
+_FALLBACK_CAPABILITIES: dict[str, list[str]] = {
+    "google/gemma-4-31b-it:free": ["text", "vision"],
+    "nvidia/nemotron-3.5-super-vl:free": ["text", "vision"],
+    "google/gemma-4-26b-a4b-it:free": ["text", "vision"],
+}
+
+
+def capabilities_for(model: dict) -> list[str]:
+    """['text'] plus 'vision' when the model accepts image
+    input (parity with capabilitiesFor in lib/server/models.ts)."""
+    capabilities = ["text"]
+    architecture = model.get("architecture") or {}
+    modalities = architecture.get("input_modalities") or []
+    if "image" in modalities:
+        capabilities.append("vision")
+    elif "vision" in _FALLBACK_CAPABILITIES.get(model.get("id", ""), []):
+        capabilities.append("vision")
+    return capabilities
+
+
+def model_has_vision(models: list[dict], model_id: str) -> bool:
+    """Parity with modelHasVision in lib/server/models.ts."""
+    for model in models:
+        if model.get("id") == model_id:
+            return "vision" in capabilities_for(model)
+    return False
+
+
+def pick_free_vision_model(models: list[dict]) -> dict | None:
+    """The vision switch for image turns (parity with
+    pickFreeVisionModel): a curated fallback that can see wins
+    over the rest of the free vision catalogue."""
+    vision = [
+        model
+        for model in models
+        if model.get("id") != AUTO_MODEL_ID
+        and "vision" in capabilities_for(model)
+    ]
+    if not vision:
+        return None
+    vision_ids = {model["id"] for model in vision}
+    for fallback in FALLBACK_MODELS:
+        if fallback["id"] in vision_ids:
+            return next(m for m in vision if m["id"] == fallback["id"])
+    return vision[0]
+
+
 async def get_free_models(force: bool = False) -> list[dict]:
     """Live free catalogue merged with the curated fallbacks."""
     now = time.time()
@@ -66,6 +117,9 @@ async def get_free_models(force: bool = False) -> list[dict]:
         merged[model["id"]] = {
             "id": model["id"],
             "name": model.get("name") or model["id"],
+            # Kept for capability detection (vision routing reads
+            # architecture.input_modalities via capabilities_for).
+            "architecture": model.get("architecture") or {},
         }
     for model in FALLBACK_MODELS:
         merged.setdefault(model["id"], model)

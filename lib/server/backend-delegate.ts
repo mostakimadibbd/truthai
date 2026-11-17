@@ -30,6 +30,19 @@ import {
 //     null and the caller runs the turn locally, so the optional
 //     backend can never take chat down with it.
 
+/** A verified image attachment the backend can fetch and hand
+ * to a vision model (built by the chat route from the upload
+ * record — never from client input). */
+export type DelegateImageAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  publicId: string;
+  format: string;
+  resourceType: "image";
+};
+
 type DelegateArgs = {
   request: Request;
   uid: string;
@@ -42,6 +55,9 @@ type DelegateArgs = {
   /** The user's "Only use OpenRouter" privacy switch — the
    * backend must run the turn without its cross-provider chain. */
   openRouterOnly?: boolean;
+  /** Image attachments for vision turns. Documents never
+   * delegate (the local path owns text extraction). */
+  attachments?: DelegateImageAttachment[];
 };
 
 function backendConfig(): { url: string; token: string } | null {
@@ -143,6 +159,9 @@ export async function tryDelegateChatTurn(
         content: args.content,
         model: args.model,
         openRouterOnly: args.openRouterOnly ?? false,
+        ...(args.attachments?.length
+          ? { attachments: args.attachments }
+          : {}),
       }),
       signal: AbortSignal.timeout(15_000),
       cache: "no-store",

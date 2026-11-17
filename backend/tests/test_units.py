@@ -847,7 +847,11 @@ def test_vision_targets_only_include_vision_models():
         os.environ["REQUESTY_API_KEY"] = "r"
         targets = chatjob.openrouter.build_targets(["openrouter/free"], vision_only=True)
         providers = [t["provider"] for t in targets]
-        assert "groq" not in providers
+        # Groq joined the vision chain with Llama 4 (Scout +
+        # Maverick); its text-only models stay excluded.
+        groq = [t for t in targets if t["provider"] == "groq"]
+        assert len(groq) == 2
+        assert all("llama-4" in t["model"] for t in groq)
         assert providers.count("gemini") == 2
         requesty = [t for t in targets if t["provider"] == "requesty"]
         assert len(requesty) == 1 and requesty[0]["model"] == "google/gemma-4-31b-it"
@@ -1700,6 +1704,147 @@ def test_fake_query_refuses_limit_to_last_stream():
     except ValueError as error:
         assert "limit_to_last" in str(error)
     assert len(query.get()) == 2
+
+
+def _execute_job_harness(monkeypatches):
+    """Shared scaffolding for execute_chat_job tests: a fake
+    Firestore with one chat, a capturing stream_completion, and
+    the network-shaped dependencies replaced."""
+    import asyncio
+
+    from app import analytics, chatjob, memory as memory_lib
+    from app import models as model_lib
+    from app import openrouter
+    from tests.fakes import FakeFirestore, make_rtdb
+
+    db = FakeFirestore()
+    db.collection("users").document("u1").collection("chats").document("c1").set(
+        {"title": "New chat", "searchText": ""}
+    )
+    captured = {}
+
+    async def fake_stream(attempts, messages, on_text, **kwargs):
+        captured["attempts"] = attempts
+        captured["messages"] = messages
+        await on_text("A reply.")
+        return {
+            "model": "google/gemma-4-31b-it:free",
+            "text": "A reply.",
+            "usage": {"promptTokens": 3, "completionTokens": 2},
+            "provider": "openrouter",
+        }
+
+    async def fake_catalogue():
+        return [{"id": "google/gemma-4-31b-it:free", "name": "Gemma 4 31B (Free)"}]
+
+    originals = {
+        "stream": openrouter.stream_completion,
+        "catalogue": model_lib.get_free_models,
+        "memory_enabled": memory_lib.memory_enabled,
+        "usage": analytics.record_usage_event,
+        "image_url": chatjob._image_data_url,
+    }
+    openrouter.stream_completion = fake_stream
+    model_lib.get_free_models = fake_catalogue
+    memory_lib.memory_enabled = lambda db_, uid: False
+    analytics.record_usage_event = lambda db_, **kwargs: None
+
+    async def fake_image_url(descriptor):
+        return "data:image/png;base64,AAAA"
+
+    chatjob._image_data_url = fake_image_url
+
+    def run(job):
+        try:
+            return asyncio.run(
+                chatjob.execute_chat_job(job, db, make_rtdb({}))
+            )
+        finally:
+            openrouter.stream_completion = originals["stream"]
+            model_lib.get_free_models = originals["catalogue"]
+            memory_lib.memory_enabled = originals["memory_enabled"]
+            analytics.record_usage_event = originals["usage"]
+            chatjob._image_data_url = originals["image_url"]
+
+    return db, captured, run
+
+
+def test_execute_chat_job_loads_history_and_completes():
+    """End-to-end job execution with prior messages — this is
+    the path whose limit_to_last().stream() call killed every
+    delegated turn in production."""
+    db, captured, run = _execute_job_harness(None)
+    messages = (
+        db.collection("users").document("u1").collection("chats")
+        .document("c1").collection("messages")
+    )
+    messages.document("m1").set(
+        {"role": "user", "content": "Earlier question", "status": "complete"}
+    )
+    messages.document("m2").set(
+        {"role": "assistant", "content": "Earlier answer", "status": "complete"}
+    )
+    result = run(
+        {
+            "uid": "u1",
+            "chatId": "c1",
+            "userMessageId": "u-new",
+            "assistantMessageId": "a-new",
+            "responseId": "r1",
+            "content": "Follow up",
+            "model": None,
+            "openRouterOnly": False,
+            "attachments": [],
+        }
+    )
+    assert result["status"] == "complete"
+    history_contents = [
+        m["content"] for m in captured["messages"] if m["role"] != "system"
+    ]
+    assert history_contents == ["Earlier question", "Earlier answer", "Follow up"]
+    stored = db.store["users/u1/chats/c1/messages/a-new"]
+    assert stored["content"] == "A reply." and stored["status"] == "complete"
+
+
+def test_execute_chat_job_with_image_uses_vision_model_and_parts():
+    """An image turn: the pair records the attachment, the
+    OpenRouter leg pins a vision model, and the model receives
+    the picture inline as a data URL."""
+    db, captured, run = _execute_job_harness(None)
+    result = run(
+        {
+            "uid": "u1",
+            "chatId": "c1",
+            "userMessageId": "u-img",
+            "assistantMessageId": "a-img",
+            "responseId": "r2",
+            "content": "Describe this picture",
+            "model": "thinking",
+            "openRouterOnly": False,
+            "attachments": [
+                {
+                    "id": "att-1",
+                    "name": "pic.png",
+                    "mimeType": "image/png",
+                    "size": 1234,
+                    "publicId": "xyro_u1_c1_att-1",
+                    "format": "png",
+                    "resourceType": "image",
+                }
+            ],
+        }
+    )
+    assert result["status"] == "complete"
+    assert captured["attempts"][0] == "google/gemma-4-31b-it:free"
+    last_user = [m for m in captured["messages"] if m["role"] == "user"][-1]
+    assert isinstance(last_user["content"], list)
+    parts = last_user["content"]
+    assert parts[0] == {"type": "text", "text": "Describe this picture"}
+    assert parts[1]["type"] == "image_url"
+    assert parts[1]["image_url"]["url"] == "data:image/png;base64,AAAA"
+    stored_user = db.store["users/u1/chats/c1/messages/u-img"]
+    assert stored_user["attachmentIds"] == ["att-1"]
+    assert stored_user["attachments"][0]["name"] == "pic.png"
 
 
 if __name__ == "__main__":

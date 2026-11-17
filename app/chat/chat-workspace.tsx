@@ -454,6 +454,15 @@ export default function ChatWorkspace() {
   // server-side and its reply lands via the listeners.
   const userStopRef = useRef(false);
   const attachmentUrlLoadingRef = useRef(new Set<string>());
+  // In-flight URL mints, shared by every caller: a second
+  // caller for the same attachment awaits the SAME mint
+  // instead of being told "no URL" — the old early-null made
+  // the preview effect report a load failure (and show the
+  // "preview couldn't be loaded" notice) for a mint that was
+  // about to succeed.
+  const attachmentMintPromiseRef = useRef(
+    new Map<string, Promise<string | null>>(),
+  );
   // When each attachment access URL was minted, and how many
   // error-driven re-mints each attachment has used. Access URLs
   // are signed server-side for 15 minutes; they are treated as
@@ -754,7 +763,7 @@ export default function ChatWorkspace() {
   // single one-shot fetch: a transient failure or an expired URL
   // must heal itself instead of leaving a permanently broken
   // image (owner report: created images showing as errors).
-  const mintAttachmentUrl = useCallback(
+  const mintAttachmentUrlOnce = useCallback(
     async (attachmentId: string): Promise<string | null> => {
       if (!user) return null;
       if (attachmentUrlLoadingRef.current.has(attachmentId)) return null;
@@ -805,6 +814,24 @@ export default function ChatWorkspace() {
       }
     },
     [user],
+  );
+
+  // The shared mint every caller uses: concurrent callers for
+  // the same attachment await the one in-flight mint (see
+  // attachmentMintPromiseRef) instead of racing it.
+  const mintAttachmentUrl = useCallback(
+    async (attachmentId: string): Promise<string | null> => {
+      const inFlight = attachmentMintPromiseRef.current.get(attachmentId);
+      if (inFlight) return inFlight;
+      const promise = mintAttachmentUrlOnce(attachmentId);
+      attachmentMintPromiseRef.current.set(attachmentId, promise);
+      try {
+        return await promise;
+      } finally {
+        attachmentMintPromiseRef.current.delete(attachmentId);
+      }
+    },
+    [mintAttachmentUrlOnce],
   );
 
   // An <img> that fails to load (expired URL, dropped connection)

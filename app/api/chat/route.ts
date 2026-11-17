@@ -19,6 +19,7 @@ import { guardMutationHeaders } from "@/lib/server/auth-guard";
 import {
   backendDelegationEnabled,
   tryDelegateChatTurn,
+  type DelegateImageAttachment,
 } from "@/lib/server/backend-delegate";
 import { getBudgetStatus, recordBudget } from "@/lib/server/budget";
 import { authenticateVerifiedUser } from "@/lib/server/request-auth";
@@ -408,10 +409,63 @@ export async function POST(request: NextRequest) {
   }
   const openRouterOnly = turnPrefs?.openRouterOnly ?? false;
 
+  // Image turns delegate too (the backend holds the Groq and
+  // Cloudflare keys and runs the vision chain): build verified
+  // descriptors from the upload records. Anything else —
+  // documents, blob-backed files, an unreadable record — keeps
+  // the turn on the local path, which validates authoritatively.
+  let delegateAttachments: DelegateImageAttachment[] | null = null;
+  if (attachmentIds.length > 0) {
+    try {
+      const uploadsRef = getFirebaseAdminFirestore()
+        .collection("users")
+        .doc(auth.uid)
+        .collection("uploads");
+      const snaps = await Promise.all(
+        attachmentIds.map((assetId) => uploadsRef.doc(assetId).get()),
+      );
+      const descriptors: DelegateImageAttachment[] = [];
+      let delegable = true;
+      for (const [index, snap] of snaps.entries()) {
+        const data = snap.data();
+        if (
+          !data ||
+          data.status !== "ready" ||
+          data.chatId !== chatId ||
+          data.resourceType !== "image" ||
+          typeof data.publicId !== "string" ||
+          data.publicId.startsWith("blob:") ||
+          typeof data.format !== "string" ||
+          typeof data.name !== "string" ||
+          typeof data.mimeType !== "string" ||
+          !data.mimeType.startsWith("image/") ||
+          typeof data.bytes !== "number"
+        ) {
+          delegable = false;
+          break;
+        }
+        descriptors.push({
+          id: attachmentIds[index],
+          name: data.name,
+          mimeType: data.mimeType,
+          size: data.bytes,
+          publicId: data.publicId,
+          format: data.format,
+          resourceType: "image",
+        });
+      }
+      if (delegable && descriptors.length === attachmentIds.length) {
+        delegateAttachments = descriptors;
+      }
+    } catch {
+      delegateAttachments = null;
+    }
+  }
+
   if (
     backendDelegationEnabled() &&
     !regenerate &&
-    attachmentIds.length === 0 &&
+    (attachmentIds.length === 0 || delegateAttachments !== null) &&
     body.webSearch !== true &&
     !hasSearchIntent(content) &&
     extractUrls(content).length === 0
@@ -426,6 +480,7 @@ export async function POST(request: NextRequest) {
       content,
       model: requestedMode ?? requestedModel,
       openRouterOnly,
+      attachments: delegateAttachments ?? undefined,
     });
     if (delegated) return delegated;
   }

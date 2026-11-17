@@ -41,6 +41,7 @@ def submit_chat_job(payload: dict, db, rtdb_ref) -> dict:
         "content": payload["content"],
         "model": payload.get("model"),
         "openRouterOnly": payload.get("openRouterOnly") is True,
+        "attachments": payload.get("attachments") or [],
         "createdAt": _now_ms(),
         "result": None,
         "error": None,

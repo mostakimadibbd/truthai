@@ -82,9 +82,10 @@ test("vision turns only target models that can see images", async () => {
   const { crossProviderTargets: cpt, messagesHaveImages } = await import("../lib/server/openrouter.ts");
   const env = { GEMINI_API_KEY: "g", GROQ_API_KEY: "q", REQUESTY_API_KEY: "r", SAMBANOVA_API_KEY: "s", NVIDIA_API_KEY: "n" };
   const vision = cpt(env, true);
-  assert.ok(vision.every((t) => t.provider === "gemini" || (t.provider === "requesty" && t.model === "google/gemma-4-31b-it")));
+  assert.ok(vision.every((t) => t.provider === "gemini" || (t.provider === "requesty" && t.model === "google/gemma-4-31b-it") || (t.provider === "groq" && t.model.includes("llama-4"))));
   assert.equal(vision.filter((t) => t.provider === "gemini").length, 2);
-  assert.equal(vision.length, 3);
+  assert.equal(vision.filter((t) => t.provider === "groq").length, 2);
+  assert.equal(vision.length, 5);
   assert.equal(messagesHaveImages([{ role: "user", content: "hi" }]), false);
   assert.equal(messagesHaveImages([{ role: "user", content: [{ type: "text", text: "look" }, { type: "image_url", image_url: { url: "https://x/y.jpg" } }] }]), true);
 });

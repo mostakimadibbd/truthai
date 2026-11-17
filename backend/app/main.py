@@ -261,6 +261,44 @@ async def submit_chat_job(request: Request):
     if model is not None and (not isinstance(model, str) or len(model) > 200):
         return _error(400, "INVALID_MODEL", "Choose one of the free models from the model list.")
 
+    # Image attachments (descriptors built server-side by the
+    # Next.js route from verified upload records — never trusted
+    # from the client directly; this is a second, structural
+    # check). Only images delegate; documents stay on the TS
+    # path, which owns text extraction.
+    attachments: list[dict] = []
+    raw_attachments = body.get("attachments")
+    if raw_attachments is not None:
+        if not isinstance(raw_attachments, list) or len(raw_attachments) > 10:
+            return _error(400, "INVALID_ATTACHMENT", "Attachments are malformed.")
+        for item in raw_attachments:
+            if not isinstance(item, dict):
+                return _error(400, "INVALID_ATTACHMENT", "Attachments are malformed.")
+            descriptor = {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "mimeType": item.get("mimeType"),
+                "size": item.get("size"),
+                "publicId": item.get("publicId"),
+                "format": item.get("format"),
+                "resourceType": item.get("resourceType"),
+            }
+            if (
+                not isinstance(descriptor["id"], str)
+                or not descriptor["id"]
+                or not isinstance(descriptor["name"], str)
+                or not isinstance(descriptor["mimeType"], str)
+                or not descriptor["mimeType"].startswith("image/")
+                or not isinstance(descriptor["size"], (int, float))
+                or not isinstance(descriptor["publicId"], str)
+                or not descriptor["publicId"]
+                or descriptor["publicId"].startswith("blob:")
+                or not isinstance(descriptor["format"], str)
+                or descriptor["resourceType"] != "image"
+            ):
+                return _error(400, "INVALID_ATTACHMENT", "Only image attachments can be delegated.")
+            attachments.append(descriptor)
+
     from .firebase import firestore_client, rtdb_ref
 
     submitted = jobs.submit_chat_job(
@@ -273,6 +311,7 @@ async def submit_chat_job(request: Request):
             "content": content,
             "model": model,
             "openRouterOnly": body.get("openRouterOnly") is True,
+            "attachments": attachments,
         },
         firestore_client(),
         rtdb_ref,

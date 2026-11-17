@@ -54,6 +54,12 @@ CROSS_PROVIDERS: list[dict] = [
         "url": "https://api.groq.com/openai/v1/chat/completions",
         "env_keys": ["GROQ_API_KEY"],
         "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
+        # Groq's vision line is Llama 4 (the 3.2 vision previews
+        # were retired): Scout and Maverick accept image_url parts.
+        "vision_models": [
+            "meta-llama/llama-4-scout-17b-16e-instruct",
+            "meta-llama/llama-4-maverick-17b-128e-instruct",
+        ],
     },
     {
         "provider": "requesty",
@@ -94,7 +100,10 @@ CROSS_PROVIDERS: list[dict] = [
             "@cf/openai/gpt-oss-120b",
             "@cf/meta/llama-4-scout-17b-16e-instruct",
         ],
-        "vision_models": ["@cf/meta/llama-4-scout-17b-16e-instruct"],
+        "vision_models": [
+            "@cf/meta/llama-4-scout-17b-16e-instruct",
+            "@cf/meta/llama-3.2-11b-vision-instruct",
+        ],
     },
 ]
 

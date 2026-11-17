@@ -163,6 +163,13 @@ const CROSS_PROVIDERS: ProviderSpec[] = [
     url: "https://api.groq.com/openai/v1/chat/completions",
     envKeys: ["GROQ_API_KEY"],
     models: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
+    // Groq's vision line is Llama 4 (the 3.2 vision previews
+    // were retired): Scout and Maverick both accept image_url
+    // parts on the OpenAI-compatible endpoint.
+    visionModels: [
+      "meta-llama/llama-4-scout-17b-16e-instruct",
+      "meta-llama/llama-4-maverick-17b-128e-instruct",
+    ],
   },
   {
     provider: "requesty",
@@ -209,7 +216,10 @@ const CROSS_PROVIDERS: ProviderSpec[] = [
       "@cf/openai/gpt-oss-120b",
       "@cf/meta/llama-4-scout-17b-16e-instruct",
     ],
-    visionModels: ["@cf/meta/llama-4-scout-17b-16e-instruct"],
+    visionModels: [
+      "@cf/meta/llama-4-scout-17b-16e-instruct",
+      "@cf/meta/llama-3.2-11b-vision-instruct",
+    ],
   },
 ];
 
