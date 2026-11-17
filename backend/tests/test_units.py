@@ -1643,6 +1643,42 @@ def test_job_unexpected_failure_is_ledgered():
     assert ledgered[0]["source"] == "python-backend-job"
 
 
+def test_shared_client_is_per_event_loop():
+    """The pooled httpx client must never be reused across
+    event loops (serverless warm containers change loops
+    between invocations; a reused pool raises RuntimeError
+    mid-job)."""
+    import asyncio
+    import os
+
+    from app import openrouter
+
+    # httpx reads proxy variables from the environment when a
+    # client is created; some sandboxes export no_proxy values
+    # its parser rejects. Production has none — clear them here
+    # so the test exercises loop keying, not env parsing.
+    proxy_vars = [
+        name
+        for name in list(os.environ)
+        if "proxy" in name.lower()
+    ]
+    saved = {name: os.environ.pop(name) for name in proxy_vars}
+    try:
+        async def grab():
+            return openrouter._shared_client()
+
+        first_loop_client = asyncio.run(grab())
+        second_loop_client = asyncio.run(grab())
+        assert first_loop_client is not second_loop_client
+        # Within one loop the pool is shared.
+        async def grab_twice():
+            return openrouter._shared_client() is openrouter._shared_client()
+
+        assert asyncio.run(grab_twice()) is True
+    finally:
+        os.environ.update(saved)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):

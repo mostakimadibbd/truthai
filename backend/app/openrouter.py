@@ -162,21 +162,32 @@ def build_targets(openrouter_attempts: list[str], vision_only: bool = False, pro
     return ordered
 
 _shared: httpx.AsyncClient | None = None
+_shared_loop: object | None = None
 
 
 def _shared_client() -> httpx.AsyncClient:
-    """One pooled client for every upstream call in this process.
+    """One pooled client per EVENT LOOP (not per process).
 
-    Creating a client per attempt (the old shape) paid a fresh
-    TCP + TLS handshake to OpenRouter for every model tried and
-    every job. Pooling keeps warm connections alive across
-    attempts and across jobs; per-request timeouts still apply.
+    Creating a client per attempt pays a fresh TCP + TLS
+    handshake for every model tried, so calls within a loop
+    share a pool. But an AsyncClient's pool binds to the loop
+    that first uses it: on serverless runtimes a warm process
+    can serve the next invocation on a DIFFERENT loop, and the
+    reused pool then raises RuntimeError ('bound to a different
+    event loop') — intermittently, and fatally for the job,
+    because that is not an httpx.HTTPError. Keying the pool to
+    the running loop keeps the warmth and removes the trap.
     """
-    global _shared
-    if _shared is None or _shared.is_closed:
+    global _shared, _shared_loop
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if _shared is None or _shared.is_closed or _shared_loop is not loop:
         _shared = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=32, max_keepalive_connections=16)
         )
+        _shared_loop = loop
     return _shared
 
 
@@ -308,5 +319,13 @@ async def stream_completion(
         except httpx.HTTPError as error:
             last_status = 0
             last_body = f"Network error: {error}"[:2000]
+            continue
+        except Exception as error:  # noqa: BLE001 - a transport-level
+            # surprise (event-loop-bound pool, TLS stack, provider
+            # SDK quirk) must degrade to the next target, never
+            # kill the whole job. The repr is ledgered upstream
+            # via AttemptsExhausted when every target fails.
+            last_status = 0
+            last_body = f"Unexpected transport error: {error!r}"[:2000]
             continue
     raise AttemptsExhausted(last_status, last_body, last_retry_after)
