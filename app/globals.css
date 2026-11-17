@@ -3303,3 +3303,10 @@ body:has(.chat-app) #main {
 .settings-memory-delete:hover { color: var(--danger, #ff7a7a); }
 .settings-memory-add { display: flex; gap: 8px; margin-top: 10px; }
 .settings-memory-add input { flex: 1; }
+
+/* Bot-check (human verification) page */
+.bot-check { min-height: 100dvh; display: grid; place-items: center; padding: 24px; }
+.bot-check-card { width: 100%; max-width: 420px; display: grid; gap: 14px; justify-items: center; text-align: center; }
+.bot-check-card h1 { margin: 0; font-size: 1.5rem; }
+.bot-check-card p { margin: 0; line-height: 1.55; }
+.bot-check-done { color: var(--success-text); background: var(--success-bg); border: 1px solid var(--success-line); border-radius: 10px; padding: 12px 14px; }

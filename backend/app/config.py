@@ -18,6 +18,19 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def turnstile_secret() -> str:
+    """Cloudflare Turnstile secret for bot-verification checks
+    (the backend verifies tokens minted on the main app's
+    /bot-check page). Same secret as the main app's."""
+    return os.environ.get("TURNSTILE_SECRET_KEY", "").strip()
+
+
+def app_public_url() -> str:
+    """Public base URL of the main app — challenge responses point
+    flagged humans at its /bot-check page."""
+    return os.environ.get("APP_PUBLIC_URL", "https://truthai-six.vercel.app").strip().rstrip("/")
+
+
 def owner_secret() -> str:
     """The owner's step-up password for privilege changes (grant /
     revoke admin, delete account). Set as OWNER_SECRET on the

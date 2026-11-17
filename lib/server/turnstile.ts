@@ -8,6 +8,7 @@ export const TURNSTILE_ACTIONS = [
   "create_account",
   "reset_password",
   "session_refresh",
+  "bot_check",
 ] as const;
 
 export type TurnstileAction = (typeof TURNSTILE_ACTIONS)[number];

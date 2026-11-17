@@ -953,6 +953,72 @@ def test_owner_secret_gate_and_directory_search():
         os.environ.update(saved)
 
 
+def test_security_bot_protection():
+    from app import security
+
+    saved = dict(os.environ)
+    try:
+        security._STATE.clear()
+        # Scanner paths block immediately — and stay blocked.
+        assert security.decision("1.1.1.1", "/.env") == "block"
+        assert security.decision("1.1.1.1", "/health") == "block"
+        security.clear_flags("1.1.1.1")
+        assert security.decision("1.1.1.1", "/health") == "allow"
+        # Auth failures flag first, then block at the higher count.
+        for _ in range(security.FLAG_AUTH_FAILURES):
+            security.record_auth_failure("2.2.2.2")
+        assert security.decision("2.2.2.2", "/v1/admin/overview") == "challenge"
+        for _ in range(security.BLOCK_AUTH_FAILURES):
+            security.record_auth_failure("2.2.2.2")
+        assert security.decision("2.2.2.2", "/v1/admin/overview") == "block"
+        # Human pass: roundtrip works, wrong IP / UA / tamper fails.
+        token = security.mint_pass("3.3.3.3", "UA-one")
+        assert security.check_pass(token, "3.3.3.3", "UA-one")
+        assert not security.check_pass(token, "3.3.3.3", "UA-two")
+        assert not security.check_pass(token, "4.4.4.4", "UA-one")
+        assert not security.check_pass(token + "x", "3.3.3.3", "UA-one")
+        assert not security.check_pass(None, "3.3.3.3", "UA-one")
+        # A 404 flood flags the IP for a challenge.
+        for _ in range(security.FLAG_NOT_FOUND):
+            security.record_not_found("5.5.5.5")
+        assert security.decision("5.5.5.5", "/v1/models") == "challenge"
+        # Turnstile verify fails closed when unconfigured.
+        os.environ.pop("TURNSTILE_SECRET_KEY", None)
+        ok, reason = asyncio.run(security.verify_turnstile("tok", "1.2.3.4"))
+        assert (ok, reason) == (False, "not_configured")
+        security._STATE.clear()
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def test_security_middleware_smoke():
+    from fastapi.testclient import TestClient
+
+    from app import main as main_mod
+    from app import security
+
+    security._STATE.clear()
+    client = TestClient(main_mod.app, raise_server_exceptions=False)
+    # Health is public and carries the hardening headers.
+    health = client.get("/health")
+    assert health.status_code == 200
+    assert health.headers.get("x-content-type-options") == "nosniff"
+    assert health.headers.get("x-frame-options") == "DENY"
+    # A scanner probe is blocked outright, not 404'd.
+    probe = client.get("/.env")
+    assert probe.status_code == 403
+    assert probe.json()["error"]["code"] == "IP_BLOCKED"
+    security._STATE.clear()
+    # Bot verify demands the service token.
+    verify = client.post("/v1/bot/verify", json={"token": "x", "ip": "1.2.3.4"})
+    assert verify.status_code == 401
+    # Oversized bodies are refused before any handler runs.
+    big = client.post("/v1/chat/jobs", content=b"x" * (2 * 1024 * 1024 + 10))
+    assert big.status_code == 413
+    security._STATE.clear()
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):

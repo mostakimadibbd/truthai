@@ -25,8 +25,8 @@ import io
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
-from . import admin, auth, jobs, models as model_lib, openrouter as openrouter_lib, watermark
-from .config import settings
+from . import admin, auth, jobs, models as model_lib, openrouter as openrouter_lib, security, watermark
+from .config import app_public_url, settings
 from .firebase import firestore_client
 
 app = FastAPI(title="Xyro AI Backend", docs_url=None, redoc_url=None)
@@ -37,6 +37,107 @@ def _error(status: int, code: str, message: str) -> JSONResponse:
         status_code=status,
         content={"success": False, "error": {"code": code, "message": message}},
     )
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    return forwarded.split(",")[0].strip() or (
+        request.client.host if request.client else "unknown"
+    )
+
+
+def _apply_security_headers(response, path: str):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Strict-Transport-Security"] = (
+        "max-age=31536000; includeSubDomains"
+    )
+    if path.startswith("/v1/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    """Hardening + bot protection for every request (app/security.py).
+
+    Callers presenting the service token (the main app, the admin
+    panel) are trusted server-to-server traffic and are never
+    challenged or blocked by heuristics — heuristics guard the
+    unauthenticated surface: scanner probes are blocked, auth-
+    failure and 404 floods flag the IP, and a flagged IP must
+    complete a human verification (428 + challenge URL) before
+    /v1/ calls are served again.
+    """
+    path = request.url.path
+    ip = _client_ip(request)
+    # Oversized bodies never reach a handler. The watermark route
+    # carries base64 images, so it gets the generous cap.
+    cap = 16 * 1024 * 1024 if path.startswith("/v1/images") else 2 * 1024 * 1024
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > cap:
+                return _apply_security_headers(
+                    _error(413, "PAYLOAD_TOO_LARGE", "That request is too large."),
+                    path,
+                )
+        except ValueError:
+            pass
+    trusted = auth.check_service_token(request.headers.get("x-service-token"))
+    if not trusted:
+        if security.rate_limited(ip):
+            return _apply_security_headers(
+                _error(
+                    429,
+                    "RATE_LIMITED",
+                    "Too many requests — slow down and try again shortly.",
+                ),
+                path,
+            )
+        verdict = security.decision(ip, path)
+        if verdict == "block":
+            return _apply_security_headers(
+                _error(
+                    403,
+                    "IP_BLOCKED",
+                    "This address is temporarily blocked after suspicious "
+                    "activity. If you are a real visitor, wait a few "
+                    "minutes and try again.",
+                ),
+                path,
+            )
+        if (
+            verdict == "challenge"
+            and path.startswith("/v1/")
+            and path != "/v1/bot/verify"
+            and not security.check_pass(
+                request.headers.get("x-human-pass"),
+                ip,
+                request.headers.get("user-agent"),
+            )
+        ):
+            challenge = JSONResponse(
+                status_code=428,
+                content={
+                    "success": False,
+                    "error": {
+                        "code": "BOT_VERIFICATION_REQUIRED",
+                        "message": (
+                            "We detected unusual activity from this "
+                            "connection. Please complete a quick human "
+                            "verification to continue."
+                        ),
+                    },
+                    "challengeUrl": f"{app_public_url()}/bot-check",
+                },
+            )
+            return _apply_security_headers(challenge, path)
+    response = await call_next(request)
+    if response.status_code == 404 and not trusted:
+        security.record_not_found(ip)
+    return _apply_security_headers(response, path)
 
 
 @app.get("/health")
@@ -219,6 +320,10 @@ async def _admin_gate(request: Request):
             firestore_client,
         )
     except admin.AdminAuthError as error:
+        if error.status in (401, 403):
+            # Failed admin authentication feeds the bot-protection
+            # scoring: bursts flag (then block) the source IP.
+            security.record_auth_failure(client_ip)
         return _error(error.status, error.code, error.message)
     except Exception:
         return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
@@ -345,6 +450,44 @@ async def admin_users_patch(request: Request):
     except Exception:
         return _error(503, "ACTION_FAILED", "That action couldn’t be completed.")
     return {"success": True, **result}
+
+
+@app.post("/v1/bot/verify")
+async def bot_verify(request: Request):
+    """Complete a human verification. The main app forwards the
+    Turnstile token its /bot-check page collected, together with
+    the visitor's IP and user agent as the app saw them. On
+    success the IP's bot-protection flags clear and a signed
+    human pass (30 minutes, IP + UA bound) is minted for the app
+    to present on later calls."""
+    if not auth.check_service_token(request.headers.get("x-service-token")):
+        return _error(401, "UNAUTHORIZED", "Invalid service token.")
+    try:
+        body = await request.json()
+    except Exception:
+        return _error(400, "INVALID_JSON", "Send a JSON body.")
+    if not isinstance(body, dict):
+        return _error(400, "INVALID_BODY", "Send a JSON object.")
+    ip = body.get("ip") if isinstance(body.get("ip"), str) else _client_ip(request)
+    user_agent = (
+        body.get("userAgent") if isinstance(body.get("userAgent"), str) else ""
+    )
+    ok, _reason = await security.verify_turnstile(
+        body.get("token") if isinstance(body.get("token"), str) else None,
+        ip,
+    )
+    if not ok:
+        return _error(
+            403,
+            "BOT_VERIFICATION_FAILED",
+            "Human verification could not be completed. Please try again.",
+        )
+    security.clear_flags(ip)
+    return {
+        "success": True,
+        "pass": security.mint_pass(ip, user_agent),
+        "expiresInSeconds": security.PASS_SECONDS,
+    }
 
 
 @app.post("/v1/images/watermark")
