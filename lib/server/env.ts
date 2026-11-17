@@ -66,6 +66,12 @@ export const serverEnv = {
   get cloudinaryUploadPreset() {
     return read("CLOUDINARY_UPLOAD_PRESET");
   },
+  /** The combined cloudinary://key:secret@cloud URL — used as
+   * a backup credential source when the individual variables
+   * are missing or rejected (owner instruction, 2026-11-17). */
+  get cloudinaryUrl() {
+    return read("CLOUDINARY_URL");
+  },
 
   // Firebase Admin (service account).
   get firebaseAdminProjectId() {

@@ -80,6 +80,7 @@ export async function GET() {
     credentialsLive: cloudinaryLive.ok,
     liveError: cloudinaryLive.errorKind,
     creditsPercent: cloudinaryLive.creditsPercent,
+    credentialsSource: cloudinaryLive.source,
   };
   // Cross-provider fallback keys (presence only, never values):
   // lets key setup be verified from the outside without console

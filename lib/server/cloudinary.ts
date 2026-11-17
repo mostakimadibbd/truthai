@@ -40,6 +40,96 @@ type CloudinaryConfig = {
 };
 
 /**
+ * Parse a combined Cloudinary URL
+ * (cloudinary://api_key:api_secret@cloud_name). Returns null
+ * for anything malformed — never throws, never echoes the
+ * input into an error.
+ */
+export function parseCloudinaryUrl(raw: string | undefined): CloudinaryConfig | null {
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw.trim());
+    if (parsed.protocol !== "cloudinary:") return null;
+    const apiKey = decodeURIComponent(parsed.username);
+    const apiSecret = decodeURIComponent(parsed.password);
+    const cloudName = parsed.hostname;
+    if (!apiKey || !apiSecret || !cloudName) return null;
+    return { cloudName, apiKey, apiSecret };
+  } catch {
+    return null;
+  }
+}
+
+export type CloudinaryConfigSource = {
+  cloudName?: string;
+  apiKey?: string;
+  apiSecret?: string;
+  url?: string;
+};
+
+/**
+ * Ordered credential candidates (owner instruction,
+ * 2026-11-17: "use the url if the api or other secret fail"):
+ * the individual variables first, then the combined
+ * CLOUDINARY_URL when it names a DIFFERENT credential set.
+ * Uploads and the live probe try each in order before giving
+ * up (and before the blob-store fallback).
+ */
+export function cloudinaryConfigCandidates(
+  source: CloudinaryConfigSource = {
+    cloudName: serverEnv.cloudinaryCloudName,
+    apiKey: serverEnv.cloudinaryApiKey,
+    apiSecret: serverEnv.cloudinaryApiSecret,
+    url: serverEnv.cloudinaryUrl,
+  },
+): CloudinaryConfig[] {
+  return candidateList(source).map((entry) => entry.config);
+}
+
+function candidateList(
+  source: CloudinaryConfigSource = {
+    cloudName: serverEnv.cloudinaryCloudName,
+    apiKey: serverEnv.cloudinaryApiKey,
+    apiSecret: serverEnv.cloudinaryApiSecret,
+    url: serverEnv.cloudinaryUrl,
+  },
+): { config: CloudinaryConfig; source: "variables" | "url" }[] {
+  const candidates: { config: CloudinaryConfig; source: "variables" | "url" }[] = [];
+  if (source.cloudName && source.apiKey && source.apiSecret) {
+    candidates.push({
+      config: {
+        cloudName: source.cloudName,
+        apiKey: source.apiKey,
+        apiSecret: source.apiSecret,
+      },
+      source: "variables",
+    });
+  }
+  const fromUrl = parseCloudinaryUrl(source.url);
+  if (
+    fromUrl &&
+    !candidates.some(
+      (entry) =>
+        entry.config.cloudName === fromUrl.cloudName &&
+        entry.config.apiKey === fromUrl.apiKey,
+    )
+  ) {
+    candidates.push({ config: fromUrl, source: "url" });
+  }
+  return candidates;
+}
+
+function applyCloudinaryConfig(config: CloudinaryConfig): CloudinaryConfig {
+  cloudinary.config({
+    cloud_name: config.cloudName,
+    api_key: config.apiKey,
+    api_secret: config.apiSecret,
+    secure: true,
+  });
+  return config;
+}
+
+/**
  * Core account config: cloud name + API key/secret. Everything
  * server-side (generated-image and avatar uploads, signed private
  * download URLs, resource reads/deletes) needs only this. The
@@ -48,15 +138,33 @@ type CloudinaryConfig = {
  * must not break generated images or avatars.
  */
 function getCloudinaryConfig(): CloudinaryConfig {
-  const cloudName = serverEnv.cloudinaryCloudName;
-  const apiKey = serverEnv.cloudinaryApiKey;
-  const apiSecret = serverEnv.cloudinaryApiSecret;
-  if (!cloudName || !apiKey || !apiSecret) {
+  const [primary] = cloudinaryConfigCandidates();
+  if (!primary) {
     throw new Error("Cloudinary account credentials are not configured.");
   }
+  return applyCloudinaryConfig(primary);
+}
 
-  cloudinary.config({ cloud_name: cloudName, api_key: apiKey, api_secret: apiSecret, secure: true });
-  return { cloudName, apiKey, apiSecret };
+/** Run an upload against each credential candidate in order;
+ * the first success wins. Throws the last error when every
+ * candidate fails (callers then use the blob-store fallback). */
+async function withCloudinaryCandidates<T>(
+  attempt: () => Promise<T>,
+): Promise<T> {
+  const candidates = candidateList();
+  if (candidates.length === 0) {
+    throw new Error("Cloudinary account credentials are not configured.");
+  }
+  let lastError: unknown = null;
+  for (const candidate of candidates) {
+    applyCloudinaryConfig(candidate.config);
+    try {
+      return await attempt();
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError ?? new Error("Cloudinary upload failed.");
 }
 
 function getCloudinaryUploadPreset(): string {
@@ -120,6 +228,9 @@ export type CloudinaryLiveCheck = {
   ok: boolean;
   errorKind: string | null;
   creditsPercent: number | null;
+  /** Which credential source answered: the individual
+   * variables or the combined CLOUDINARY_URL. */
+  source: "variables" | "url" | null;
 };
 
 /**
@@ -131,41 +242,46 @@ export type CloudinaryLiveCheck = {
  * never credential material.
  */
 export async function checkCloudinaryLive(): Promise<CloudinaryLiveCheck> {
-  try {
-    getCloudinaryConfig();
-  } catch {
-    return { ok: false, errorKind: "not_configured", creditsPercent: null };
+  const candidates = candidateList();
+  if (candidates.length === 0) {
+    return { ok: false, errorKind: "not_configured", creditsPercent: null, source: null };
   }
-  try {
-    const usage = (await Promise.race([
-      cloudinary.api.usage(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("cloudinary-probe-timeout")), 6_000),
-      ),
-    ])) as { credits?: { usage?: number; limit?: number } };
-    let creditsPercent: number | null = null;
-    const credits = usage?.credits;
-    if (
-      credits &&
-      typeof credits.limit === "number" &&
-      credits.limit > 0 &&
-      typeof credits.usage === "number"
-    ) {
-      creditsPercent = Math.round((credits.usage / credits.limit) * 1000) / 10;
+  let lastError: unknown = null;
+  for (const candidate of candidates) {
+    applyCloudinaryConfig(candidate.config);
+    try {
+      const usage = (await Promise.race([
+        cloudinary.api.usage(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("cloudinary-probe-timeout")), 6_000),
+        ),
+      ])) as { credits?: { usage?: number; limit?: number } };
+      let creditsPercent: number | null = null;
+      const credits = usage?.credits;
+      if (
+        credits &&
+        typeof credits.limit === "number" &&
+        credits.limit > 0 &&
+        typeof credits.usage === "number"
+      ) {
+        creditsPercent = Math.round((credits.usage / credits.limit) * 1000) / 10;
+      }
+      return { ok: true, errorKind: null, creditsPercent, source: candidate.source };
+    } catch (error) {
+      lastError = error;
     }
-    return { ok: true, errorKind: null, creditsPercent };
-  } catch (error) {
-    if (error instanceof Error && error.message === "cloudinary-probe-timeout") {
-      return { ok: false, errorKind: "network", creditsPercent: null };
-    }
-    const status =
-      (error as { error?: { http_code?: number } } | null)?.error?.http_code ?? 0;
-    return {
-      ok: false,
-      errorKind: classifyCloudinaryHttp(status, cloudinaryErrorMessage(error)),
-      creditsPercent: null,
-    };
   }
+  if (lastError instanceof Error && lastError.message === "cloudinary-probe-timeout") {
+    return { ok: false, errorKind: "network", creditsPercent: null, source: null };
+  }
+  const status =
+    (lastError as { error?: { http_code?: number } } | null)?.error?.http_code ?? 0;
+  return {
+    ok: false,
+    errorKind: classifyCloudinaryHttp(status, cloudinaryErrorMessage(lastError)),
+    creditsPercent: null,
+    source: null,
+  };
 }
 
 /** One upload_stream call, normalised to the fields callers use. */
@@ -254,20 +370,21 @@ export async function uploadAvatarImage(
   uid: string,
 ): Promise<{ url: string; publicId: string }> {
   try {
-    getCloudinaryConfig();
     const publicId = `avatar-${Date.now().toString(36)}-${Math.random()
       .toString(36)
       .slice(2, 10)}`;
-    const result = await uploadStreamWithRetry(
-      {
-        public_id: publicId,
-        folder: `xyro/avatars/${uid}`,
-        type: "upload",
-        overwrite: true,
-        invalidate: true,
-        resource_type: "image",
-      },
-      buffer,
+    const result = await withCloudinaryCandidates(() =>
+      uploadStreamWithRetry(
+        {
+          public_id: publicId,
+          folder: `xyro/avatars/${uid}`,
+          type: "upload",
+          overwrite: true,
+          invalidate: true,
+          resource_type: "image",
+        },
+        buffer,
+      ),
     );
     return { url: result.secure_url ?? "", publicId: result.public_id };
   } catch (error) {
@@ -299,17 +416,18 @@ export async function uploadGeneratedImage(
   generationId: string,
 ): Promise<{ publicId: string; bytes: number }> {
   try {
-    getCloudinaryConfig();
-    const result = await uploadStreamWithRetry(
-      {
-        public_id: generationId,
-        folder: `xyro/generated/${uid}`,
-        type: "authenticated",
-        resource_type: "image",
-        format: "png",
-        overwrite: false,
-      },
-      buffer,
+    const result = await withCloudinaryCandidates(() =>
+      uploadStreamWithRetry(
+        {
+          public_id: generationId,
+          folder: `xyro/generated/${uid}`,
+          type: "authenticated",
+          resource_type: "image",
+          format: "png",
+          overwrite: false,
+        },
+        buffer,
+      ),
     );
     return { publicId: result.public_id, bytes: result.bytes };
   } catch (error) {
@@ -344,16 +462,17 @@ export async function uploadUserFile(
   },
 ): Promise<{ publicId: string; bytes: number }> {
   try {
-    getCloudinaryConfig();
-    const result = await uploadStreamWithRetry(
-      {
-        public_id: options.publicId,
-        type: "authenticated",
-        resource_type: options.resourceType,
-        format: options.resourceType === "image" ? undefined : options.format,
-        overwrite: false,
-      },
-      buffer,
+    const result = await withCloudinaryCandidates(() =>
+      uploadStreamWithRetry(
+        {
+          public_id: options.publicId,
+          type: "authenticated",
+          resource_type: options.resourceType,
+          format: options.resourceType === "image" ? undefined : options.format,
+          overwrite: false,
+        },
+        buffer,
+      ),
     );
     return { publicId: result.public_id, bytes: result.bytes };
   } catch (error) {
