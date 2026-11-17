@@ -212,6 +212,7 @@ async def _authenticate(request: Request) -> dict | None:
         request.headers.get("x-service-token"),
         request.headers.get("cookie"),
         request.headers.get("authorization"),
+        delegation=request.headers.get("x-delegation"),
     )
 
 
@@ -400,6 +401,25 @@ async def admin_trash(request: Request):
         return {"success": True, **admin.get_trash(firestore_client())}
     except Exception:
         return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
+
+
+@app.post("/v1/admin/verify-owner-secret")
+async def admin_verify_owner_secret(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    _actor_uid, _actor_email, actor_role = gate
+    try:
+        body = await request.json()
+    except Exception:
+        return _error(400, "INVALID_JSON", "Send a JSON body.")
+    provided = body.get("ownerSecret") if isinstance(body, dict) else None
+    try:
+        return admin.verify_owner_secret(
+            actor_role, provided if isinstance(provided, str) else None
+        )
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
 
 
 @app.get("/v1/admin/users/{uid}")

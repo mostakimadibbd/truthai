@@ -11,11 +11,25 @@ A job submission must carry ALL of:
 
 The service never trusts the proxy's word for who the user is; it
 re-verifies the user's own credentials on every call.
+
+Delegation assertions: when the proxy has JUST verified the
+user itself (the chat route verifies the Firebase ID token,
+signature and verified email, on every request), it may send an
+`X-Delegation` assertion instead of relying on the session
+cookie: base64url(JSON {uid, exp}) + "." + hex HMAC-SHA256
+keyed with the shared service token, living six minutes. The
+assertion replaces ONLY the session-cookie leg (whose shared
+SESSION_SECRET made delegation fragile across deployments);
+the service-token leg and the Firebase ID-token leg — verified
+here independently, uid required to match the asserted uid —
+always run.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import json
 import re
 import time
 
@@ -188,20 +202,54 @@ def verify_id_token_detailed(id_token: str | None) -> tuple[str | None, str | No
         return None, type(error).__name__
 
 
+def verify_delegation_assertion(assertion: str | None) -> dict | None:
+    """Verify a delegation assertion minted by the Next.js app
+    (lib/server/delegation.ts). Returns {"uid"} or None."""
+    if not assertion or not settings.service_token:
+        return None
+    try:
+        payload_b64, signature = assertion.split(".", 1)
+        expected = hmac.new(
+            settings.service_token.encode(),
+            payload_b64.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode()))
+        uid = payload.get("uid")
+        exp = payload.get("exp")
+        now = int(time.time())
+        if not isinstance(uid, str) or not uid:
+            return None
+        if not isinstance(exp, int) or exp <= now or exp > now + 600:
+            return None
+        return {"uid": uid}
+    except Exception:
+        return None
+
+
 async def authenticate(
     service_token: str | None,
     cookie_header: str | None,
     authorization: str | None,
+    delegation: str | None = None,
 ) -> dict | None:
     """Return {"uid", "sid"} when every check passes, else None."""
     if not check_service_token(service_token):
         return None
-    session_cookie = _cookie_value(cookie_header, SESSION_COOKIE_NAME)
-    session = verify_session_cookie(session_cookie)
-    if session is None:
-        return None
-    if await _session_revoked(session["sid"]):
-        return None
+    if delegation is not None:
+        session = verify_delegation_assertion(delegation)
+        if session is None:
+            return None
+    else:
+        session_cookie = _cookie_value(cookie_header, SESSION_COOKIE_NAME)
+        session = verify_session_cookie(session_cookie)
+        if session is None:
+            return None
+        if await _session_revoked(session["sid"]):
+            return None
     bearer = None
     if authorization and authorization.startswith("Bearer "):
         bearer = authorization[len("Bearer "):].strip()

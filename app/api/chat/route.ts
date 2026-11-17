@@ -401,6 +401,7 @@ export async function POST(request: NextRequest) {
   ) {
     const delegated = await tryDelegateChatTurn({
       request,
+      uid: auth.uid,
       chatId,
       responseId,
       userMessageId,

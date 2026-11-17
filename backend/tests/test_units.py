@@ -322,6 +322,7 @@ class _FakeUserRecord:
         self.uid = uid
         self.email = email
         self.display_name = None
+        self.photo_url = None
         self.email_verified = True
         self.disabled = False
         self._admin_flag = admin_flag
@@ -1017,6 +1018,157 @@ def test_security_middleware_smoke():
     big = client.post("/v1/chat/jobs", content=b"x" * (2 * 1024 * 1024 + 10))
     assert big.status_code == 413
     security._STATE.clear()
+
+
+def test_delegation_assertion():
+    import base64 as b64_mod
+    import hashlib as hl
+    import hmac as hm
+    import json as json_mod
+    import time as time_mod
+
+    from app import auth
+    from app.config import settings
+
+    def mint(uid, token, exp):
+        payload = b64_mod.urlsafe_b64encode(
+            json_mod.dumps({"uid": uid, "exp": exp}, separators=(",", ":")).encode()
+        ).decode().rstrip("=")
+        sig = hm.new(token.encode(), payload.encode(), hl.sha256).hexdigest()
+        return payload + "." + sig
+
+    saved_token = settings.service_token
+    try:
+        settings.service_token = "test-service-token-0123456789"
+        now = int(time_mod.time())
+        good = mint("user-123", settings.service_token, now + 300)
+        # The shared interop vector (fixed clock) must verify when
+        # time is frozen at its mint moment — the TS suite pins
+        # the exact string the app produces.
+        vector = (
+            "eyJ1aWQiOiJ1c2VyLTEyMyIsImV4cCI6MTcwMDAwMDM2MH0"
+            ".985baa291a91627338877648e88fe8e791d7de37489272b40607cd58a70e6d54"
+        )
+        real_time = time_mod.time
+        auth.time.time = lambda: 1_700_000_000  # noqa: SLF001 - test patch
+        try:
+            assert auth.verify_delegation_assertion(vector) == {"uid": "user-123"}
+        finally:
+            auth.time.time = real_time  # noqa: SLF001 - test patch
+        assert auth.verify_delegation_assertion(good) == {"uid": "user-123"}
+        # Tampered signature, wrong key, expired, malformed.
+        assert auth.verify_delegation_assertion(good[:-1] + "0") is None
+        assert auth.verify_delegation_assertion(
+            mint("user-123", "other-token", now + 300)
+        ) is None
+        assert auth.verify_delegation_assertion(
+            mint("user-123", settings.service_token, now - 5)
+        ) is None
+        assert auth.verify_delegation_assertion("not-an-assertion") is None
+        assert auth.verify_delegation_assertion(None) is None
+
+        # Full authenticate(): assertion replaces the cookie leg,
+        # the ID-token leg still runs and must match the uid.
+        real_verify = auth.verify_id_token
+        auth.verify_id_token = lambda token: "user-123" if token == "good-token" else None
+        try:
+            session = asyncio.run(
+                auth.authenticate(
+                    settings.service_token,
+                    None,
+                    "Bearer good-token",
+                    delegation=good,
+                )
+            )
+            assert session is not None and session["uid"] == "user-123"
+            # ID token for a different user -> rejected.
+            auth.verify_id_token = lambda token: "someone-else"
+            assert asyncio.run(
+                auth.authenticate(
+                    settings.service_token,
+                    None,
+                    "Bearer good-token",
+                    delegation=good,
+                )
+            ) is None
+            # Bad assertion -> rejected even with a good ID token.
+            auth.verify_id_token = lambda token: "user-123"
+            assert asyncio.run(
+                auth.authenticate(
+                    settings.service_token,
+                    None,
+                    "Bearer good-token",
+                    delegation=good[:-1] + "0",
+                )
+            ) is None
+        finally:
+            auth.verify_id_token = real_verify
+    finally:
+        settings.service_token = saved_token
+
+
+def test_admin_privileged_targets_and_secret_verify():
+    from app import admin
+
+    db = _AdminDb()
+    db.store[("admins", "boss")] = {"role": "owner"}
+    db.store[("admins", "helper")] = {"role": "admin"}
+    records = {
+        "boss": _FakeUserRecord("boss", "boss@example.com"),
+        "helper": _FakeUserRecord("helper", "helper@example.com"),
+        "plain": _FakeUserRecord("plain", "plain@example.com"),
+    }
+    records["plain"].photo_url = "https://img.example/plain.png"
+    fake_auth = _FakeAuthModule(records)
+    original_auth = admin.firebase_auth
+    admin.firebase_auth = lambda: fake_auth
+    saved = dict(os.environ)
+    try:
+        # Directory rows carry the profile picture.
+        listing = admin.get_users(db, "boss", "owner")
+        plain_row = next(r for r in listing["users"] if r["uid"] == "plain")
+        assert plain_row["photoUrl"] == "https://img.example/plain.png"
+        boss_row = next(r for r in listing["users"] if r["uid"] == "boss")
+        assert boss_row["photoUrl"] is None
+
+        def expect_code(code, fn):
+            try:
+                fn()
+            except admin.AdminAuthError as error:
+                assert error.code == code, error.code
+                return
+            raise AssertionError(f"expected {code}")
+
+        # An admin can SEE a fellow admin but cannot disable them,
+        # reset their password link, or sign them out — owner only.
+        expect_code("OWNER_ONLY", lambda: admin.patch_user(
+            db, "helper", "admin", "helper@example.com", "boss", "disable"))
+        expect_code("OWNER_ONLY", lambda: admin.patch_user(
+            db, "helper2", "admin", "h2@example.com", "helper", "disable"))
+        expect_code("OWNER_ONLY", lambda: admin.patch_user(
+            db, "helper2", "admin", "h2@example.com", "helper", "reset-link"))
+        expect_code("OWNER_ONLY", lambda: admin.patch_user(
+            db, "helper2", "admin", "h2@example.com", "helper", "sign-out-all"))
+        # The same admin CAN still disable a normal user.
+        result = admin.patch_user(db, "helper", "admin", "helper@example.com", "plain", "disable")
+        assert result["success"] is True
+        # And the owner can disable an admin.
+        result = admin.patch_user(db, "boss", "owner", "boss@example.com", "helper", "disable")
+        assert result["success"] is True
+
+        # verify_owner_secret: exact failure taxonomy.
+        os.environ.pop("OWNER_SECRET", None)
+        expect_code("OWNER_SECRET_NOT_CONFIGURED", lambda: admin.verify_owner_secret("owner", "x"))
+        os.environ["OWNER_SECRET"] = "correct-horse"
+        expect_code("OWNER_SECRET_INVALID", lambda: admin.verify_owner_secret("owner", "nope"))
+        expect_code("OWNER_ONLY", lambda: admin.verify_owner_secret("admin", "correct-horse"))
+        assert admin.verify_owner_secret("owner", "correct-horse")["success"] is True
+        # Surrounding whitespace from a mobile paste is forgiven.
+        assert admin.verify_owner_secret("owner", "  correct-horse  ")["success"] is True
+    finally:
+        admin.firebase_auth = original_auth
+        os.environ.clear()
+        os.environ.update(saved)
 
 
 if __name__ == "__main__":

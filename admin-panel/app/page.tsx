@@ -85,6 +85,7 @@ type UserRow = {
   uid: string;
   email: string | null;
   displayName: string | null;
+  photoUrl?: string | null;
   emailVerified: boolean;
   disabled: boolean;
   admin: boolean;
@@ -253,6 +254,92 @@ function initials(row: { displayName: string | null; email: string | null; uid: 
   const source = row.displayName || row.email || row.uid;
   const parts = source.replace(/@.*/, "").split(/[\s._-]+/).filter(Boolean);
   return ((parts[0]?.[0] ?? "X") + (parts[1]?.[0] ?? "")).toUpperCase();
+}
+
+type AvatarRow = {
+  displayName: string | null;
+  email: string | null;
+  uid: string;
+  photoUrl?: string | null;
+};
+
+function Avatar({ row, size }: { row: AvatarRow; size?: "sm" | "lg" }) {
+  const [broken, setBroken] = useState(false);
+  const url = row.photoUrl && !broken ? row.photoUrl : null;
+  return (
+    <span className={`avatar ${size ?? ""}`}>
+      {url ? (
+        <img src={url} alt="" loading="lazy" onError={() => setBroken(true)} />
+      ) : (
+        initials(row)
+      )}
+    </span>
+  );
+}
+
+function OwnerSecretTester({ user }: { user: User }) {
+  const [value, setValue] = useState("");
+  const [state, setState] = useState<"idle" | "testing" | "ok" | "error">("idle");
+  const [message, setMessage] = useState("");
+
+  const test = async () => {
+    if (!value.trim()) return;
+    setState("testing");
+    setMessage("");
+    try {
+      const response = await panelApi(user, "/api/owner-secret", {
+        method: "POST",
+        body: { ownerSecret: value },
+      });
+      if (response.ok) {
+        setState("ok");
+        setMessage("This secret works — granting, revoking and deleting are unlocked with it.");
+        setValue("");
+        return;
+      }
+      setState("error");
+      setMessage(await apiErrorMessage(response, "That secret didn’t work."));
+    } catch {
+      setState("error");
+      setMessage("The check couldn’t reach the backend. Try again in a moment.");
+    }
+  };
+
+  return (
+    <section className="card owner-card">
+      <div className="card-head">
+        <h2>Test your owner secret</h2>
+        <span className="role-badge owner">owner</span>
+      </div>
+      <p className="muted">
+        Type the secret exactly as it is set on the backend and test it — nothing
+        changes. If it fails, the message tells you whether the backend has no
+        secret set yet or the value doesn’t match.
+      </p>
+      <div className="secret-test-row">
+        <input
+          type="password"
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          placeholder="Enter your owner secret"
+          autoComplete="current-password"
+          onKeyDown={(event) => {
+            if (event.key === "Enter") void test();
+          }}
+        />
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={() => void test()}
+          disabled={state === "testing" || !value.trim()}
+        >
+          {state === "testing" ? "Testing…" : "Test secret"}
+        </button>
+      </div>
+      {state === "ok" && <p className="secret-test-ok" role="status">{message}</p>}
+      {state === "error" && <p className="alert" role="alert">{message}</p>}
+    </section>
+  );
 }
 
 function Sparkline({ values, height = 36 }: { values: number[]; height?: number }) {
@@ -869,7 +956,7 @@ export default function ConsolePage() {
         </nav>
         <div className="side-foot">
           <div className="viewer-card">
-            <span className="avatar">{initials({ displayName: null, email: user?.email ?? null, uid: viewer?.uid ?? "?" })}</span>
+            <Avatar row={{ displayName: user?.displayName ?? null, email: user?.email ?? null, uid: viewer?.uid ?? "?", photoUrl: user?.photoURL ?? null }} />
             <div className="viewer-meta">
               <span className="viewer-email">{user?.email ?? ""}</span>
               <span className={`role-badge ${viewer?.role ?? ""}`}>{viewer?.role ?? "admin"}</span>
@@ -1046,7 +1133,7 @@ export default function ConsolePage() {
                     .slice(0, 5)
                     .map((row) => (
                       <button key={row.uid} type="button" className="rank-row" onClick={() => void openDetail(row.uid)}>
-                        <span className="avatar sm">{initials(row)}</span>
+                        <Avatar row={row} size="sm" />
                         <span className="rank-email">{row.email ?? row.uid}</span>
                         <span className="muted small">{date(row.createdAt)}</span>
                       </button>
@@ -1096,6 +1183,8 @@ export default function ConsolePage() {
               </section>
             )}
 
+            {user && <OwnerSecretTester user={user} />}
+
             <section className="card owner-card">
               <div className="card-head">
                 <h2>Add an admin</h2>
@@ -1133,7 +1222,7 @@ export default function ConsolePage() {
                           void openDetail(row.uid);
                         }}
                       >
-                        <span className="avatar sm">{initials(row)}</span>
+                        <Avatar row={row} size="sm" />
                         <span>{row.displayName || row.email || row.uid}</span>
                         <span className="muted small">{row.email ?? row.uid}</span>
                       </button>
@@ -1160,7 +1249,7 @@ export default function ConsolePage() {
                 .filter((row) => row.admin)
                 .map((row) => (
                   <div key={row.uid} className="admin-row">
-                    <span className="avatar sm">{initials(row)}</span>
+                    <Avatar row={row} size="sm" />
                     <span className="admin-row-main">
                       <strong>{row.displayName || row.email || row.uid}</strong>
                       <span className="muted small">{row.email ?? row.uid}</span>
@@ -1265,7 +1354,7 @@ export default function ConsolePage() {
                       <tr key={row.uid} className="clickable" onClick={() => void openDetail(row.uid)}>
                         <td>
                           <span className="user-cell">
-                            <span className="avatar sm">{initials(row)}</span>
+                            <Avatar row={row} size="sm" />
                             <span>
                               <span className="user-name">{row.displayName || row.email || row.uid}</span>
                               <span className="user-email">{row.email ?? row.uid}</span>
@@ -1520,7 +1609,7 @@ export default function ConsolePage() {
           <button type="button" className="drawer-scrim" aria-label="Close details" onClick={() => setDetailUid(null)} />
           <aside className="drawer">
             <div className="drawer-head">
-              <span className="avatar lg">{detailRow ? initials(detailRow) : "?"}</span>
+              {detailRow ? <Avatar row={detailRow} size="lg" /> : <span className="avatar lg">?</span>}
               <div className="grow">
                 <strong>{detail?.displayName || detailRow?.displayName || detail?.email || detailRow?.email || detailUid}</strong>
                 <span className="muted small">{detail?.email ?? detailRow?.email ?? detailUid}</span>
@@ -1665,6 +1754,14 @@ export default function ConsolePage() {
                 />
               </label>
             )}
+            {SECRET_GATED_ACTIONS.includes(pending.action) &&
+              viewer?.ownerSecretConfigured === false && (
+                <div className="alert" role="alert">
+                  The owner secret is not set on the backend yet, so this will be
+                  refused. Add OWNER_SECRET to the xyro-backend project in Vercel
+                  and redeploy it first.
+                </div>
+              )}
             {SECRET_GATED_ACTIONS.includes(pending.action) && (
               <label className="modal-field">
                 <span>Owner secret — required for this change</span>

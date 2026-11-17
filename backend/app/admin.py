@@ -729,6 +729,8 @@ def get_users(db, viewer_uid: str, viewer_role: str, query: str = "") -> dict:
                 "email": record.email,
                 "displayName": record.display_name
                 or (profile.get("displayName") if isinstance(profile.get("displayName"), str) else None),
+                "photoUrl": getattr(record, "photo_url", None)
+                or (profile.get("photoURL") if isinstance(profile.get("photoURL"), str) else None),
                 "emailVerified": bool(record.email_verified),
                 "disabled": bool(record.disabled),
                 "admin": role is not None,
@@ -1042,6 +1044,21 @@ def _require_owner_secret(provided: str | None) -> None:
         )
 
 
+def verify_owner_secret(actor_role: str, provided: str | None) -> dict:
+    """Check an owner-secret attempt WITHOUT changing anything.
+
+    The panel's Owner tab uses this so the owner can confirm the
+    secret works and see precisely which failure applies (not
+    configured on the backend vs. simply incorrect) instead of
+    discovering it mid-action."""
+    if actor_role != "owner":
+        raise AdminAuthError(
+            403, "OWNER_ONLY", "Only the owner has an owner secret."
+        )
+    _require_owner_secret(provided)
+    return {"success": True, "configured": True}
+
+
 def patch_user(
     db,
     actor_uid: str,
@@ -1118,11 +1135,11 @@ def patch_user(
     if action in ("reset-link", "sign-out-all"):
         # Full-control actions. Touching the OWNER's account
         # this way stays the owner's own power.
-        if target_role == "owner" and actor_role != "owner":
+        if target_role in ("owner", "admin") and actor_role != "owner":
             raise AdminAuthError(
                 403,
                 "OWNER_ONLY",
-                "Only the owner can do that on the owner’s account.",
+                "Only the owner can do that on an admin’s or the owner’s account.",
             )
         if action == "reset-link":
             try:
@@ -1175,9 +1192,11 @@ def patch_user(
             # effect on the target's very next request.
             db.collection("admins").document(target_uid).delete()
     else:
-        if target_role == "owner" and actor_role != "owner":
+        if target_role in ("owner", "admin") and actor_role != "owner":
             raise AdminAuthError(
-                403, "OWNER_ONLY", "Only the owner can disable the owner’s account."
+                403,
+                "OWNER_ONLY",
+                "Only the owner can disable an admin’s or the owner’s account.",
             )
         firebase_auth().update_user(target_uid, disabled=(action == "disable"))
     try:

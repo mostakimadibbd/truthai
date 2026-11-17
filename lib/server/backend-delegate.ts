@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { recordBudget } from "@/lib/server/budget";
+import { mintDelegationAssertion } from "@/lib/server/delegation";
 import { serverEnv } from "@/lib/server/env";
 
 // Optional delegation to the Python backend service (backend/).
@@ -27,6 +28,7 @@ import { serverEnv } from "@/lib/server/env";
 
 type DelegateArgs = {
   request: Request;
+  uid: string;
   chatId: string;
   responseId: string;
   userMessageId: string;
@@ -62,6 +64,7 @@ export async function tryDelegateChatTurn(
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-Service-Token": config.token,
+    "X-Delegation": mintDelegationAssertion(args.uid, config.token),
     Authorization: args.request.headers.get("authorization") ?? "",
     Cookie: args.request.headers.get("cookie") ?? "",
   };
