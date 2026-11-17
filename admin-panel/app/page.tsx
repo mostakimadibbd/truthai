@@ -79,6 +79,11 @@ type Overview = {
       { totals: Totals; buckets: (Totals & { label: string })[] }
     >
   >;
+  // Sections that failed to load on the backend and were
+  // degraded to empty (exception class names only). Surfaced
+  // in the UI so an empty section never masquerades as real
+  // zeros.
+  dataIssues?: { section: string; error: string }[];
 };
 
 type UserRow = {
@@ -839,21 +844,23 @@ export default function ConsolePage() {
   }, [state, loadExtras]);
 
   // Realtime feel without hammering the backend: the overview
-  // refreshes every 15s, the (heavier) user directory every
-  // 60s, logs stream only while the Logs tab is open, and
-  // storage/trash load on demand. Plus a 1s ticker for the
-  // "updated Xs ago" label.
+  // refreshes every 30s, the (heavier) user directory every
+  // 90s, logs stream only while the Logs tab is open, and
+  // storage/trash load on demand. The backend also caches
+  // these reads briefly — Firestore's free daily read quota
+  // is finite, and polling is what used to burn it. Plus a 1s
+  // ticker for the "updated Xs ago" label.
   useEffect(() => {
     if (state !== "ready") return;
     const fast = window.setInterval(() => {
       if (document.hidden) return;
       void loadOverview();
       if (tab === "logs") void loadLogs();
-    }, 15_000);
+    }, 30_000);
     const slow = window.setInterval(() => {
       if (document.hidden) return;
       void loadDirectory();
-    }, 60_000);
+    }, 90_000);
     const ticker = window.setInterval(() => setNowTick(Date.now()), 1000);
     return () => {
       window.clearInterval(fast);
@@ -1205,6 +1212,17 @@ export default function ConsolePage() {
             </button>
           </div>
         </header>
+
+        {tab === "overview" && overview?.dataIssues && overview.dataIssues.length > 0 && (
+          <div className="alert" role="alert">
+            {overview.dataIssues.some((issue) => issue.error === "ResourceExhausted")
+              ? "Live data is limited right now — the database's daily free read quota is used up (it resets at 13:00 Dhaka time). Figures below may be incomplete until then."
+              : `Some sections couldn't load (${overview.dataIssues.map((issue) => issue.section).join(", ")}) — showing everything that did.`}
+          </div>
+        )}
+        {tab === "overview" && usersError && (
+          <div className="alert" role="alert">{usersError}</div>
+        )}
 
         {tab === "overview" && overview && rangeTotals && (
           <>

@@ -63,11 +63,11 @@ class FakeQuery:
         return self
 
     def where(self, field: str, op: str, value) -> "FakeQuery":
-        # Parity: the real client supports field filters on
-        # queries; only equality is modelled (all the app uses).
-        if op != "==":
-            raise ValueError(f"FakeQuery only models == filters, got {op}")
-        self._filters.append((field, value))
+        # Parity: the real client supports comparison filters
+        # on queries; the app uses == and >= (minute windows).
+        if op not in ("==", ">=", "<=", ">", "<"):
+            raise ValueError(f"FakeQuery does not model the {op} filter")
+        self._filters.append((field, op, value))
         return self
 
     def _select(self) -> list:
@@ -76,12 +76,25 @@ class FakeQuery:
             and p.count("/") == self._prefix.count("/") + 1
         )
         snapshots = [FakeSnapshot(self._store[path]) for path in paths]
-        for field, value in self._filters:
-            snapshots = [
-                snap
-                for snap in snapshots
-                if (snap.to_dict() or {}).get(field) == value
-            ]
+        for field, op, value in self._filters:
+            def keep(snap, field=field, op=op, value=value):
+                current = (snap.to_dict() or {}).get(field)
+                if op == "==":
+                    return current == value
+                if current is None:
+                    return False
+                try:
+                    if op == ">=":
+                        return current >= value
+                    if op == "<=":
+                        return current <= value
+                    if op == ">":
+                        return current > value
+                    return current < value
+                except TypeError:
+                    return False
+
+            snapshots = [snap for snap in snapshots if keep(snap)]
         if self._limit:
             snapshots = snapshots[-self._limit:] if self._limit_to_last else snapshots[: self._limit]
         return snapshots

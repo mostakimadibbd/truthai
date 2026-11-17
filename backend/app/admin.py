@@ -359,21 +359,29 @@ def get_overview(db) -> dict:
         _minute_key(now - timedelta(minutes=offset)) for offset in range(59, -1, -1)
     ]
 
-    def load_minutes() -> list:
+    def load_minute_rows() -> list:
+        # ONE range query feeds both the last-hour series and
+        # the 24h/48h ranges. The previous design read every
+        # minute document individually (60 reads per overview)
+        # and then re-read 48 hours of them again for the
+        # ranges — that burned the Firestore free-tier daily
+        # read quota in a single evening of panel use.
+        start48 = _minute_key(now - timedelta(hours=48))
         rows = []
-        for key in minute_keys:
-            doc = db.collection("analytics_minutes").document(key).get()
-            rows.append(
-                {"minute": key, **_totals(doc.to_dict() if doc.exists else None)}
-            )
+        for doc in (
+            db.collection("analytics_minutes")
+            .where("minute", ">=", start48)
+            .limit(4000)
+            .get()
+        ):
+            data = doc.to_dict() or {}
+            if isinstance(data.get("minute"), str):
+                rows.append(data)
         return rows
 
-    minutes = _section(
-        issues,
-        "minutes",
-        load_minutes,
-        [{"minute": key, **_totals(None)} for key in minute_keys],
-    )
+    minute_rows = _section(issues, "minutes", load_minute_rows, [])
+    by_minute = {row["minute"]: row for row in minute_rows}
+    minutes = [{"minute": key, **_totals(by_minute.get(key))} for key in minute_keys]
 
     def load_models() -> list:
         rows = []
@@ -537,29 +545,32 @@ def get_overview(db) -> dict:
         "live": _live_streams(),
         "lifetime": lifetime,
         "lifetimeDays": days_with_data,
-        "ranges": _ranges(db, now),
+        "ranges": _ranges(db, now, minute_rows),
         "dataIssues": issues,
     }
 
 
-def _ranges(db, now: datetime) -> dict:
+def _ranges(db, now: datetime, rows: list | None = None) -> dict:
     """24h / 48h / 7d views. The 24h and 48h views aggregate
     the per-minute rollups into hourly (24h) and two-hourly
     (48h) buckets; 7d reuses the daily rollups. Best effort:
-    a range that fails to load is simply absent."""
+    a range that fails to load is simply absent. Callers that
+    already fetched the minute rows pass them in, so the
+    window is read from Firestore once, not twice."""
     ranges: dict = {}
     try:
-        start48 = _minute_key(now - timedelta(hours=48))
-        rows = []
-        for doc in (
-            db.collection("analytics_minutes")
-            .where("minute", ">=", start48)
-            .limit(4000)
-            .get()
-        ):
-            data = doc.to_dict() or {}
-            if isinstance(data.get("minute"), str):
-                rows.append(data)
+        if rows is None:
+            start48 = _minute_key(now - timedelta(hours=48))
+            rows = []
+            for doc in (
+                db.collection("analytics_minutes")
+                .where("minute", ">=", start48)
+                .limit(4000)
+                .get()
+            ):
+                data = doc.to_dict() or {}
+                if isinstance(data.get("minute"), str):
+                    rows.append(data)
 
         def aggregate(hours: int, bucket_hours: int) -> dict:
             cutoff = _minute_key(now - timedelta(hours=hours))

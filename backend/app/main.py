@@ -385,13 +385,41 @@ async def _admin_gate(request: Request):
         return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
 
 
+# Short-TTL response cache for the panel's read endpoints.
+# The panel polls these every few seconds; without a cache,
+# every poll re-read the same rollups and event lists, and an
+# evening of that exhausted Firestore's free daily read quota
+# (ResourceExhausted — the panel then showed zeros/errors).
+# The admin gate still runs on EVERY request; only the data
+# build is cached, per process, for a few seconds.
+_admin_cache: dict = {}
+
+
+def _admin_cached(key: str, ttl_seconds: float, build):
+    import copy
+    import time
+
+    now = time.time()
+    hit = _admin_cache.get(key)
+    if hit is not None and now - hit[0] < ttl_seconds:
+        return copy.deepcopy(hit[1])
+    value = build()
+    _admin_cache[key] = (now, copy.deepcopy(value))
+    return value
+
+
 @app.get("/v1/admin/overview")
 async def admin_overview(request: Request):
     gate = await _admin_gate(request)
     if isinstance(gate, JSONResponse):
         return gate
     try:
-        return {"success": True, **admin.get_overview(firestore_client())}
+        return {
+            "success": True,
+            **_admin_cached(
+                "overview", 30.0, lambda: admin.get_overview(firestore_client())
+            ),
+        }
     except Exception:
         return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
 
@@ -402,7 +430,12 @@ async def admin_audit(request: Request):
     if isinstance(gate, JSONResponse):
         return gate
     try:
-        return {"success": True, **admin.get_audit(firestore_client())}
+        return {
+            "success": True,
+            **_admin_cached(
+                "audit", 30.0, lambda: admin.get_audit(firestore_client())
+            ),
+        }
     except Exception:
         return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
 
@@ -415,10 +448,20 @@ async def admin_users(request: Request):
     viewer_uid, _email, viewer_role = gate
     query = request.query_params.get("q") or ""
     try:
-        return {
-            "success": True,
-            **admin.get_users(firestore_client(), viewer_uid, viewer_role, query),
-        }
+        if query:
+            # Directory searches always read fresh.
+            payload = admin.get_users(
+                firestore_client(), viewer_uid, viewer_role, query
+            )
+        else:
+            payload = _admin_cached(
+                f"users:{viewer_uid}",
+                30.0,
+                lambda: admin.get_users(
+                    firestore_client(), viewer_uid, viewer_role, query
+                ),
+            )
+        return {"success": True, **payload}
     except Exception:
         return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
 
@@ -429,7 +472,12 @@ async def admin_logs(request: Request):
     if isinstance(gate, JSONResponse):
         return gate
     try:
-        return {"success": True, **admin.get_logs(firestore_client())}
+        return {
+            "success": True,
+            **_admin_cached(
+                "logs", 30.0, lambda: admin.get_logs(firestore_client())
+            ),
+        }
     except Exception:
         return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
 
