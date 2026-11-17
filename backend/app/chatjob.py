@@ -185,7 +185,14 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
             "seq": stream_state["seq"],
             "updatedAt": _now_ms(),
         }
-        await _run_sync(stream_ref.set, payload)
+        try:
+            await _run_sync(stream_ref.set, payload)
+        except Exception:
+            # The live stream is a preview channel only — the
+            # completed reply is saved to Firestore regardless.
+            # A realtime-database hiccup must never kill a turn
+            # whose model call would otherwise succeed.
+            pass
 
     async def heartbeat() -> None:
         while True:
@@ -349,7 +356,12 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
         )
 
     await _run_sync(_save_final)
-    await _run_sync(stream_ref.delete)
+    try:
+        await _run_sync(stream_ref.delete)
+    except Exception:
+        # The reply is already saved; a leftover stream node
+        # expires on its own and must not fail the turn.
+        pass
     try:
         await _run_sync(
             analytics.record_usage_event,

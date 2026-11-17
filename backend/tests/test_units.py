@@ -1599,6 +1599,50 @@ def test_admin_media_management():
         ) = originals
 
 
+def test_job_unexpected_failure_is_ledgered():
+    """A non-ChatJobError inside a chat job must land in
+    chatErrors with the real exception (the panel Logs tab reads
+    that collection) — not only in a stdout print nobody sees."""
+    import asyncio
+
+    from app import chatjob, jobs
+    from tests.fakes import FakeFirestore
+
+    db = FakeFirestore()
+    original = chatjob.execute_chat_job
+
+    async def boom(job, db_, rtdb_ref):
+        raise ValueError("kaboom-test")
+
+    chatjob.execute_chat_job = boom
+    job = {
+        "id": "job-test-1",
+        "kind": "chat",
+        "status": "queued",
+        "uid": "uid-x",
+        "chatId": "chat-x",
+        "model": "fast",
+        "createdAt": 1,
+        "result": None,
+        "error": None,
+        "_done": asyncio.Event(),
+    }
+    try:
+        asyncio.run(jobs._run(job, db, lambda path: None))
+    finally:
+        chatjob.execute_chat_job = original
+    assert job["status"] == "failed"
+    assert job["error"]["code"] == "JOB_FAILED"
+    ledgered = [
+        data
+        for path, data in db.store.items()
+        if path.startswith("chatErrors/")
+    ]
+    assert ledgered and "ValueError" in ledgered[0]["error"]
+    assert "kaboom-test" in ledgered[0]["error"]
+    assert ledgered[0]["source"] == "python-backend-job"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):

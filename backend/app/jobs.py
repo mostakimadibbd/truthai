@@ -101,6 +101,27 @@ async def _run(job: dict, db, rtdb_ref) -> None:
                 "message": "Something went wrong while generating the reply.",
             }
             print(f"Chat job {job['id']} failed unexpectedly: {error!r}")
+            # Ledger the REAL exception where the admin panel's
+            # Logs tab already reads (chatErrors) — the generic
+            # user-facing message must never be the only trace of
+            # an unexpected failure again.
+            try:
+                from firebase_admin import firestore
+
+                db.collection("chatErrors").document().set(
+                    {
+                        "uid": job["uid"],
+                        "chatId": job["chatId"],
+                        "status": 500,
+                        "error": f"{type(error).__name__}: {error}"[:500],
+                        "source": "python-backend-job",
+                        "model": job.get("model"),
+                        "ts": _now_ms(),
+                        "createdAt": firestore.SERVER_TIMESTAMP,
+                    }
+                )
+            except Exception:
+                pass
         finally:
             job["finishedAt"] = _now_ms()
             _mirror(job, db)
