@@ -23,6 +23,8 @@ export type Preferences = {
   /** OpenRouter model id, or "openrouter/free" for Auto (Free). */
   defaultModel: string;
   instructionsEnabled: boolean;
+  /** ChatGPT-style long-term memory across conversations. */
+  memoryEnabled: boolean;
   instructionsAbout: string;
   instructionsStyle: string;
 };
@@ -34,6 +36,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   showSuggestions: true,
   defaultModel: "openrouter/free",
   instructionsEnabled: false,
+  memoryEnabled: true,
   instructionsAbout: "",
   instructionsStyle: "",
 };
@@ -88,6 +91,7 @@ export function sanitizePreferences(value: unknown): Preferences {
       "instructionsEnabled",
       DEFAULT_PREFERENCES.instructionsEnabled,
     ),
+    memoryEnabled: boolOr("memoryEnabled", DEFAULT_PREFERENCES.memoryEnabled),
     instructionsAbout: stringOr(
       "instructionsAbout",
       "",

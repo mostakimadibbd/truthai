@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from typing import Awaitable, Callable
 
@@ -32,6 +33,76 @@ class AttemptsExhausted(Exception):
         self.last_body = last_body
         self.retry_after = retry_after
 
+
+
+# Cross-provider free tiers (mirror of the TS provider layer in
+# lib/server/openrouter.ts): when a free-tier key for another
+# provider is configured, the chain extends past OpenRouter —
+# a separate quota pool catches turns when OpenRouter's ~50/day
+# no-credit quota is dry. Hard model allowlists, free tiers only.
+CROSS_PROVIDERS: list[dict] = [
+    {
+        "provider": "gemini",
+        "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "env_keys": ["GEMINI_API_KEY", "GOOGLE_AI_API_KEY"],
+        "models": ["gemini-2.5-flash", "gemini-2.5-flash-lite"],
+    },
+    {
+        "provider": "groq",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "env_keys": ["GROQ_API_KEY"],
+        "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.1-8b-instant"],
+    },
+    {
+        "provider": "mistral",
+        "url": "https://api.mistral.ai/v1/chat/completions",
+        "env_keys": ["MISTRAL_API_KEY"],
+        "models": ["mistral-small-latest", "open-mistral-nemo"],
+    },
+    {
+        "provider": "huggingface",
+        "url": "https://router.huggingface.co/v1/chat/completions",
+        "env_keys": ["HF_TOKEN", "HUGGINGFACE_API_KEY"],
+        "models": ["Qwen/Qwen3-235B-A22B", "meta-llama/Llama-3.3-70B-Instruct"],
+    },
+]
+
+
+def cross_provider_targets() -> list[dict]:
+    targets: list[dict] = []
+    for spec in CROSS_PROVIDERS:
+        api_key = next(
+            (os.environ.get(name, "").strip() for name in spec["env_keys"]
+             if os.environ.get(name, "").strip()),
+            "",
+        )
+        if not api_key:
+            continue
+        for model in spec["models"]:
+            targets.append(
+                {
+                    "provider": spec["provider"],
+                    "model": model,
+                    "label": f"{spec['provider']}/{model}",
+                    "url": spec["url"],
+                    "api_key": api_key,
+                }
+            )
+    return targets
+
+
+def build_targets(openrouter_attempts: list[str]) -> list[dict]:
+    targets = [
+        {
+            "provider": "openrouter",
+            "model": model,
+            "label": model,
+            "url": f"{settings.openrouter_base_url}/chat/completions",
+            "api_key": settings.openrouter_api_key,
+        }
+        for model in openrouter_attempts
+    ]
+    return targets + cross_provider_targets()
 
 _shared: httpx.AsyncClient | None = None
 
@@ -63,11 +134,13 @@ async def stream_completion(
     far whenever it grows. Returns {model, text, usage} where usage
     is {promptTokens, completionTokens} or None."""
     attempts = free_only_attempts(attempts)
+    targets = build_targets(attempts)
     last_status = 0
     last_body = ""
     last_retry_after: str | None = None
 
-    for index, model in enumerate(attempts):
+    for index, target in enumerate(targets):
+        model = target["model"]
         if index > 0:
             await asyncio.sleep(min(2.0 * index, 5.0))
         text_parts: list[str] = []
@@ -75,22 +148,26 @@ async def stream_completion(
         try:
             timeout = httpx.Timeout(connect=connect_timeout, read=None, write=30, pool=30)
             client = _shared_client()
+            headers = {
+                "Authorization": f"Bearer {target['api_key']}",
+                "Content-Type": "application/json",
+            }
+            if target["provider"] == "openrouter":
+                headers["HTTP-Referer"] = "https://truthai-six.vercel.app"
+                headers["X-Title"] = "Xyro AI"
+            body = {
+                "model": model,
+                "messages": messages,
+                "stream": True,
+                "max_tokens": max_tokens,
+            }
+            if target["provider"] == "openrouter":
+                body["usage"] = {"include": True}
             async with client.stream(
                 "POST",
-                f"{settings.openrouter_base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {settings.openrouter_api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://truthai-six.vercel.app",
-                    "X-Title": "Xyro AI",
-                },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "stream": True,
-                    "max_tokens": max_tokens,
-                    "usage": {"include": True},
-                },
+                target["url"],
+                headers=headers,
+                json=body,
                 timeout=timeout,
             ) as response:
                 if response.status_code != 200:
@@ -98,7 +175,11 @@ async def stream_completion(
                     last_status = response.status_code
                     last_body = body
                     last_retry_after = response.headers.get("retry-after")
-                    if response.status_code in RETRYABLE_STATUSES:
+                    retryable = response.status_code in RETRYABLE_STATUSES or (
+                        target["provider"] != "openrouter"
+                        and response.status_code in {401, 402, 403}
+                    )
+                    if retryable:
                         continue
                     raise AttemptsExhausted(
                         response.status_code, body, last_retry_after
@@ -130,7 +211,7 @@ async def stream_completion(
                         }
             text = "".join(text_parts)
             if text.strip():
-                return {"model": model, "text": text, "usage": usage}
+                return {"model": target["label"], "text": text, "usage": usage}
             last_status = 502
             last_body = "Model returned an empty response."
         except httpx.HTTPError as error:

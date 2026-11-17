@@ -38,6 +38,13 @@ import {
   OpenRouterAttemptsExhausted,
   fetchChatCompletionWithFallback,
 } from "@/lib/server/openrouter";
+import {
+  extractMemories,
+  listMemories,
+  liveVisibleText,
+  memorySystemBlock,
+  saveMemories,
+} from "@/lib/server/memory";
 import { recordUsageEvent } from "@/lib/server/analytics";
 import {
   buildWebContext,
@@ -603,6 +610,25 @@ export async function POST(request: NextRequest) {
       prepared.messages.splice(1, 0, { role: "system", content: instructions });
     }
 
+    // Long-term memory (2026-11-17): the user's saved facts ride
+    // as a system block on every turn while memory is enabled,
+    // together with the hidden save-marker protocol the finalize
+    // step below extracts. Failures never block chat.
+    let memoryEnabled = false;
+    try {
+      const prefs = await readPreferences(auth.uid);
+      memoryEnabled = prefs.memoryEnabled;
+      if (memoryEnabled) {
+        const memories = await listMemories(auth.uid);
+        prepared.messages.splice(1, 0, {
+          role: "system",
+          content: memorySystemBlock(memories.map((memory) => memory.text)),
+        });
+      }
+    } catch (error) {
+      console.error("Couldn't load long-term memory for this turn.", error);
+    }
+
     // Web search + link reading (2026-11-16, smart-search round):
     // search runs when the composer's toggle is on OR the message
     // itself asks for live data (search/research/latest/news/price…)
@@ -798,7 +824,7 @@ export async function POST(request: NextRequest) {
         responseId,
         messageId: assistantMessageId,
         status: "generating",
-        text: responseText,
+        text: liveVisibleText(responseText),
         phase: streamPhase,
         seq: streamSeq,
         updatedAt: currentTime,
@@ -1012,6 +1038,19 @@ export async function POST(request: NextRequest) {
     }
     if ((!streamDone && !idleTimedOut) || !responseText.trim()) {
       throw new ChatRouteError(502, "EMPTY_MODEL_RESPONSE", "The model ended before returning a response. Please try again.");
+    }
+
+    // Memory capture: strip the hidden [[memory: …]] markers
+    // from the reply before it is published or stored, and save
+    // the facts for future conversations.
+    if (memoryEnabled) {
+      const extracted = extractMemories(responseText);
+      responseText = extracted.cleanText;
+      if (extracted.memories.length) {
+        void saveMemories(auth.uid, extracted.memories, "auto", chatId).catch(
+          (error) => console.error("Couldn't save long-term memories.", error),
+        );
+      }
     }
 
     await publishLive(true);

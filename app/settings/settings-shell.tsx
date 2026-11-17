@@ -719,6 +719,21 @@ function PersonalizationTab({
       </div>
 
       <div className="settings-field">
+        <label className="settings-switch-row">
+          <span>
+            <span className="settings-label">Memory</span>
+            <span className="settings-hint">Let Xyro AI remember durable facts about you across conversations, like other AI assistants. You can review and delete them below at any time.</span>
+          </span>
+          <input
+            type="checkbox"
+            role="switch"
+            checked={preferences.memoryEnabled}
+            onChange={(event) => onSave({ memoryEnabled: event.target.checked })}
+          />
+        </label>
+      </div>
+
+      <div className="settings-field">
         <label className="settings-label" htmlFor="settings-instructions-about">
           What should Xyro AI know about you?
         </label>
@@ -751,7 +766,130 @@ function PersonalizationTab({
           {preferences.instructionsStyle.length} / {MAX_INSTRUCTIONS_LENGTH}
         </p>
       </div>
+
+      <MemoryManager enabled={preferences.memoryEnabled} />
     </section>
+  );
+}
+
+/* ------------------------------- Memory ------------------------------- */
+
+type MemoryItem = { id: string; text: string; source: string };
+
+function MemoryManager({ enabled }: { enabled: boolean }) {
+  const [memories, setMemories] = useState<MemoryItem[]>([]);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const [note, setNote] = useState("");
+
+  async function call(method: string, body?: unknown): Promise<boolean> {
+    const auth = tryGetFirebaseAuth();
+    const currentUser = auth?.currentUser;
+    if (!currentUser) return false;
+    const token = await currentUser.getIdToken();
+    const response = await fetch("/api/memory", {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "X-Requested-With": "xyro",
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    if (!response.ok) return false;
+    const payload = (await response.json()) as { memories: MemoryItem[] };
+    setMemories(payload.memories);
+    return true;
+  }
+
+  useEffect(() => {
+    void call("GET");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function add() {
+    const text = draft.trim();
+    if (!text || busy) return;
+    setBusy(true);
+    const ok = await call("POST", { text });
+    setBusy(false);
+    if (ok) {
+      setDraft("");
+      setNote("Saved. Xyro AI will use it in future conversations.");
+    } else {
+      setNote("That memory couldn’t be saved. Please try again.");
+    }
+  }
+
+  async function remove(id: string) {
+    setBusy(true);
+    await call("DELETE", { id });
+    setBusy(false);
+  }
+
+  async function clearAll() {
+    if (!confirmingClear) {
+      setConfirmingClear(true);
+      return;
+    }
+    setBusy(true);
+    await call("DELETE", { all: true });
+    setBusy(false);
+    setConfirmingClear(false);
+  }
+
+  return (
+    <div className="settings-field">
+      <span className="settings-label">Saved memories</span>
+      <p className="settings-hint">
+        {enabled
+          ? "Facts Xyro AI has saved about you. They’re included in new conversations so it can pick up where you left off."
+          : "Memory is off — saved facts below are kept but not used or added to until you turn it back on."}
+      </p>
+      {memories.length === 0 ? (
+        <p className="settings-hint">Nothing saved yet. In chat, Xyro AI saves durable facts it learns — or add your own here.</p>
+      ) : (
+        <ul className="settings-memory-list">
+          {memories.map((memory) => (
+            <li key={memory.id} className="settings-memory-item">
+              <span>{memory.text}</span>
+              <button
+                type="button"
+                className="settings-memory-delete"
+                aria-label={`Forget: ${memory.text}`}
+                disabled={busy}
+                onClick={() => void remove(memory.id)}
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="settings-memory-add">
+        <input
+          type="text"
+          value={draft}
+          maxLength={200}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") void add();
+          }}
+          placeholder="Add a memory — e.g. I’m building a startup in Dhaka"
+          aria-label="Add a memory"
+        />
+        <button type="button" className="btn btn-secondary" disabled={busy || !draft.trim()} onClick={() => void add()}>
+          Remember
+        </button>
+      </div>
+      {note && <p className="settings-hint" role="status">{note}</p>}
+      {memories.length > 0 && (
+        <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void clearAll()}>
+          {confirmingClear ? "Tap again to forget everything" : "Forget everything"}
+        </button>
+      )}
+    </div>
   );
 }
 

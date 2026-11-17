@@ -3295,3 +3295,11 @@ body:has(.chat-app) #main {
 .chat-composer-area {
   background: linear-gradient(0deg, var(--page) 82%, var(--v-rgb-11-9-16-0));
 }
+
+/* Long-term memory manager (Settings → Personalization) */
+.settings-memory-list { list-style: none; margin: 10px 0; padding: 0; display: grid; gap: 8px; }
+.settings-memory-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; border: 1px solid var(--border, rgba(120, 160, 255, 0.18)); border-radius: 10px; background: var(--surface-2, rgba(90, 140, 255, 0.05)); font-size: 0.92rem; }
+.settings-memory-delete { border: none; background: transparent; color: var(--muted, #8ea3c8); cursor: pointer; font-size: 0.85rem; padding: 4px 6px; border-radius: 6px; }
+.settings-memory-delete:hover { color: var(--danger, #ff7a7a); }
+.settings-memory-add { display: flex; gap: 8px; margin-top: 10px; }
+.settings-memory-add input { flex: 1; }

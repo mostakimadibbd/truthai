@@ -40,7 +40,6 @@ export function createCloudinaryUploadSignature(params: {
   timestamp: number;
   public_id: string;
   type: "authenticated";
-  overwrite: false;
 }) {
   const config = getCloudinaryConfig();
   const uploadPreset = getCloudinaryUploadPreset();
@@ -159,6 +158,47 @@ export async function uploadGeneratedImage(
     );
     stream.end(buffer);
   });
+  return { publicId: result.public_id, bytes: result.bytes };
+}
+
+/**
+ * Server-mediated user file upload (the fallback path when a
+ * browser's direct-to-Cloudinary upload is rejected — preset or
+ * signature trouble can never break this route, because the SDK
+ * uploads with the account secret directly, exactly like
+ * generated images and avatars). The caller has already
+ * validated the bytes against the declared format.
+ */
+export async function uploadUserFile(
+  buffer: Buffer,
+  options: {
+    publicId: string;
+    resourceType: CloudinaryResourceType;
+    format: string;
+  },
+): Promise<{ publicId: string; bytes: number }> {
+  getCloudinaryConfig();
+  const result = await new Promise<{ public_id: string; bytes: number }>(
+    (resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          public_id: options.publicId,
+          type: "authenticated",
+          resource_type: options.resourceType,
+          format: options.resourceType === "image" ? undefined : options.format,
+          overwrite: false,
+        },
+        (error, uploaded) => {
+          if (error || !uploaded) {
+            reject(error ?? new Error("Cloudinary user-file upload failed."));
+            return;
+          }
+          resolve({ public_id: uploaded.public_id, bytes: uploaded.bytes });
+        },
+      );
+      stream.end(buffer);
+    },
+  );
   return { publicId: result.public_id, bytes: result.bytes };
 }
 

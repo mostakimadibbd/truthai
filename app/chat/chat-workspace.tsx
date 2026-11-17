@@ -1304,48 +1304,106 @@ export default function ChatWorkspace() {
           uploadData.append("timestamp", String(signatureValue.timestamp));
           uploadData.append("public_id", signatureValue.publicId);
           uploadData.append("type", signatureValue.deliveryType);
-          uploadData.append("overwrite", "false");
           uploadData.append("upload_preset", signatureValue.uploadPreset);
           uploadData.append("signature", signatureValue.signature);
 
-          const cloudinaryResponse = await fetch(
-            `https://api.cloudinary.com/v1_1/${encodeURIComponent(signatureValue.cloudName)}/${signatureValue.resourceType}/upload`,
-            { method: "POST", body: uploadData },
-          );
-          if (!cloudinaryResponse.ok) {
-            throw new Error("Cloudinary couldn’t upload this file. Please try again.");
-          }
+          let attachmentValue: (Attachment & { accessUrl: string }) | undefined;
+          try {
+            const cloudinaryResponse = await fetch(
+              `https://api.cloudinary.com/v1_1/${encodeURIComponent(signatureValue.cloudName)}/${signatureValue.resourceType}/upload`,
+              { method: "POST", body: uploadData },
+            );
+            if (!cloudinaryResponse.ok) {
+              // Surface Cloudinary's REAL reason (its error
+              // JSON) instead of a generic dead end — and log
+              // it so a failure is diagnosable from the field.
+              let reason = `HTTP ${cloudinaryResponse.status}`;
+              try {
+                const payload: unknown = await cloudinaryResponse.json();
+                const message =
+                  typeof payload === "object" && payload !== null &&
+                  "error" in payload &&
+                  typeof payload.error === "object" && payload.error !== null &&
+                  "message" in payload.error &&
+                  typeof payload.error.message === "string"
+                    ? payload.error.message
+                    : "";
+                if (message) reason = message;
+              } catch {
+                /* keep the status-based reason */
+              }
+              console.error("Direct Cloudinary upload rejected:", reason);
+              throw new Error(`Cloudinary rejected the upload (${reason}).`);
+            }
 
-          const confirmResponse = await fetch("/api/uploads/confirm", {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${idToken}`,
-              "Content-Type": "application/json",
-              "X-Requested-With": "xyro",
-            },
-            body: JSON.stringify({ assetId }),
-          });
-          if (!confirmResponse.ok) {
-            throw new Error(await getApiError(confirmResponse, "The uploaded file couldn’t be verified."));
+            const confirmResponse = await fetch("/api/uploads/confirm", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${idToken}`,
+                "Content-Type": "application/json",
+                "X-Requested-With": "xyro",
+              },
+              body: JSON.stringify({ assetId }),
+            });
+            if (!confirmResponse.ok) {
+              throw new Error(await getApiError(confirmResponse, "The uploaded file couldn’t be verified."));
+            }
+            const confirmation: unknown = await confirmResponse.json();
+            const confirmed =
+              typeof confirmation === "object" &&
+              confirmation !== null &&
+              "attachment" in confirmation
+                ? confirmation.attachment
+                : undefined;
+            if (!isAttachment(confirmed) || confirmed.size !== file.size) {
+              throw new Error("The uploaded file didn’t match its verified metadata.");
+            }
+            attachmentValue = confirmed;
+          } catch (directError) {
+            // Fallback: files up to 4 MB retry through our own
+            // server, which uploads to Cloudinary with the SDK
+            // (no preset, no browser signature) — the path
+            // generated images already use successfully.
+            if (file.size > 4 * 1024 * 1024) throw directError;
+            console.warn("Retrying the upload through the server fallback.", directError);
+            const fallbackData = new FormData();
+            fallbackData.append("file", file);
+            fallbackData.append("chatId", chat.id);
+            const fallbackResponse = await fetch("/api/uploads/direct", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${idToken}`,
+                "X-Requested-With": "xyro",
+              },
+              body: fallbackData,
+            });
+            if (!fallbackResponse.ok) {
+              throw new Error(await getApiError(fallbackResponse, "The file couldn’t be uploaded. Please try again."));
+            }
+            const fallbackPayload: unknown = await fallbackResponse.json();
+            const fallbackAttachment =
+              typeof fallbackPayload === "object" &&
+              fallbackPayload !== null &&
+              "attachment" in fallbackPayload
+                ? fallbackPayload.attachment
+                : undefined;
+            if (!isAttachment(fallbackAttachment) || fallbackAttachment.size !== file.size) {
+              throw new Error("The uploaded file didn’t match its verified metadata.");
+            }
+            attachmentValue = fallbackAttachment;
           }
-          const confirmation: unknown = await confirmResponse.json();
-          const attachmentValue =
-            typeof confirmation === "object" &&
-            confirmation !== null &&
-            "attachment" in confirmation
-              ? confirmation.attachment
-              : undefined;
-          if (!isAttachment(attachmentValue) || attachmentValue.size !== file.size) {
-            throw new Error("The uploaded file didn’t match its verified metadata.");
+          if (!attachmentValue) {
+            throw new Error("The uploaded file couldn’t be verified.");
           }
+          const resolvedAttachment: Attachment & { accessUrl: string } = attachmentValue;
 
           setPendingAttachments((previous) =>
-            previous.map((item) => item.id === placeholder.id ? attachmentValue : item),
+            previous.map((item) => item.id === placeholder.id ? resolvedAttachment : item),
           );
-          attachmentUrlMintedAtRef.current[attachmentValue.id] = Date.now();
+          attachmentUrlMintedAtRef.current[resolvedAttachment.id] = Date.now();
           setAttachmentUrls((previous) => ({
             ...previous,
-            [attachmentValue.id]: attachmentValue.accessUrl,
+            [resolvedAttachment.id]: resolvedAttachment.accessUrl,
           }));
         } catch (error) {
           if (assetId) {

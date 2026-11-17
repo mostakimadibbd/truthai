@@ -760,6 +760,52 @@ def test_admin_detail_logs_trash_and_ranges():
         admin.firebase_auth = original
 
 
+def test_memory_extract_and_live_text():
+    from app import memory as mem
+
+    clean, facts = mem.extract_memories(
+        "Answer here.\n[[memory: The user lives in Dhaka]]\n[[memory: User is building a startup]]"
+    )
+    assert clean == "Answer here."
+    assert facts == ["The user lives in Dhaka", "User is building a startup"]
+    assert mem.live_visible_text("Hello [[memory: The user") == "Hello"
+    assert mem.live_visible_text("No markers") == "No markers"
+    block = mem.memory_system_block(["User lives in Dhaka"])
+    assert "- User lives in Dhaka" in block and "[[memory:" in block
+    assert mem.normalize_memory_key("User likes Tea!") == mem.normalize_memory_key("user likes tea")
+
+
+def test_cross_provider_targets_and_order():
+    import os
+
+    from app import models as model_lib
+    from app import openrouter
+
+    saved = dict(os.environ)
+    try:
+        for key in ["GEMINI_API_KEY", "GOOGLE_AI_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY", "HF_TOKEN", "HUGGINGFACE_API_KEY"]:
+            os.environ.pop(key, None)
+        assert openrouter.cross_provider_targets() == []
+        os.environ["GROQ_API_KEY"] = "gsk_test"
+        os.environ["GEMINI_API_KEY"] = "gem_test"
+        targets = openrouter.build_targets(["openrouter/free"])
+        assert targets[0]["provider"] == "openrouter"
+        assert targets[1]["provider"] == "gemini"
+        assert targets[1]["label"] == "gemini/gemini-2.5-flash"
+        assert any(t["provider"] == "groq" and t["model"] == "openai/gpt-oss-120b" for t in targets)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+    order = model_lib.model_attempt_order("openrouter/free")
+    assert order[0] == "openrouter/free"
+    assert "nvidia/nemotron-3-ultra-550b-a55b:free" in order
+    assert not any("llama-3.3-70b" in item for item in order)
+    web = model_lib.web_model_attempt_order("openrouter/free")
+    assert web[0] == "nvidia/nemotron-3-ultra-550b-a55b:free"
+    assert web[-1] == "openrouter/free"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):
@@ -771,3 +817,5 @@ if __name__ == "__main__":
                 failures += 1
                 print(f"FAIL - {name}: {error!r}")
     sys.exit(1 if failures else 0)
+
+

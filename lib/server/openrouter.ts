@@ -99,17 +99,111 @@ export function freeOnlyAttempts(attempts: string[]): string[] {
   return kept.length ? kept : ["openrouter/free"];
 }
 
+/**
+ * Cross-provider free tiers (2026-11-17 robustness round).
+ * OpenRouter's no-credit free quota (~50 requests/day) is the
+ * product's single biggest bottleneck, so when the owner adds a
+ * free-tier key for another provider, the fallback chain extends
+ * across providers after the OpenRouter attempts: a completely
+ * separate quota pool catches the turn when OpenRouter is dry.
+ * Every provider here is OpenAI-compatible and free-tier only —
+ * the model lists are hard allowlists, so a key can never be
+ * used to call a paid model through this path. Keys are read
+ * from the environment; no key, no targets, no behaviour change.
+ */
+export type AttemptTarget = {
+  provider: string;
+  model: string;
+  /** What gets recorded as the used model (provider-prefixed off OpenRouter). */
+  label: string;
+  url: string;
+  apiKey: string;
+};
+
+type ProviderSpec = {
+  provider: string;
+  url: string;
+  envKeys: string[];
+  models: string[];
+};
+
+const CROSS_PROVIDERS: ProviderSpec[] = [
+  {
+    provider: "gemini",
+    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    envKeys: ["GEMINI_API_KEY", "GOOGLE_AI_API_KEY"],
+    models: ["gemini-2.5-flash", "gemini-2.5-flash-lite"],
+  },
+  {
+    provider: "groq",
+    url: "https://api.groq.com/openai/v1/chat/completions",
+    envKeys: ["GROQ_API_KEY"],
+    models: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.1-8b-instant"],
+  },
+  {
+    provider: "mistral",
+    url: "https://api.mistral.ai/v1/chat/completions",
+    envKeys: ["MISTRAL_API_KEY"],
+    models: ["mistral-small-latest", "open-mistral-nemo"],
+  },
+  {
+    provider: "huggingface",
+    url: "https://router.huggingface.co/v1/chat/completions",
+    envKeys: ["HF_TOKEN", "HUGGINGFACE_API_KEY"],
+    models: ["Qwen/Qwen3-235B-A22B", "meta-llama/Llama-3.3-70B-Instruct"],
+  },
+];
+
+export function crossProviderTargets(
+  env: Record<string, string | undefined> = process.env,
+): AttemptTarget[] {
+  const targets: AttemptTarget[] = [];
+  for (const spec of CROSS_PROVIDERS) {
+    const apiKey = spec.envKeys
+      .map((name) => env[name]?.trim())
+      .find((value) => value);
+    if (!apiKey) continue;
+    for (const model of spec.models) {
+      targets.push({
+        provider: spec.provider,
+        model,
+        label: `${spec.provider}/${model}`,
+        url: spec.url,
+        apiKey,
+      });
+    }
+  }
+  return targets;
+}
+
+export function buildAttemptTargets(
+  openRouterAttempts: string[],
+  openRouterApiKey: string,
+  env: Record<string, string | undefined> = process.env,
+): AttemptTarget[] {
+  const targets: AttemptTarget[] = openRouterAttempts.map((model) => ({
+    provider: "openrouter",
+    model,
+    label: model,
+    url: "https://openrouter.ai/api/v1/chat/completions",
+    apiKey: openRouterApiKey,
+  }));
+  return [...targets, ...crossProviderTargets(env)];
+}
+
 export async function fetchChatCompletionWithFallback(
   args: ChatCompletionArgs,
 ): Promise<{ response: Response; model: string }> {
   args = { ...args, attempts: freeOnlyAttempts(args.attempts) };
+  const targets = buildAttemptTargets(args.attempts, args.apiKey);
   const connectTimeoutMs = args.connectTimeoutMs ?? 25_000;
   let lastStatus: number | null = null;
   let lastRetryAfter: string | null = null;
   let lastErrorBody: string | null = null;
 
-  for (let index = 0; index < args.attempts.length; index += 1) {
-    const model = args.attempts[index];
+  for (let index = 0; index < targets.length; index += 1) {
+    const target = targets[index];
+    const model = target.model;
     if (args.signal?.aborted) {
       throw new OpenRouterAttemptsExhausted(lastStatus, lastRetryAfter);
     }
@@ -124,13 +218,17 @@ export async function fetchChatCompletionWithFallback(
 
     let response: Response;
     try {
-      response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      response = await fetch(target.url, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${args.apiKey}`,
+          Authorization: `Bearer ${target.apiKey}`,
           "Content-Type": "application/json",
-          "HTTP-Referer": args.referer,
-          "X-Title": args.title,
+          // Referer/title attribution headers are OpenRouter's
+          // convention; other providers reject unknown headers
+          // inconsistently, so they are only sent there.
+          ...(target.provider === "openrouter"
+            ? { "HTTP-Referer": args.referer, "X-Title": args.title }
+            : {}),
         },
         body: JSON.stringify({
           model,
@@ -142,10 +240,12 @@ export async function fetchChatCompletionWithFallback(
           ...(args.temperature !== undefined
             ? { temperature: args.temperature }
             : {}),
-          ...(args.modalities !== undefined
+          ...(args.modalities !== undefined && target.provider === "openrouter"
             ? { modalities: args.modalities }
             : {}),
-          ...(args.includeUsage ? { usage: { include: true } } : {}),
+          ...(args.includeUsage && target.provider === "openrouter"
+            ? { usage: { include: true } }
+            : {}),
         }),
         signal,
         cache: "no-store",
@@ -156,7 +256,7 @@ export async function fetchChatCompletionWithFallback(
       // Network error or connect timeout: try the next model.
       lastStatus = null;
       lastErrorBody = error instanceof Error ? error.message.slice(0, 500) : null;
-      if (index < args.attempts.length - 1) {
+      if (index < targets.length - 1) {
         await sleep(retryDelayMs(index, null));
         continue;
       }
@@ -165,7 +265,7 @@ export async function fetchChatCompletionWithFallback(
     clearTimeout(connectTimer);
 
     if (response.ok) {
-      return { response, model };
+      return { response, model: target.label };
     }
 
     const retryable =
@@ -174,9 +274,17 @@ export async function fetchChatCompletionWithFallback(
       response.status === 400 ||
       response.status === 404 ||
       response.status === 413 ||
-      response.status === 422;
+      response.status === 422 ||
+      // Account-level statuses end the chain on OpenRouter (one
+      // account, every model fails the same), but a bad or
+      // exhausted key at one cross-provider must not stop the
+      // others from answering.
+      (target.provider !== "openrouter" &&
+        (response.status === 401 ||
+          response.status === 402 ||
+          response.status === 403));
     if (!retryable) {
-      return { response, model };
+      return { response, model: target.label };
     }
     lastStatus = response.status;
     lastRetryAfter = response.headers.get("retry-after");
@@ -189,9 +297,9 @@ export async function fetchChatCompletionWithFallback(
       .then((text) => text.slice(0, 500))
       .catch(() => null);
     console.error(
-      `OpenRouter attempt failed: model=${model} status=${response.status} body=${lastErrorBody ?? ""}`,
+      `Model attempt failed: target=${target.label} status=${response.status} body=${lastErrorBody ?? ""}`,
     );
-    if (index < args.attempts.length - 1) {
+    if (index < targets.length - 1) {
       await sleep(retryDelayMs(index, lastRetryAfter));
       continue;
     }

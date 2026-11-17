@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import time
 
-from . import analytics, models as model_lib, openrouter
+from . import analytics, memory as memory_lib, models as model_lib, openrouter
 
 MAX_MESSAGES = 30
 MAX_TOTAL_LENGTH = 36_000
@@ -171,7 +171,7 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
             "responseId": response_id,
             "messageId": assistant_message_id,
             "status": "generating",
-            "text": stream_state["text"],
+            "text": memory_lib.live_visible_text(stream_state["text"]),
             "phase": stream_state["phase"],
             "seq": stream_state["seq"],
             "updatedAt": _now_ms(),
@@ -191,7 +191,22 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
         stream_state["phase"] = "answering"
         await publish()
 
+    # Long-term memory (parity with the TS chat route): recall
+    # the user's saved facts as a system block when enabled.
+    memory_on = False
+    try:
+        memory_on = await _run_sync(memory_lib.memory_enabled, db, uid)
+        if memory_on:
+            facts = await _run_sync(memory_lib.load_memories, db, uid)
+            model_messages_extra = memory_lib.memory_system_block(facts)
+        else:
+            model_messages_extra = None
+    except Exception:
+        model_messages_extra = None
+
     model_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if model_messages_extra:
+        model_messages.append({"role": "system", "content": model_messages_extra})
     for message in history:
         model_messages.append({"role": message["role"], "content": message["content"]})
     model_messages.append({"role": "user", "content": content})
@@ -232,6 +247,17 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
 
     # --- Save the finished reply ----------------------------------
     final_text: str = result["text"]
+    # Memory capture: strip the hidden markers from the stored
+    # reply and persist the facts for future conversations.
+    if memory_on:
+        final_text, new_facts = memory_lib.extract_memories(final_text)
+        if new_facts:
+            try:
+                await _run_sync(
+                    memory_lib.save_memories, db, uid, new_facts, chat_id
+                )
+            except Exception:
+                pass
     usage = result.get("usage")
     tokens_estimated = usage is None
     if tokens_estimated:

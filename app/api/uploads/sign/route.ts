@@ -116,11 +116,17 @@ export async function POST(request: NextRequest) {
       `xyro_${auth.uid}_${chatId}_${assetId}` +
       (spec.resourceType === "raw" ? `.${spec.format}` : "");
     const timestamp = Math.floor(Date.now() / 1000);
+    // NOTE: `overwrite` is deliberately NOT signed or sent.
+    // Public ids are UUID-unique, so overwrite protection is
+    // moot — and a signed boolean false is the most fragile
+    // parameter in Cloudinary signature verification (its
+    // server-side serialization of false has historically
+    // differed from the SDK's, producing "Invalid signature"
+    // rejections on otherwise-correct uploads).
     const signed = createCloudinaryUploadSignature({
       timestamp,
       public_id: publicId,
       type: "authenticated",
-      overwrite: false,
     });
 
     await userRef.collection("uploads").doc(assetId).create({

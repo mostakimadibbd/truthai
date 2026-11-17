@@ -72,6 +72,14 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Long-term AI memory (2026-11-17): saved and deleted only by
+    // the server (/api/memory and the chat route's capture); the
+    // owner may read the list for Settings.
+    match /users/{userId}/memories/{memoryId} {
+      allow read: if ownsUser(userId);
+      allow write: if false;
+    }
+
     // Settings preferences (Phase 3): written only by the server via
     // /api/settings; owners may read their own document so the chat
     // workspace can react to preference changes live.

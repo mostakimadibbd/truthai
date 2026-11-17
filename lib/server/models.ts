@@ -61,11 +61,19 @@ export const AUTO_MODEL_ID = "openrouter/free";
 const FREE_PRICING = { promptPerMillion: 0, completionPerMillion: 0 };
 
 const FALLBACK_MODELS: FreeModel[] = [
-  { id: "meta-llama/llama-3.3-70b-instruct:free", name: "Llama 3.3 70B (free)", contextLength: 131072, capabilities: ["text"], pricing: FREE_PRICING },
-  { id: "google/gemma-3-27b-it:free", name: "Gemma 3 27B (free)", contextLength: 131072, capabilities: ["text", "vision"], pricing: FREE_PRICING },
-  { id: "deepseek/deepseek-chat-v3-0324:free", name: "DeepSeek V3 (free)", contextLength: 163840, capabilities: ["text"], pricing: FREE_PRICING },
-  { id: "qwen/qwen3-235b-a22b:free", name: "Qwen3 235B (free)", contextLength: 131072, capabilities: ["text"], pricing: FREE_PRICING },
-  { id: "mistralai/mistral-small-3.1-24b-instruct:free", name: "Mistral Small 3.1 (free)", contextLength: 128000, capabilities: ["text", "vision"], pricing: FREE_PRICING },
+  // Refreshed 2026-11-17 against the live OpenRouter catalogue:
+  // free models rotate constantly (the previous curated set —
+  // Llama 3.3 70B, Gemma 3 27B, DeepSeek V3, Qwen3 235B, Mistral
+  // Small 3.1 — had ALL left the free tier, so the chain was
+  // burning attempts on dead models). getFreeModels() still
+  // re-verifies every entry against the live catalogue before
+  // the picker shows it; this list only orders preference.
+  { id: "nvidia/nemotron-3-ultra-550b-a55b:free", name: "Nemotron 3 Ultra 550B (free)", contextLength: 1000000, capabilities: ["text"], pricing: FREE_PRICING },
+  { id: "google/gemma-4-31b-it:free", name: "Gemma 4 31B (free)", contextLength: 262144, capabilities: ["text", "vision"], pricing: FREE_PRICING },
+  { id: "inclusionai/ling-3.2-flash:free", name: "Ling 3.2 Flash (free)", contextLength: 1048576, capabilities: ["text"], pricing: FREE_PRICING },
+  { id: "nvidia/nemotron-3.5-super-vl:free", name: "Nemotron 3.5 Super VL (free)", contextLength: 1000000, capabilities: ["text", "vision"], pricing: FREE_PRICING },
+  { id: "google/gemma-4-26b-a4b-it:free", name: "Gemma 4 26B (free)", contextLength: 262144, capabilities: ["text", "vision"], pricing: FREE_PRICING },
+  { id: "cohere/north-mini-code:free", name: "North Mini Code (free)", contextLength: 256000, capabilities: ["text"], pricing: FREE_PRICING },
 ];
 
 const CACHE_MS = 10 * 60 * 1000;
@@ -273,7 +281,7 @@ export function modelAttemptOrder(requested: string): string[] {
   const curated = FALLBACK_MODELS.map((model) => model.id).filter(
     (id) => id !== requested,
   );
-  const order = [requested, AUTO_MODEL_ID, ...curated.slice(0, 2)];
+  const order = [requested, AUTO_MODEL_ID, ...curated.slice(0, 3)];
   return [...new Set(order)];
 }
 

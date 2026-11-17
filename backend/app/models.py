@@ -24,11 +24,15 @@ AUTO_MODEL_ID = "openrouter/free"
 
 # Curated free models, strongest first (mirrors FALLBACK_MODELS).
 FALLBACK_MODELS: list[dict] = [
-    {"id": "meta-llama/llama-3.3-70b-instruct:free", "name": "Llama 3.3 70B (Free)"},
-    {"id": "google/gemma-3-27b-it:free", "name": "Gemma 3 27B (Free)"},
-    {"id": "deepseek/deepseek-chat-v3-0324:free", "name": "DeepSeek V3 (Free)"},
-    {"id": "qwen/qwen3-235b-a22b:free", "name": "Qwen3 235B (Free)"},
-    {"id": "mistralai/mistral-small-3.1-24b-instruct:free", "name": "Mistral Small 3.1 (Free)"},
+    # Refreshed 2026-11-17 against the live catalogue (mirrors
+    # lib/server/models.ts): the previous curated set had fully
+    # rotated out of the free tier.
+    {"id": "nvidia/nemotron-3-ultra-550b-a55b:free", "name": "Nemotron 3 Ultra 550B (Free)"},
+    {"id": "google/gemma-4-31b-it:free", "name": "Gemma 4 31B (Free)"},
+    {"id": "inclusionai/ling-3.2-flash:free", "name": "Ling 3.2 Flash (Free)"},
+    {"id": "nvidia/nemotron-3.5-super-vl:free", "name": "Nemotron 3.5 Super VL (Free)"},
+    {"id": "google/gemma-4-26b-a4b-it:free", "name": "Gemma 4 26B (Free)"},
+    {"id": "cohere/north-mini-code:free", "name": "North Mini Code (Free)"},
 ]
 
 _cache: dict = {"at": 0.0, "models": []}
@@ -80,13 +84,14 @@ async def is_allowed_free_model(model_id: str) -> bool:
 
 
 def model_attempt_order(requested: str) -> list[str]:
-    """requested -> Auto router -> two curated fallbacks, deduped."""
+    """requested -> Auto router -> three curated fallbacks, deduped."""
     order: list[str] = []
     for candidate in [
         requested,
         AUTO_MODEL_ID,
         FALLBACK_MODELS[0]["id"],
         FALLBACK_MODELS[1]["id"],
+        FALLBACK_MODELS[2]["id"],
     ]:
         if candidate not in order:
             order.append(candidate)
