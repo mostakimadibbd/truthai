@@ -3,6 +3,10 @@ import { NextResponse } from "next/server";
 import { recordBudget } from "@/lib/server/budget";
 import { mintDelegationAssertion } from "@/lib/server/delegation";
 import { serverEnv } from "@/lib/server/env";
+import {
+  getFirebaseAdminDatabase,
+  getFirebaseAdminFirestore,
+} from "@/lib/server/firebase-admin";
 
 // Optional delegation to the Python backend service (backend/).
 //
@@ -56,6 +60,60 @@ function errorJson(status: number, code: string, message: string) {
     { error: { code, message } },
     { status, headers: { "Cache-Control": "no-store" } },
   );
+}
+
+/**
+ * After a delegated job reports a terminal failure, decide
+ * whether the turn can be re-run locally:
+ *  - "complete": the reply was actually saved (a post-save step
+ *    died after the content landed) — report success.
+ *  - "clean":    no usable pair remains — any orphaned pair the
+ *    dead job wrote (user message + assistant stuck at
+ *    "generating"/"failed") and its stream node are deleted, so
+ *    the local path can create the pair fresh without hitting
+ *    its duplicate guards.
+ *  - "unknown":  state couldn't be verified — the caller keeps
+ *    the original error rather than risk a duplicated turn.
+ */
+async function settleFailedDelegatedTurn(
+  args: DelegateArgs,
+): Promise<"complete" | "clean" | "unknown"> {
+  try {
+    const db = getFirebaseAdminFirestore();
+    const messagesRef = db
+      .collection("users")
+      .doc(args.uid)
+      .collection("chats")
+      .doc(args.chatId)
+      .collection("messages");
+    const assistantRef = messagesRef.doc(args.assistantMessageId);
+    const userRef = messagesRef.doc(args.userMessageId);
+    const [assistantSnap, userSnap] = await Promise.all([
+      assistantRef.get(),
+      userRef.get(),
+    ]);
+    if (assistantSnap.exists && assistantSnap.data()?.status === "complete") {
+      return "complete";
+    }
+    const batch = db.batch();
+    let writes = 0;
+    if (assistantSnap.exists) {
+      batch.delete(assistantRef);
+      writes += 1;
+    }
+    if (userSnap.exists) {
+      batch.delete(userRef);
+      writes += 1;
+    }
+    if (writes > 0) await batch.commit();
+    await getFirebaseAdminDatabase()
+      .ref(`chatStreams/${args.uid}/${args.chatId}`)
+      .remove()
+      .catch(() => undefined);
+    return "clean";
+  } catch {
+    return "unknown";
+  }
 }
 
 export async function tryDelegateChatTurn(
@@ -154,13 +212,39 @@ export async function tryDelegateChatTurn(
           status.error !== null
             ? (status.error as { status?: number; code?: string; message?: string })
             : {};
-        return errorJson(
-          typeof error.status === "number" ? error.status : 503,
-          typeof error.code === "string" ? error.code : "MODEL_UNAVAILABLE",
+        const failureStatus =
+          typeof error.status === "number" ? error.status : 503;
+        const failureCode =
+          typeof error.code === "string" ? error.code : "MODEL_UNAVAILABLE";
+        const failureMessage =
           typeof error.message === "string"
             ? error.message
-            : "The free model service is temporarily unavailable.",
-        );
+            : "The free model service is temporarily unavailable.";
+        // Definitive request errors (bad model, chat gone,
+        // duplicate) would fail identically on the local path —
+        // surface them. Everything else (5xx: a backend crash,
+        // an exhausted provider chain, a timeout) gets ONE more
+        // chance on the local path instead of dead-ending the
+        // user: a failed backend job must be invisible.
+        if (failureStatus >= 400 && failureStatus < 500) {
+          return errorJson(failureStatus, failureCode, failureMessage);
+        }
+        const settled = await settleFailedDelegatedTurn(args);
+        if (settled === "complete") {
+          // The job reported failure after actually saving the
+          // reply (a post-save step died) — the turn succeeded.
+          return NextResponse.json(
+            { success: true, delegated: true },
+            { headers: { "Cache-Control": "no-store" } },
+          );
+        }
+        if (settled === "clean") {
+          console.warn(
+            `backend-delegate: job failed (${failureCode}); pair cleaned up, running the turn locally.`,
+          );
+          return null;
+        }
+        return errorJson(failureStatus, failureCode, failureMessage);
       }
     } catch {
       // A failed poll says nothing about the job; keep waiting.

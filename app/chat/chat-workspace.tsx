@@ -446,6 +446,13 @@ export default function ChatWorkspace() {
   const lastChunkAtRef = useRef(0);
   const [attachmentUrls, setAttachmentUrls] = useState<Record<string, string>>({});
   const controllerRef = useRef<AbortController | null>(null);
+  // True only when the in-flight request was aborted by an
+  // explicit user action (Stop button, Esc, switching chats,
+  // signing out). A connection that drops on its own also
+  // surfaces as an AbortError, but must NOT be reported as
+  // "Response stopped." — the turn may still be running
+  // server-side and its reply lands via the listeners.
+  const userStopRef = useRef(false);
   const attachmentUrlLoadingRef = useRef(new Set<string>());
   // When each attachment access URL was minted, and how many
   // error-driven re-mints each attachment has used. Access URLs
@@ -1110,8 +1117,10 @@ export default function ChatWorkspace() {
         event.preventDefault();
         startNewChat();
       } else if (event.key === "Escape") {
-        if (sending) controllerRef.current?.abort();
-        else setSidebarOpen(false);
+        if (sending) {
+          userStopRef.current = true;
+          controllerRef.current?.abort();
+        } else setSidebarOpen(false);
       }
     }
     window.addEventListener("keydown", handleShortcut);
@@ -1188,7 +1197,10 @@ export default function ChatWorkspace() {
       setNotice("Send or remove the current attachments before switching chats.");
       return;
     }
-    if (sending) controllerRef.current?.abort();
+    if (sending) {
+      userStopRef.current = true;
+      controllerRef.current?.abort();
+    }
     setActiveChatId(chatId);
     setSidebarOpen(false);
     setMenuChatId(null);
@@ -1617,6 +1629,7 @@ export default function ChatWorkspace() {
     const responseId = crypto.randomUUID();
     const controller = new AbortController();
     controllerRef.current = controller;
+    userStopRef.current = false;
     setDraft("");
     setNotice("");
     setSending(true);
@@ -1708,7 +1721,20 @@ export default function ChatWorkspace() {
       }
       if (!regenerate) setPendingAttachments([]);
     } catch (sendError) {
-      if (!regenerate && attachments.length) {
+      const isAbort =
+        sendError instanceof Error && sendError.name === "AbortError";
+      const isNetworkDrop =
+        sendError instanceof Error &&
+        /load failed|failed to fetch|networkerror|network request failed/i.test(
+          sendError.message,
+        );
+      // Did the turn actually land server-side? The user
+      // message is persisted before generation starts, so its
+      // presence separates "the connection dropped but the turn
+      // is running/finished" from "the request never arrived".
+      // Only an explicit user stop may call it "stopped".
+      let landed = false;
+      if ((isAbort && !userStopRef.current) || isNetworkDrop) {
         try {
           const savedUserMessage = await getDoc(
             doc(
@@ -1721,20 +1747,24 @@ export default function ChatWorkspace() {
               userMessageId,
             ),
           );
-          if (savedUserMessage.exists()) setPendingAttachments([]);
-        } catch (reconcileError) {
-          console.error("Couldn’t reconcile sent attachments after a failed request.", reconcileError);
+          landed = savedUserMessage.exists();
+        } catch {
+          landed = false;
         }
       }
-      if (sendError instanceof Error && sendError.name === "AbortError") {
+      if (!regenerate && attachments.length && landed) {
+        setPendingAttachments([]);
+      }
+      if (isAbort && userStopRef.current) {
         setNotice("Response stopped.");
+      } else if (landed) {
+        setNotice(
+          "Connection dropped — your message was received, and the reply will appear here when it’s ready.",
+        );
       } else {
         setDraft(content);
         setNotice(
-          sendError instanceof Error &&
-            /load failed|failed to fetch|networkerror|network request failed/i.test(
-              sendError.message,
-            )
+          isNetworkDrop || isAbort
             ? "Connection problem — the request didn’t complete. Check your connection and tap send again; your message is back in the box."
             : sendError instanceof Error
               ? sendError.message
@@ -1912,6 +1942,7 @@ export default function ChatWorkspace() {
   async function confirmSignOut() {
     if (!signOutVariant) return;
     setSigningOut(true);
+    userStopRef.current = true;
     controllerRef.current?.abort();
     // performSignOut revokes the server session, tears down Firebase
     // and Firestore locally, and navigates to "/".
@@ -2792,7 +2823,10 @@ export default function ChatWorkspace() {
                   type="button"
                   aria-label="Stop generating"
                   title="Stop generating (Esc)"
-                  onClick={() => controllerRef.current?.abort()}
+                  onClick={() => {
+                    userStopRef.current = true;
+                    controllerRef.current?.abort();
+                  }}
                 >
                   <Icon name="stop" size={17} />
                 </button>

@@ -1679,6 +1679,29 @@ def test_shared_client_is_per_event_loop():
         os.environ.update(saved)
 
 
+def test_fake_query_refuses_limit_to_last_stream():
+    """Pin the fake's parity with the real Firestore client:
+    streaming a limit_to_last query raises ValueError there —
+    the permissive fake is what let the chatjob history bug
+    ship. .get() stays legal and returns the last N docs."""
+    from tests.fakes import FakeFirestore
+
+    db = FakeFirestore()
+    messages = (
+        db.collection("users").document("u1").collection("chats")
+        .document("c1").collection("messages")
+    )
+    for index in range(3):
+        messages.document(f"m{index}").set({"content": f"msg {index}"})
+    query = messages.order_by("createdAt").limit_to_last(2)
+    try:
+        list(query.stream())
+        raise AssertionError("stream() must refuse limit_to_last queries")
+    except ValueError as error:
+        assert "limit_to_last" in str(error)
+    assert len(query.get()) == 2
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):

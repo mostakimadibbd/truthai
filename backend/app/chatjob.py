@@ -85,7 +85,12 @@ async def execute_chat_job(job: dict, db, rtdb_ref) -> dict:
 
     history_snaps = await _run_sync(
         lambda: list(
-            messages_ref.order_by("createdAt").limit_to_last(MAX_MESSAGES).stream()
+            # NOTE: the real Firestore client forbids .stream()
+            # on limit_to_last queries (ValueError) — .get() is
+            # the only legal read here. This one call killed every
+            # delegated turn in production while the test fakes
+            # happily streamed (fixed in tests/fakes.py too).
+            messages_ref.order_by("createdAt").limit_to_last(MAX_MESSAGES).get()
         )
     )
     history: list[dict] = []

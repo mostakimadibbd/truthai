@@ -49,20 +49,36 @@ class FakeQuery:
         self._store = store
         self._prefix = prefix
         self._limit = None
+        self._limit_to_last = False
 
     def limit_to_last(self, n: int) -> "FakeQuery":
         self._limit = n
+        self._limit_to_last = True
         return self
 
-    def stream(self):
+    def _select(self) -> list:
         paths = sorted(
             p for p in self._store if p.startswith(self._prefix + "/")
             and p.count("/") == self._prefix.count("/") + 1
         )
         if self._limit:
-            paths = paths[-self._limit:]
-        for path in paths:
-            yield FakeSnapshot(self._store[path])
+            paths = paths[-self._limit:] if self._limit_to_last else paths[: self._limit]
+        return [FakeSnapshot(self._store[path]) for path in paths]
+
+    def stream(self):
+        # Parity with the real client: streaming a limit_to_last
+        # query is a hard error there — the fake must refuse too,
+        # or tests pass while production dies (this exact gap hid
+        # the chatjob history bug until it hit real users).
+        if self._limit_to_last:
+            raise ValueError(
+                "Query results for queries that include limit_to_last() "
+                "constraints cannot be streamed. Use Query.get() instead."
+            )
+        yield from self._select()
+
+    def get(self) -> list:
+        return self._select()
 
 
 class FakeCollection:

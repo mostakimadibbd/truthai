@@ -122,6 +122,27 @@ async def _run(job: dict, db, rtdb_ref) -> None:
                 )
             except Exception:
                 pass
+            # Never leave a ghost behind: if the job died after
+            # writing the message pair, the assistant message sits
+            # at status "generating" forever and the client spins
+            # on it. Mark it failed and drop the stream node so
+            # every surface settles (best-effort, both).
+            try:
+                from firebase_admin import firestore
+
+                db.collection("users").document(job["uid"]).collection(
+                    "chats"
+                ).document(job["chatId"]).collection("messages").document(
+                    job["assistantMessageId"]
+                ).update(
+                    {"status": "failed", "updatedAt": firestore.SERVER_TIMESTAMP}
+                )
+            except Exception:
+                pass
+            try:
+                rtdb_ref(f"chatStreams/{job['uid']}/{job['chatId']}").delete()
+            except Exception:
+                pass
         finally:
             job["finishedAt"] = _now_ms()
             _mirror(job, db)
