@@ -1,3 +1,4 @@
+import { serverEnv } from "@/lib/server/env";
 import { randomUUID } from "node:crypto";
 import { Timestamp } from "firebase-admin/firestore";
 import { NextRequest, NextResponse } from "next/server";
@@ -341,7 +342,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const apiKey = process.env.OPENROUTER_API_KEY;
+  const apiKey = serverEnv.openRouterApiKey;
   // Free OpenRouter image models, checked against the live
   // catalogue at request time — the BACKUP source, tried only when
   // Pollinations fails. The list is usually empty (no free image

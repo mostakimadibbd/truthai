@@ -1,6 +1,7 @@
 import { jwtVerify } from "jose";
 import { NextRequest, NextResponse } from "next/server";
 import { sanitizeNextPath } from "@/lib/auth-redirect";
+import { serverEnv } from "@/lib/server/env";
 
 // Phase 2 session redirects. The middleware verifies ONLY the session
 // cookie's signature and expiry (HS256 via jose, Edge-compatible). It
@@ -29,7 +30,7 @@ const PROTECTED_PREFIXES = [
 ];
 
 async function hasValidSessionCookie(request: NextRequest): Promise<boolean> {
-  const secret = process.env.SESSION_SECRET?.trim();
+  const secret = serverEnv.sessionSecret;
   if (!secret || secret.length < 32) return false;
 
   let token: string | undefined;
@@ -61,7 +62,7 @@ export async function middleware(request: NextRequest) {
   const nonceBytes = new Uint8Array(16);
   crypto.getRandomValues(nonceBytes);
   const nonce = btoa(String.fromCharCode(...nonceBytes));
-  const authDomain = process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN?.trim();
+  const authDomain = serverEnv.firebaseWebAuthDomain;
   const authOrigin = authDomain ? `https://${authDomain}` : "https://*.firebaseapp.com";
   // NOTE: do NOT add "require-trusted-types-for 'script'" here. It breaks
   // Cloudflare Turnstile, which next/script injects by assigning a plain

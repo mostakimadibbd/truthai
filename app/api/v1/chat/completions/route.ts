@@ -1,3 +1,4 @@
+import { serverEnv } from "@/lib/server/env";
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import {
@@ -318,7 +319,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const apiKey = process.env.OPENROUTER_API_KEY;
+  const apiKey = serverEnv.openRouterApiKey;
   if (!apiKey) {
     return apiError(503, "api_unavailable", "The API is not configured on this deployment.", "api_error");
   }

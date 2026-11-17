@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { recordBudget } from "@/lib/server/budget";
+import { serverEnv } from "@/lib/server/env";
 
 // Optional delegation to the Python backend service (backend/).
 //
@@ -35,8 +36,8 @@ type DelegateArgs = {
 };
 
 function backendConfig(): { url: string; token: string } | null {
-  const url = process.env.BACKEND_URL?.trim().replace(/\/+$/, "");
-  const token = process.env.BACKEND_SERVICE_TOKEN?.trim();
+  const url = serverEnv.backendUrl;
+  const token = serverEnv.backendServiceToken;
   if (!url || !token) return null;
   return { url, token };
 }

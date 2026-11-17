@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { serverEnv } from "@/lib/server/env";
 import type { NextRequest } from "next/server";
 import { getRemoteIp } from "@/lib/server/turnstile";
 
@@ -75,7 +76,7 @@ export function parseUserAgent(userAgent: string | null): {
 }
 
 export function hashIpAddress(ip: string | null): string | null {
-  const secret = process.env.SESSION_SECRET?.trim();
+  const secret = serverEnv.sessionSecret;
   if (!ip || !secret) return null;
   return createHmac("sha256", secret).update(ip).digest("hex");
 }

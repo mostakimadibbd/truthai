@@ -1,4 +1,5 @@
 import { siteUrl } from "@/lib/site";
+import { serverEnv } from "./env";
 
 // Server-side calls to the Firebase Identity Toolkit REST API. Calling
 // sign-in / OOB-code endpoints from the server (instead of the browser
@@ -10,7 +11,7 @@ import { siteUrl } from "@/lib/site";
 const IDENTITY_TOOLKIT_BASE = "https://identitytoolkit.googleapis.com/v1";
 
 function apiKey(): string | null {
-  return process.env.NEXT_PUBLIC_FIREBASE_API_KEY?.trim() || null;
+  return serverEnv.firebaseWebApiKey || null;
 }
 
 export function isIdentityToolkitConfigured(): boolean {

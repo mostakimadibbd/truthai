@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { serverEnv } from "./server-env";
 
 /**
  * Server-side proxy to the backend service's admin API.
@@ -15,9 +16,9 @@ export async function proxyAdmin(
   path: string,
   init: { method: string; body?: unknown },
 ): Promise<NextResponse> {
-  const base = (process.env.BACKEND_URL ?? "").trim().replace(/\/+$/, "");
-  const serviceToken = (process.env.BACKEND_SERVICE_TOKEN ?? "").trim();
-  const adminSecret = (process.env.ADMIN_API_SECRET ?? "").trim();
+  const base = serverEnv.backendUrl;
+  const serviceToken = serverEnv.backendServiceToken;
+  const adminSecret = serverEnv.adminApiSecret;
   if (!base || !serviceToken || !adminSecret) {
     return NextResponse.json(
       {

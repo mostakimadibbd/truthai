@@ -1,3 +1,4 @@
+import { serverEnv } from "@/lib/server/env";
 import { Timestamp } from "firebase-admin/firestore";
 import { NextRequest, NextResponse } from "next/server";
 import { sortByConversationOrder } from "@/lib/message-order";
@@ -244,7 +245,7 @@ export async function POST(request: NextRequest) {
   const auth = await authenticateVerifiedUser(request);
   if (!auth.ok) return errorResponse(auth.status, auth.code, auth.message);
 
-  const apiKey = process.env.OPENROUTER_API_KEY;
+  const apiKey = serverEnv.openRouterApiKey;
   if (!apiKey) {
     return errorResponse(
       503,

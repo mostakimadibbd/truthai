@@ -1,4 +1,5 @@
 import { SignJWT, jwtVerify } from "jose";
+import { serverEnv } from "@/lib/server/env";
 import type { NextRequest, NextResponse } from "next/server";
 import { redisPipeline } from "@/lib/server/redis";
 
@@ -47,7 +48,7 @@ export type SessionResult =
     };
 
 function sessionSecret(): Uint8Array | null {
-  const secret = process.env.SESSION_SECRET?.trim();
+  const secret = serverEnv.sessionSecret;
   if (!secret || secret.length < 32) return null;
   return new TextEncoder().encode(secret);
 }

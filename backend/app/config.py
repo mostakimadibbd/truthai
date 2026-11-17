@@ -18,6 +18,21 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def provider_api_key(env_keys: list[str]) -> str:
+    """First configured API key for a cross-provider spec ("" when
+    none). THE place provider credentials are read — call sites in
+    openrouter.py never touch os.environ for keys directly."""
+    for name in env_keys:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def provider_configured(env_keys: list[str]) -> bool:
+    return bool(provider_api_key(env_keys))
+
+
 class Settings:
     # Shared with the Next.js app
     session_secret: str = os.environ.get("SESSION_SECRET", "")

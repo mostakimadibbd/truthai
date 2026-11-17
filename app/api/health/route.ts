@@ -2,15 +2,16 @@ import { createPrivateKey } from "node:crypto";
 import { NextResponse } from "next/server";
 import { normalizeAdminPrivateKey } from "@/lib/server/private-key";
 import { checkCloudinaryLive } from "@/lib/server/cloudinary";
+import { serverEnv } from "@/lib/server/env";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // Cheap liveness + configuration probe (Phase 5). Reports only
 // booleans — whether each server integration has its configuration
-// present — never values, so it is safe to expose publicly. It makes
-// no network calls and touches no database, so it stays fast and free
-// even when every downstream service is down.
+// present — never values, so it is safe to expose publicly. All
+// environment reads go through lib/server/env.ts, the single place
+// server credentials are defined.
 function present(...values: (string | undefined)[]): boolean {
   return values.every((value) => typeof value === "string" && value.trim().length > 0);
 }
@@ -18,32 +19,26 @@ function present(...values: (string | undefined)[]): boolean {
 export async function GET() {
   const integrations = {
     firebaseWeb: present(
-      process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-      process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-      process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-      process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
+      serverEnv.firebaseWebApiKey,
+      serverEnv.firebaseWebAuthDomain,
+      serverEnv.firebaseWebProjectId,
+      serverEnv.firebaseWebAppId,
     ),
     firebaseAdmin: present(
-      process.env.FIREBASE_ADMIN_CLIENT_EMAIL,
-      process.env.FIREBASE_ADMIN_PRIVATE_KEY,
-      process.env.FIREBASE_ADMIN_PROJECT_ID ?? process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+      serverEnv.firebaseAdminClientEmail,
+      serverEnv.firebaseAdminPrivateKey,
+      serverEnv.firebaseAdminProjectId,
     ),
-    realtimeDatabase: present(process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL),
-    openRouter: present(process.env.OPENROUTER_API_KEY),
+    realtimeDatabase: present(serverEnv.firebaseDatabaseUrl),
+    openRouter: present(serverEnv.openRouterApiKey),
     cloudinary: present(
-      process.env.CLOUDINARY_CLOUD_NAME,
-      process.env.CLOUDINARY_API_KEY,
-      process.env.CLOUDINARY_API_SECRET,
+      serverEnv.cloudinaryCloudName,
+      serverEnv.cloudinaryApiKey,
+      serverEnv.cloudinaryApiSecret,
     ),
-    redis: present(
-      process.env.UPSTASH_REDIS_REST_URL,
-      process.env.UPSTASH_REDIS_REST_TOKEN,
-    ),
-    turnstile: present(
-      process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY,
-      process.env.TURNSTILE_SECRET_KEY,
-    ),
-    session: (process.env.SESSION_SECRET?.trim().length ?? 0) >= 32,
+    redis: present(serverEnv.upstashRedisUrl, serverEnv.upstashRedisToken),
+    turnstile: present(serverEnv.turnstileSiteKey, serverEnv.turnstileSecretKey),
+    session: (serverEnv.sessionSecret?.length ?? 0) >= 32,
   };
   // Finer-grained Firebase Admin diagnostics (booleans only, never key
   // material): which of the checks in getFirebaseAdminApp would fail.
@@ -52,7 +47,7 @@ export async function GET() {
   let adminKeyParses = false;
   try {
     const normalized = normalizeAdminPrivateKey(
-      process.env.FIREBASE_ADMIN_PRIVATE_KEY,
+      serverEnv.firebaseAdminPrivateKey,
     );
     if (normalized) {
       createPrivateKey(normalized);
@@ -61,16 +56,13 @@ export async function GET() {
   } catch {
     adminKeyParses = false;
   }
-  const adminProjectId =
-    process.env.FIREBASE_ADMIN_PROJECT_ID?.trim() ||
-    process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID?.trim();
+  const adminProjectId = serverEnv.firebaseAdminProjectId;
   const adminChecks = {
     keyParses: adminKeyParses,
     projectMatches:
-      !!adminProjectId &&
-      adminProjectId === process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID?.trim(),
+      !!adminProjectId && adminProjectId === serverEnv.firebaseWebProjectId,
     emailIsServiceAccount:
-      process.env.FIREBASE_ADMIN_CLIENT_EMAIL?.trim().endsWith(
+      serverEnv.firebaseAdminClientEmail?.endsWith(
         ".iam.gserviceaccount.com",
       ) ?? false,
   };
@@ -83,7 +75,7 @@ export async function GET() {
   // error kind only.
   const cloudinaryLive = await checkCloudinaryLive();
   const cloudinaryChecks = {
-    uploadPresetPresent: present(process.env.CLOUDINARY_UPLOAD_PRESET),
+    uploadPresetPresent: present(serverEnv.cloudinaryUploadPreset),
     credentialsLive: cloudinaryLive.ok,
     liveError: cloudinaryLive.errorKind,
     creditsPercent: cloudinaryLive.creditsPercent,
@@ -91,12 +83,13 @@ export async function GET() {
   // Cross-provider fallback keys (presence only, never values):
   // lets key setup be verified from the outside without console
   // access. The chat chain uses these when OpenRouter is exhausted.
+  const providerKeys = serverEnv.providerEnv();
   const providers = {
-    gemini: present(process.env.GEMINI_API_KEY) || present(process.env.GOOGLE_AI_API_KEY),
-    groq: present(process.env.GROQ_API_KEY),
-    requesty: present(process.env.REQUESTY_API_KEY),
-    sambanova: present(process.env.SAMBANOVA_API_KEY),
-    nvidia: present(process.env.NVIDIA_API_KEY) || present(process.env.NVIDIA_NIM_API_KEY),
+    gemini: present(providerKeys.GEMINI_API_KEY) || present(providerKeys.GOOGLE_AI_API_KEY),
+    groq: present(providerKeys.GROQ_API_KEY),
+    requesty: present(providerKeys.REQUESTY_API_KEY),
+    sambanova: present(providerKeys.SAMBANOVA_API_KEY),
+    nvidia: present(providerKeys.NVIDIA_API_KEY) || present(providerKeys.NVIDIA_NIM_API_KEY),
   };
   return NextResponse.json(
     { ok: true, integrations, adminChecks, cloudinaryChecks, providers },

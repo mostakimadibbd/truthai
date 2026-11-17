@@ -4,17 +4,16 @@ import { getAuth } from "firebase-admin/auth";
 import { getDatabase } from "firebase-admin/database";
 import { getFirestore } from "firebase-admin/firestore";
 import { normalizeAdminPrivateKey } from "./private-key";
+import { serverEnv } from "./env";
 
 export function getFirebaseAdminApp() {
-  const projectId =
-    process.env.FIREBASE_ADMIN_PROJECT_ID?.trim() ||
-    process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID?.trim();
-  const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL?.trim();
+  const projectId = serverEnv.firebaseAdminProjectId;
+  const clientEmail = serverEnv.firebaseAdminClientEmail;
   const privateKey = normalizeAdminPrivateKey(
-    process.env.FIREBASE_ADMIN_PRIVATE_KEY,
+    serverEnv.firebaseAdminPrivateKey,
   );
-  const clientProjectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID?.trim();
-  const databaseURL = process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL?.trim();
+  const clientProjectId = serverEnv.firebaseWebProjectId;
+  const databaseURL = serverEnv.firebaseDatabaseUrl;
 
   if (!projectId || !clientEmail || !privateKey) {
     throw new Error("Firebase Admin credentials are not configured.");
@@ -56,7 +55,7 @@ export function getFirebaseAdminFirestore() {
 }
 
 export function getFirebaseAdminDatabase() {
-  const databaseURL = process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL?.trim();
+  const databaseURL = serverEnv.firebaseDatabaseUrl;
   if (!databaseURL) {
     throw new Error("Realtime Database is not configured.");
   }

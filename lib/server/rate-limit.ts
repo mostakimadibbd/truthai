@@ -1,3 +1,4 @@
+import { serverEnv } from "./env";
 const RATE_LIMIT_SCRIPT = `
 local minuteCount = redis.call('INCR', KEYS[1])
 if minuteCount == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]) end
@@ -65,8 +66,8 @@ export async function checkRateLimit(
   perMinute: number,
   perDay: number,
 ): Promise<RateLimitResult> {
-  const redisUrl = process.env.UPSTASH_REDIS_REST_URL?.replace(/\/+$/, "");
-  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  const redisUrl = serverEnv.upstashRedisUrl;
+  const redisToken = serverEnv.upstashRedisToken;
   if (!redisUrl || !redisToken) return { state: "unavailable" };
 
   try {

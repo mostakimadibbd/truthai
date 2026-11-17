@@ -1,4 +1,5 @@
 import { v2 as cloudinary } from "cloudinary";
+import { serverEnv } from "./env";
 
 export type CloudinaryResourceType = "image" | "raw";
 
@@ -17,9 +18,9 @@ type CloudinaryConfig = {
  * must not break generated images or avatars.
  */
 function getCloudinaryConfig(): CloudinaryConfig {
-  const cloudName = process.env.CLOUDINARY_CLOUD_NAME?.trim();
-  const apiKey = process.env.CLOUDINARY_API_KEY?.trim();
-  const apiSecret = process.env.CLOUDINARY_API_SECRET?.trim();
+  const cloudName = serverEnv.cloudinaryCloudName;
+  const apiKey = serverEnv.cloudinaryApiKey;
+  const apiSecret = serverEnv.cloudinaryApiSecret;
   if (!cloudName || !apiKey || !apiSecret) {
     throw new Error("Cloudinary account credentials are not configured.");
   }
@@ -29,7 +30,7 @@ function getCloudinaryConfig(): CloudinaryConfig {
 }
 
 function getCloudinaryUploadPreset(): string {
-  const uploadPreset = process.env.CLOUDINARY_UPLOAD_PRESET?.trim();
+  const uploadPreset = serverEnv.cloudinaryUploadPreset;
   if (!uploadPreset) {
     throw new Error("The signed Cloudinary upload preset is not configured.");
   }

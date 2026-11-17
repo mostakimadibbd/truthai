@@ -20,7 +20,7 @@ from typing import Awaitable, Callable
 
 import httpx
 
-from .config import settings
+from .config import provider_api_key, provider_configured, settings
 from .models import free_only_attempts
 
 RETRYABLE_STATUSES = {400, 404, 413, 422, 429, 500, 502, 503, 504}
@@ -89,7 +89,7 @@ def provider_presence() -> dict[str, bool]:
     values never leave the process). Surfaced on the token-gated
     /health so key setup can be verified without console access."""
     return {
-        spec["provider"]: any(os.environ.get(key) for key in spec["env_keys"])
+        spec["provider"]: provider_configured(spec["env_keys"])
         for spec in CROSS_PROVIDERS
     }
 
@@ -97,11 +97,7 @@ def provider_presence() -> dict[str, bool]:
 def cross_provider_targets(vision_only: bool = False) -> list[dict]:
     targets: list[dict] = []
     for spec in CROSS_PROVIDERS:
-        api_key = next(
-            (os.environ.get(name, "").strip() for name in spec["env_keys"]
-             if os.environ.get(name, "").strip()),
-            "",
-        )
+        api_key = provider_api_key(spec["env_keys"])
         if not api_key:
             continue
         models = spec.get("vision_models", []) if vision_only else spec["models"]

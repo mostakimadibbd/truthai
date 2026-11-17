@@ -1,3 +1,4 @@
+import { serverEnv } from "./env";
 /**
  * Shared OpenRouter calling discipline for the chat route and the
  * public API. Free models rate-limit (429), return 5xx and drop
@@ -175,7 +176,7 @@ const CROSS_PROVIDERS: ProviderSpec[] = [
 ];
 
 export function crossProviderTargets(
-  env: Record<string, string | undefined> = process.env,
+  env: Record<string, string | undefined> = serverEnv.providerEnv(),
   visionOnly = false,
 ): AttemptTarget[] {
   const targets: AttemptTarget[] = [];
@@ -201,7 +202,7 @@ export function crossProviderTargets(
 export function buildAttemptTargets(
   openRouterAttempts: string[],
   openRouterApiKey: string,
-  env: Record<string, string | undefined> = process.env,
+  env: Record<string, string | undefined> = serverEnv.providerEnv(),
   visionOnly = false,
 ): AttemptTarget[] {
   const targets: AttemptTarget[] = openRouterAttempts.map((model) => ({
@@ -238,7 +239,7 @@ export async function fetchChatCompletionWithFallback(
   const targets = buildAttemptTargets(
     args.attempts,
     args.apiKey,
-    process.env,
+    serverEnv.providerEnv(),
     messagesHaveImages(args.messages),
   );
   const connectTimeoutMs = args.connectTimeoutMs ?? 25_000;

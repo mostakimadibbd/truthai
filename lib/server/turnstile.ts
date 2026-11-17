@@ -1,4 +1,5 @@
 import { siteUrl } from "@/lib/site";
+import { serverEnv } from "@/lib/server/env";
 
 const SITEVERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
@@ -46,10 +47,10 @@ function allowedHostnames(): Set<string> {
     // guard against unexpected runtime values.
   }
   // The stable vercel.app alias for this deployment, when known.
-  const vercelUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim();
+  const vercelUrl = serverEnv.productionUrl;
   if (vercelUrl) hosts.add(vercelUrl.replace(/^https?:\/\//, "").toLowerCase());
   // Extra custom domains, comma-separated, e.g. "app.example.com,example.com".
-  const extra = process.env.TURNSTILE_HOSTNAME_ALLOWLIST ?? "";
+  const extra = serverEnv.turnstileHostnameAllowlist;
   for (const host of extra.split(",")) {
     const trimmed = host.trim().toLowerCase();
     if (trimmed) hosts.add(trimmed);
@@ -76,7 +77,7 @@ export async function verifyTurnstile(
   token: string,
   options: { expectedAction: TurnstileAction; remoteIp?: string },
 ): Promise<TurnstileVerification> {
-  const secret = process.env.TURNSTILE_SECRET_KEY?.trim();
+  const secret = serverEnv.turnstileSecretKey;
   if (!secret) return { state: "misconfigured" };
 
   const isTestSecret = TEST_SECRETS.has(secret);

@@ -1,3 +1,5 @@
+import { serverEnv } from "./env";
+
 // Minimal Upstash Redis REST helper shared by the session and auth
 // rate-limit code. Uses the pipeline endpoint so several commands travel
 // in a single HTTP request; callers are responsible for keeping the
@@ -10,16 +12,15 @@ export type RedisPipelineResult =
 
 export function isRedisConfigured(): boolean {
   return Boolean(
-    process.env.UPSTASH_REDIS_REST_URL?.trim() &&
-      process.env.UPSTASH_REDIS_REST_TOKEN?.trim(),
+    serverEnv.upstashRedisUrl?.trim() && serverEnv.upstashRedisToken?.trim(),
   );
 }
 
 export async function redisPipeline(
   commands: string[][],
 ): Promise<RedisPipelineResult> {
-  const redisUrl = process.env.UPSTASH_REDIS_REST_URL?.replace(/\/+$/, "");
-  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  const redisUrl = serverEnv.upstashRedisUrl;
+  const redisToken = serverEnv.upstashRedisToken;
   if (!redisUrl || !redisToken) return { state: "unconfigured" };
 
   try {
