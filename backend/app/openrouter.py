@@ -54,6 +54,16 @@ CROSS_PROVIDERS: list[dict] = [
         "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
     },
     {
+        "provider": "requesty",
+        "url": "https://router.requesty.ai/v1/chat/completions",
+        "env_keys": ["REQUESTY_API_KEY"],
+        "models": [
+            "nvidia/nemotron-3-ultra-550b-a55b",
+            "google/gemma-4-31b-it",
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
+        ],
+    },
+    {
         "provider": "sambanova",
         "url": "https://api.sambanova.ai/v1/chat/completions",
         "env_keys": ["SAMBANOVA_API_KEY"],
