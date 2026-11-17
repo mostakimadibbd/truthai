@@ -616,14 +616,40 @@ def get_logs(db) -> dict:
     return {"entries": entries}
 
 
-def get_storage() -> dict:
-    """Media storage from Cloudinary's usage API: plan,
-    credits, storage/bandwidth consumption and object counts.
-    Reports configured: false (with the variable names to set)
-    until the backend can see the Cloudinary credentials."""
+def _firestore_blob_stats(db) -> dict | None:
+    """Usage of the app's fallback blob store (mediaStats/global,
+    maintained by the main app's blob-store). None when there is
+    no fallback store activity yet or no database handle."""
+    if db is None:
+        return None
+    try:
+        snapshot = db.collection("mediaStats").document("global").get()
+    except Exception:
+        return None
+    if not snapshot.exists:
+        return None
+    data = snapshot.to_dict() or {}
+    count = data.get("count")
+    total_bytes = data.get("bytes")
+    return {
+        "configured": True,
+        "source": "firestore",
+        "objects": count if isinstance(count, (int, float)) else 0,
+        "storageBytes": total_bytes if isinstance(total_bytes, (int, float)) else 0,
+        "quotaBytes": 1_073_741_824,
+    }
+
+
+def get_storage(db=None) -> dict:
+    """Media storage for the panel. Primary source is
+    Cloudinary's usage API (plan, credits, consumption); when
+    Cloudinary has no credentials here or its API rejects the
+    call (the account is currently limited at the account
+    level), the panel falls back to the app's Firestore blob
+    store statistics so the card never just goes dark."""
     credentials = settings.cloudinary_credentials
     if credentials is None:
-        return {"configured": False}
+        return _firestore_blob_stats(db) or {"configured": False}
     cloud_name, api_key, api_secret = credentials
     import httpx
 
@@ -636,6 +662,14 @@ def get_storage() -> dict:
         response.raise_for_status()
         usage = response.json()
     except Exception as error:  # noqa: BLE001 - surfaced in the UI, not as a 503
+        fallback = _firestore_blob_stats(db)
+        if fallback is not None:
+            fallback["cloudinaryError"] = (
+                f"Cloudinary rejected the usage request ({type(error).__name__}) — "
+                "the account is limited, so uploads are being stored in the "
+                "fallback store below."
+            )
+            return fallback
         return {
             "configured": True,
             "error": (
@@ -652,6 +686,7 @@ def get_storage() -> dict:
     credits = section("credits")
     return {
         "configured": True,
+        "source": "cloudinary",
         "plan": usage.get("plan"),
         "cloudName": cloud_name,
         "creditsLimit": credits.get("limit"),

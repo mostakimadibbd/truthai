@@ -121,6 +121,8 @@ export async function POST(request: NextRequest) {
       publicId,
       resourceType: spec.resourceType,
       format: spec.format,
+      uid: auth.uid,
+      mimeType: spec.mimeType,
     });
     if (uploaded.bytes !== file.size) {
       return errorResponse(400, "UPLOAD_VALIDATION_FAILED", "Cloudinary couldn’t verify the file type or size.");
@@ -135,7 +137,10 @@ export async function POST(request: NextRequest) {
       bytes: uploaded.bytes,
       format: spec.format,
       resourceType: spec.resourceType,
-      publicId,
+      // The id the store actually recorded — identical to the
+      // requested id on Cloudinary, a blob: id when the fallback
+      // store took the file.
+      publicId: uploaded.publicId,
       deliveryType: "authenticated",
       status: "ready",
       createdAt: Timestamp.now(),
@@ -150,7 +155,7 @@ export async function POST(request: NextRequest) {
           mimeType: spec.mimeType,
           size: uploaded.bytes,
           accessUrl: getCloudinaryPrivateDownloadUrl(
-            publicId,
+            uploaded.publicId,
             spec.format,
             spec.resourceType,
           ),

@@ -1,8 +1,11 @@
 import type { Firestore } from "firebase-admin/firestore";
 import {
+  blobIdFromPublicId,
   getCloudinaryPrivateDownloadUrl,
+  isBlobPublicId,
   type CloudinaryResourceType,
 } from "@/lib/server/cloudinary";
+import { readBlob } from "@/lib/server/blob-store";
 import { extractPdfText } from "@/lib/server/pdf-text";
 import { MAX_ATTACHMENT_BYTES_PER_MESSAGE } from "@/lib/server/upload-policy";
 
@@ -68,6 +71,18 @@ function isUploadDocument(value: unknown): value is UploadDocument {
 }
 
 async function downloadPrivateAsset(asset: UploadDocument): Promise<Buffer> {
+  if (isBlobPublicId(asset.publicId)) {
+    // Blob-backed files are read straight from the fallback
+    // store — there is no fetchable URL for the server.
+    const blob = await readBlob(blobIdFromPublicId(asset.publicId));
+    if (!blob) {
+      throw new Error("An attached file couldn’t be retrieved from private storage.");
+    }
+    if (blob.buffer.byteLength !== asset.bytes) {
+      throw new Error("An attached file didn’t match its verified size.");
+    }
+    return blob.buffer;
+  }
   const url = getCloudinaryPrivateDownloadUrl(
     asset.publicId,
     asset.format,
@@ -167,16 +182,28 @@ export async function buildOpenRouterMessages(
       const upload = await readVerifiedUpload(db, uid, chatId, attachment);
       if (upload.resourceType === "image") {
         includesImages = true;
-        parts.push({
-          type: "image_url",
-          image_url: {
-            url: getCloudinaryPrivateDownloadUrl(
-              upload.publicId,
-              upload.format,
-              upload.resourceType,
-            ),
-          },
-        });
+        if (isBlobPublicId(upload.publicId)) {
+          // Providers cannot fetch the app's private media
+          // route, so blob-backed images go inline as data URLs.
+          const bytes = await downloadPrivateAsset(upload);
+          parts.push({
+            type: "image_url",
+            image_url: {
+              url: `data:${upload.mimeType};base64,${bytes.toString("base64")}`,
+            },
+          });
+        } else {
+          parts.push({
+            type: "image_url",
+            image_url: {
+              url: getCloudinaryPrivateDownloadUrl(
+                upload.publicId,
+                upload.format,
+                upload.resourceType,
+              ),
+            },
+          });
+        }
       } else {
         // Documents (PDF, TXT, MD, CSV): the text is extracted HERE,
         // on the server, from the stored Cloudinary asset — never

@@ -386,7 +386,7 @@ async def admin_storage(request: Request):
     if isinstance(gate, JSONResponse):
         return gate
     try:
-        return {"success": True, **admin.get_storage()}
+        return {"success": True, **admin.get_storage(firestore_client())}
     except Exception:
         return _error(
             503, "STORAGE_UNAVAILABLE", "Storage statistics couldn’t be loaded."

@@ -193,6 +193,19 @@ service cloud.firestore {
     match /safetyFlags/{flagId} {
       allow read, write: if false;
     }
+    // Fallback media blob store (chunked file storage used when
+    // Cloudinary is unavailable) and its usage counters. Served
+    // only through the session-checked /api/media route;
+    // server-only, no client access.
+    match /mediaBlobs/{blobId} {
+      allow read, write: if false;
+      match /chunks/{index} {
+        allow read, write: if false;
+      }
+    }
+    match /mediaStats/{docId} {
+      allow read, write: if false;
+    }
     // Admin audit trail (promote/demote/disable/enable actions,
     // written by the backend's admin API). Server-only; no
     // client access.

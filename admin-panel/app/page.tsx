@@ -157,6 +157,9 @@ type LogEntry = {
 
 type StorageInfo = {
   configured: boolean;
+  source?: string;
+  quotaBytes?: number | null;
+  cloudinaryError?: string;
   error?: string;
   plan?: string | null;
   cloudName?: string;
@@ -1674,8 +1677,31 @@ export default function ConsolePage() {
           <>
             <div className="grid-2">
               <section className="card">
-                <div className="card-head"><h2>Media storage</h2><span className="muted small">Cloudinary</span></div>
-                {storage?.configured && storage.error ? (
+                <div className="card-head"><h2>Media storage</h2><span className="muted small">{storage?.source === "firestore" ? "Fallback store · Firestore" : "Cloudinary"}</span></div>
+                {storage?.configured && storage.source === "firestore" ? (
+                  <div>
+                    {storage.cloudinaryError && <div className="alert" role="alert">{storage.cloudinaryError}</div>}
+                    <div className="storage-wrap">
+                      <div
+                        className="pie"
+                        style={{
+                          background: `conic-gradient(var(--accent) 0% ${storage.quotaBytes ? Math.min(100, Math.round(((storage.storageBytes ?? 0) / storage.quotaBytes) * 1000) / 10) : 0}%, var(--track) ${storage.quotaBytes ? Math.min(100, Math.round(((storage.storageBytes ?? 0) / storage.quotaBytes) * 1000) / 10) : 0}% 100%)`,
+                        }}
+                      >
+                        <div className="pie-hole">
+                          <strong>{storage.quotaBytes ? Math.round(((storage.storageBytes ?? 0) / storage.quotaBytes) * 1000) / 10 : 0}%</strong>
+                          <span>of ~1 GB used</span>
+                        </div>
+                      </div>
+                      <div className="rows grow">
+                        <div className="row"><span>Store</span><strong>Firestore fallback</strong></div>
+                        <div className="row"><span>Storage</span><strong>{bytes(storage.storageBytes)}</strong></div>
+                        <div className="row"><span>Media files</span><strong>{storage.objects?.toLocaleString("en-US") ?? "—"}</strong></div>
+                        <div className="row"><span>Why</span><strong>Cloudinary account limited — uploads auto-fallback here</strong></div>
+                      </div>
+                    </div>
+                  </div>
+                ) : storage?.configured && storage.error ? (
                   <div className="alert" role="alert">{storage.error}</div>
                 ) : storage?.configured ? (
                   <div className="storage-wrap">
@@ -1702,9 +1728,10 @@ export default function ConsolePage() {
                 ) : (
                   <div>
                     <p className="muted">
-                      Storage statistics light up when the backend can see your Cloudinary account.
-                      Add <code>CLOUDINARY_URL</code> (from the main project’s variables, or the
-                      Cloudinary console) to the <strong>backend</strong> project and redeploy it.
+                      Storage statistics light up when the backend can see your Cloudinary account
+                      (add <code>CLOUDINARY_URL</code> to the <strong>backend</strong> project), or
+                      automatically once the fallback store holds its first file while Cloudinary
+                      is unavailable.
                     </p>
                   </div>
                 )}

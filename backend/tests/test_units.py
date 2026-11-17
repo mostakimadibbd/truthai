@@ -1480,6 +1480,45 @@ def test_admin_flags_and_chat_view():
         admin.firebase_auth = original
 
 
+def test_admin_storage_fallback():
+    from app import admin
+    from app.config import settings
+
+    db = _AdminDb()
+    originals = (
+        settings.cloudinary_url,
+        settings.cloudinary_cloud_name,
+        settings.cloudinary_api_key,
+        settings.cloudinary_api_secret,
+    )
+    settings.cloudinary_url = ""
+    settings.cloudinary_cloud_name = ""
+    settings.cloudinary_api_key = ""
+    settings.cloudinary_api_secret = ""
+    try:
+        # No Cloudinary credentials and no fallback activity yet:
+        # the card stays unconfigured.
+        assert admin.get_storage(db) == {"configured": False}
+        # Once the fallback blob store holds files, its stats are
+        # what the panel shows.
+        db.store[("mediaStats", "global")] = {"count": 7, "bytes": 123456}
+        result = admin.get_storage(db)
+        assert result["configured"] is True
+        assert result["source"] == "firestore"
+        assert result["objects"] == 7
+        assert result["storageBytes"] == 123456
+        assert result["quotaBytes"] == 1_073_741_824
+        # No database handle: still a clean unconfigured answer.
+        assert admin.get_storage(None) == {"configured": False}
+    finally:
+        (
+            settings.cloudinary_url,
+            settings.cloudinary_cloud_name,
+            settings.cloudinary_api_key,
+            settings.cloudinary_api_secret,
+        ) = originals
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):
