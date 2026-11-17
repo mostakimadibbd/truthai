@@ -10,7 +10,7 @@ import {
   checkWindowLimit,
   rateLimitedResponse,
 } from "@/lib/server/auth-rate-limit";
-import { uploadAvatarImage } from "@/lib/server/cloudinary";
+import { cloudinaryErrorMessage, uploadAvatarImage } from "@/lib/server/cloudinary";
 import { getFirebaseAdminAuth, getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
 import { IMAGE_MIME_BY_SNIFF, sniffImageType } from "@/lib/server/image-sniff";
 
@@ -98,7 +98,7 @@ export async function POST(request: NextRequest) {
     return authErrorResponse(
       503,
       "AVATAR_UPLOAD_FAILED",
-      "Your picture couldn’t be saved right now. Please try again.",
+      `Your picture couldn’t be saved right now. (${cloudinaryErrorMessage(error)})`,
     );
   }
 }

@@ -1,6 +1,7 @@
 import { createPrivateKey } from "node:crypto";
 import { NextResponse } from "next/server";
 import { normalizeAdminPrivateKey } from "@/lib/server/private-key";
+import { checkCloudinaryLive } from "@/lib/server/cloudinary";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -76,8 +77,16 @@ export async function GET() {
   // Upload signing needs a fourth Cloudinary value the presence check
   // above does not cover; a missing preset surfaces to users as
   // "Private file uploads aren't configured for this deployment."
+  // Live credential proof (added after an incident where presence
+  // checks said "configured" while every image upload failed): one
+  // authenticated Admin API call, reported as booleans + a coarse
+  // error kind only.
+  const cloudinaryLive = await checkCloudinaryLive();
   const cloudinaryChecks = {
     uploadPresetPresent: present(process.env.CLOUDINARY_UPLOAD_PRESET),
+    credentialsLive: cloudinaryLive.ok,
+    liveError: cloudinaryLive.errorKind,
+    creditsPercent: cloudinaryLive.creditsPercent,
   };
   // Cross-provider fallback keys (presence only, never values):
   // lets key setup be verified from the outside without console

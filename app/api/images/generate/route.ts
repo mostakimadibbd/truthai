@@ -5,8 +5,7 @@ import { guardMutationHeaders } from "@/lib/server/auth-guard";
 import { getBudgetStatus, recordBudget } from "@/lib/server/budget";
 import {
   getCloudinaryPrivateDownloadUrl,
-  uploadGeneratedImage,
-} from "@/lib/server/cloudinary";
+  uploadGeneratedImage, cloudinaryErrorMessage } from "@/lib/server/cloudinary";
 import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
 import { limitDeniedResponse, limit as rateLimit } from "@/lib/server/limit";
 import { getFreeImageModels } from "@/lib/server/models";
@@ -455,7 +454,7 @@ export async function POST(request: NextRequest) {
       stored = await uploadGeneratedImage(watermarked, auth.uid, generationId);
     } catch (error) {
       console.error("Generated image storage failed.", error);
-      return errorResponse(503, "IMAGE_STORAGE_FAILED", "The generated image couldn’t be saved. Please try again.");
+      return errorResponse(503, "IMAGE_STORAGE_FAILED", `The generated image couldn’t be saved. (${cloudinaryErrorMessage(error)})`);
     }
 
     const assetId = randomUUID();

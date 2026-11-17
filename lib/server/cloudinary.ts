@@ -52,6 +52,135 @@ export function createCloudinaryUploadSignature(params: {
   };
 }
 
+
+/**
+ * Extract a short, safe-to-show reason from a Cloudinary failure.
+ * SDK errors arrive as { error: { message, http_code } } or plain
+ * Errors; Cloudinary's messages ("Invalid credentials", "Unknown
+ * API key", plan/limit notices) never contain secret values, but
+ * anything that smells like a credential or a signed URL is dropped
+ * wholesale rather than redacted.
+ */
+export function cloudinaryErrorMessage(error: unknown): string {
+  let raw = "";
+  if (error instanceof Error) raw = error.message;
+  else if (error && typeof error === "object") {
+    const nested = (error as { error?: { message?: unknown } }).error;
+    if (nested && typeof nested.message === "string") raw = nested.message;
+    else if (typeof (error as { message?: unknown }).message === "string")
+      raw = String((error as { message: unknown }).message);
+  }
+  raw = raw.trim().replace(/\s+/g, " ").slice(0, 160);
+  if (!raw) return "Cloudinary rejected the upload.";
+  if (/api_secret|cloudinary:\/\/[^\s]*@/i.test(raw)) return "Cloudinary rejected the upload.";
+  return raw;
+}
+
+/** Coarse, fixed-vocabulary classification of a live Admin API probe. */
+export function classifyCloudinaryHttp(status: number, message: string): string {
+  const text = message.toLowerCase();
+  if (status === 401 || text.includes("invalid credentials") || text.includes("unknown api key")) return "invalid_credentials";
+  if (status === 403 || status === 420 || text.includes("limit") || text.includes("exceeded") || text.includes("blocked")) return "account_limited";
+  if (status >= 500) return "cloudinary_unavailable";
+  return "unknown";
+}
+
+export type CloudinaryLiveCheck = {
+  ok: boolean;
+  errorKind: string | null;
+  creditsPercent: number | null;
+};
+
+/**
+ * Prove the configured credentials actually work against the live
+ * Cloudinary Admin API (usage endpoint) — presence checks cannot
+ * distinguish a correct secret from a mistyped one, and EVERY image
+ * path (generated, avatar, user files) dies the same silent death
+ * when the trio is wrong. Returns a coarse classification only;
+ * never credential material.
+ */
+export async function checkCloudinaryLive(): Promise<CloudinaryLiveCheck> {
+  try {
+    getCloudinaryConfig();
+  } catch {
+    return { ok: false, errorKind: "not_configured", creditsPercent: null };
+  }
+  try {
+    const usage = (await Promise.race([
+      cloudinary.api.usage(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("cloudinary-probe-timeout")), 6_000),
+      ),
+    ])) as { credits?: { usage?: number; limit?: number } };
+    let creditsPercent: number | null = null;
+    const credits = usage?.credits;
+    if (
+      credits &&
+      typeof credits.limit === "number" &&
+      credits.limit > 0 &&
+      typeof credits.usage === "number"
+    ) {
+      creditsPercent = Math.round((credits.usage / credits.limit) * 1000) / 10;
+    }
+    return { ok: true, errorKind: null, creditsPercent };
+  } catch (error) {
+    if (error instanceof Error && error.message === "cloudinary-probe-timeout") {
+      return { ok: false, errorKind: "network", creditsPercent: null };
+    }
+    const status =
+      (error as { error?: { http_code?: number } } | null)?.error?.http_code ?? 0;
+    return {
+      ok: false,
+      errorKind: classifyCloudinaryHttp(status, cloudinaryErrorMessage(error)),
+      creditsPercent: null,
+    };
+  }
+}
+
+/** One upload_stream call, normalised to the fields callers use. */
+function uploadStreamOnce(
+  options: Record<string, unknown>,
+  buffer: Buffer,
+): Promise<{ secure_url?: string; public_id: string; bytes: number }> {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      options,
+      (error, uploaded) => {
+        if (error || !uploaded) {
+          reject(error ?? new Error("Cloudinary upload failed."));
+          return;
+        }
+        resolve({
+          secure_url: uploaded.secure_url,
+          public_id: uploaded.public_id,
+          bytes: uploaded.bytes,
+        });
+      },
+    );
+    stream.end(buffer);
+  });
+}
+
+/** Upload with one retry — a transient network/5xx failure at
+ * Cloudinary must not surface to the user as a lost picture. */
+async function uploadStreamWithRetry(
+  options: Record<string, unknown>,
+  buffer: Buffer,
+): Promise<{ secure_url?: string; public_id: string; bytes: number }> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await uploadStreamOnce(options, buffer);
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 1_200));
+      }
+    }
+  }
+  throw lastError ?? new Error("Cloudinary upload failed.");
+}
+
 export async function getCloudinaryResource(
   publicId: string,
   resourceType: CloudinaryResourceType,
@@ -92,33 +221,18 @@ export async function uploadAvatarImage(
   const publicId = `avatar-${Date.now().toString(36)}-${Math.random()
     .toString(36)
     .slice(2, 10)}`;
-  const result = await new Promise<{
-    secure_url: string;
-    public_id: string;
-  }>((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      {
-        public_id: publicId,
-        folder: `xyro/avatars/${uid}`,
-        type: "upload",
-        overwrite: true,
-        invalidate: true,
-        resource_type: "image",
-      },
-      (error, uploaded) => {
-        if (error || !uploaded) {
-          reject(error ?? new Error("Cloudinary avatar upload failed."));
-          return;
-        }
-        resolve({
-          secure_url: uploaded.secure_url,
-          public_id: uploaded.public_id,
-        });
-      },
-    );
-    stream.end(buffer);
-  });
-  return { url: result.secure_url, publicId: result.public_id };
+  const result = await uploadStreamWithRetry(
+    {
+      public_id: publicId,
+      folder: `xyro/avatars/${uid}`,
+      type: "upload",
+      overwrite: true,
+      invalidate: true,
+      resource_type: "image",
+    },
+    buffer,
+  );
+  return { url: result.secure_url ?? "", publicId: result.public_id };
 }
 
 /**
@@ -135,29 +249,17 @@ export async function uploadGeneratedImage(
   generationId: string,
 ): Promise<{ publicId: string; bytes: number }> {
   getCloudinaryConfig();
-  const result = await new Promise<{
-    public_id: string;
-    bytes: number;
-  }>((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      {
-        public_id: generationId,
-        folder: `xyro/generated/${uid}`,
-        type: "authenticated",
-        resource_type: "image",
-        format: "png",
-        overwrite: false,
-      },
-      (error, uploaded) => {
-        if (error || !uploaded) {
-          reject(error ?? new Error("Cloudinary generated-image upload failed."));
-          return;
-        }
-        resolve({ public_id: uploaded.public_id, bytes: uploaded.bytes });
-      },
-    );
-    stream.end(buffer);
-  });
+  const result = await uploadStreamWithRetry(
+    {
+      public_id: generationId,
+      folder: `xyro/generated/${uid}`,
+      type: "authenticated",
+      resource_type: "image",
+      format: "png",
+      overwrite: false,
+    },
+    buffer,
+  );
   return { publicId: result.public_id, bytes: result.bytes };
 }
 
@@ -178,26 +280,15 @@ export async function uploadUserFile(
   },
 ): Promise<{ publicId: string; bytes: number }> {
   getCloudinaryConfig();
-  const result = await new Promise<{ public_id: string; bytes: number }>(
-    (resolve, reject) => {
-      const stream = cloudinary.uploader.upload_stream(
-        {
-          public_id: options.publicId,
-          type: "authenticated",
-          resource_type: options.resourceType,
-          format: options.resourceType === "image" ? undefined : options.format,
-          overwrite: false,
-        },
-        (error, uploaded) => {
-          if (error || !uploaded) {
-            reject(error ?? new Error("Cloudinary user-file upload failed."));
-            return;
-          }
-          resolve({ public_id: uploaded.public_id, bytes: uploaded.bytes });
-        },
-      );
-      stream.end(buffer);
+  const result = await uploadStreamWithRetry(
+    {
+      public_id: options.publicId,
+      type: "authenticated",
+      resource_type: options.resourceType,
+      format: options.resourceType === "image" ? undefined : options.format,
+      overwrite: false,
     },
+    buffer,
   );
   return { publicId: result.public_id, bytes: result.bytes };
 }

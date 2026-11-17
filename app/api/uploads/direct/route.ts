@@ -4,8 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { guardMutationHeaders } from "@/lib/server/auth-guard";
 import {
   getCloudinaryPrivateDownloadUrl,
-  uploadUserFile,
-} from "@/lib/server/cloudinary";
+  uploadUserFile, cloudinaryErrorMessage } from "@/lib/server/cloudinary";
 import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
 import { validateUploadContent } from "@/lib/server/image-sniff";
 import { authenticateVerifiedUser } from "@/lib/server/request-auth";
@@ -161,6 +160,6 @@ export async function POST(request: NextRequest) {
     );
   } catch (error) {
     console.error("Couldn’t complete the server-mediated upload.", error);
-    return errorResponse(503, "UPLOAD_FAILED", "The file couldn’t be uploaded. Please try again.");
+    return errorResponse(503, "UPLOAD_FAILED", `The file couldn’t be uploaded. (${cloudinaryErrorMessage(error)})`);
   }
 }
