@@ -79,8 +79,18 @@ export async function GET() {
   const cloudinaryChecks = {
     uploadPresetPresent: present(process.env.CLOUDINARY_UPLOAD_PRESET),
   };
+  // Cross-provider fallback keys (presence only, never values):
+  // lets key setup be verified from the outside without console
+  // access. The chat chain uses these when OpenRouter is exhausted.
+  const providers = {
+    gemini: present(process.env.GEMINI_API_KEY) || present(process.env.GOOGLE_AI_API_KEY),
+    groq: present(process.env.GROQ_API_KEY),
+    requesty: present(process.env.REQUESTY_API_KEY),
+    sambanova: present(process.env.SAMBANOVA_API_KEY),
+    nvidia: present(process.env.NVIDIA_API_KEY) || present(process.env.NVIDIA_NIM_API_KEY),
+  };
   return NextResponse.json(
-    { ok: true, integrations, adminChecks, cloudinaryChecks },
+    { ok: true, integrations, adminChecks, cloudinaryChecks, providers },
     { headers: { "Cache-Control": "no-store" } },
   );
 }

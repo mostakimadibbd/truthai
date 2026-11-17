@@ -82,6 +82,16 @@ CROSS_PROVIDERS: list[dict] = [
 ]
 
 
+def provider_presence() -> dict[str, bool]:
+    """Which cross-provider API keys are configured (presence only —
+    values never leave the process). Surfaced on the token-gated
+    /health so key setup can be verified without console access."""
+    return {
+        spec["provider"]: any(os.environ.get(key) for key in spec["env_keys"])
+        for spec in CROSS_PROVIDERS
+    }
+
+
 def cross_provider_targets() -> list[dict]:
     targets: list[dict] = []
     for spec in CROSS_PROVIDERS:

@@ -25,7 +25,7 @@ import io
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
-from . import admin, auth, jobs, models as model_lib, watermark
+from . import admin, auth, jobs, models as model_lib, openrouter as openrouter_lib, watermark
 from .config import settings
 from .firebase import firestore_client
 
@@ -70,6 +70,7 @@ async def health(
         "ok": True,
         "service": "xyro-backend",
         "integrations": checks,
+        "providers": openrouter_lib.provider_presence(),
         "firebaseProject": settings.firebase_project,
         "adminReady": admin_ready,
         "adminError": admin_error,

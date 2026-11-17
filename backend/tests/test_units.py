@@ -806,6 +806,25 @@ def test_cross_provider_targets_and_order():
     assert web[-1] == "openrouter/free"
 
 
+def test_provider_presence_reports_keys():
+    saved = dict(os.environ)
+    try:
+        for key in ("GEMINI_API_KEY", "GOOGLE_AI_API_KEY", "GROQ_API_KEY",
+                    "REQUESTY_API_KEY", "SAMBANOVA_API_KEY",
+                    "NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"):
+            os.environ.pop(key, None)
+        presence = chatjob.openrouter.provider_presence()
+        assert presence == {
+            "gemini": False, "groq": False, "requesty": False,
+            "sambanova": False, "nvidia": False,
+        }, presence
+        os.environ["GROQ_API_KEY"] = "test-key"
+        assert chatjob.openrouter.provider_presence()["groq"] is True
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):
