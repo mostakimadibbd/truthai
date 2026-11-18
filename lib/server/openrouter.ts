@@ -77,6 +77,13 @@ export type ChatCompletionArgs = {
   connectTimeoutMs?: number;
   /** Ask OpenRouter to include token usage in the stream's final chunk. */
   includeUsage?: boolean;
+  /** Optional body check for HTTP-200 responses (non-streaming
+   * callers): receives a CLONE of the response; returning false
+   * marks the attempt as failed (an empty completion from a free
+   * model is a failure, not an answer) and the chain moves to
+   * the next target. A validator that throws counts as "accept"
+   * — the caller's own parsing remains the last line of defence. */
+  validateResponse?: (response: Response) => Promise<boolean>;
   /** Walk cross-provider targets (Groq, Gemini, …) BEFORE the
    * OpenRouter attempts. Used by the refusal retry: when a model
    * answers with an access-denial refusal (an HTTP 200 the chain
@@ -409,6 +416,34 @@ export async function fetchChatCompletionWithFallback(
     clearTimeout(connectTimer);
 
     if (response.ok) {
+      if (args.validateResponse) {
+        const acceptable = await args
+          .validateResponse(response.clone())
+          .catch(() => true);
+        if (!acceptable) {
+          // An HTTP 200 with an unusable body (free models do
+          // this constantly: reasoning burned the whole budget,
+          // an empty choices list, a null content field). It is
+          // a failed attempt — never hand it to the caller as a
+          // success, and never let it be metered as one.
+          lastStatus = 502;
+          lastRetryAfter = null;
+          lastErrorBody = "EMPTY_COMPLETION";
+          console.error(
+            `Model attempt returned an unusable completion: target=${target.label}`,
+          );
+          await response.body?.cancel().catch(() => undefined);
+          if (index < targets.length - 1) {
+            await sleep(retryDelayMs(index, null));
+            continue;
+          }
+          throw new OpenRouterAttemptsExhausted(
+            lastStatus,
+            lastRetryAfter,
+            lastErrorBody,
+          );
+        }
+      }
       return { response, model: target.label, provider: target.provider };
     }
 

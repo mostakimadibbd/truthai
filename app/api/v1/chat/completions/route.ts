@@ -19,6 +19,7 @@ import {
   OpenRouterAttemptsExhausted,
   fetchChatCompletionWithFallback,
 } from "@/lib/server/openrouter";
+import { readPreferences } from "@/lib/server/settings";
 import { getRemoteIp } from "@/lib/server/turnstile";
 import { getFirebaseAdminAuth } from "@/lib/server/firebase-admin";
 import {
@@ -69,6 +70,31 @@ export async function OPTIONS() {
 }
 
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
+
+/**
+ * Body check for the model chain (see the validateResponse hook
+ * in lib/server/openrouter.ts): a completion counts only when
+ * its first choice carries actual answer text — a string with
+ * non-whitespace content, or a content-parts array holding at
+ * least one non-empty text part. An unparsable body counts as
+ * usable here; the caller's own JSON parse below reports that
+ * failure properly instead of silently retrying every model.
+ */
+async function hasUsableCompletionContent(response: Response): Promise<boolean> {
+  const payload = (await response.json().catch(() => null)) as {
+    choices?: { message?: { content?: unknown } }[];
+  } | null;
+  if (!payload) return true;
+  const content = payload.choices?.[0]?.message?.content;
+  if (typeof content === "string") return content.trim().length > 0;
+  if (Array.isArray(content)) {
+    return content.some((part) => {
+      const text = (part as { text?: unknown } | null)?.text;
+      return typeof text === "string" && text.trim().length > 0;
+    });
+  }
+  return false;
+}
 
 function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
@@ -325,6 +351,18 @@ export async function POST(request: NextRequest) {
   }
 
   const attempts = modelAttemptOrder(requestedModel);
+  // The chain roams every configured provider — OpenRouter,
+  // Groq, Gemini, SambaNova, NVIDIA, Cloudflare — so an answer
+  // can come from whichever provider responds first with real
+  // content. The one exception is the key owner's own privacy
+  // switch: "Only use OpenRouter" (Settings → Data controls)
+  // is honoured by the API exactly as it is by the app.
+  let openRouterOnly = false;
+  try {
+    openRouterOnly = (await readPreferences(identity.uid)).openRouterOnly;
+  } catch {
+    openRouterOnly = false;
+  }
   let upstream: Response;
   let usedAttemptModel = requestedModel;
   try {
@@ -339,6 +377,16 @@ export async function POST(request: NextRequest) {
       referer: request.nextUrl.origin,
       title: "Xyro AI API",
       connectTimeoutMs: 25_000,
+      openRouterOnly,
+      // An HTTP 200 with no answer text is a FAILED attempt, not
+      // a success: free models return empty completions often
+      // (reasoning spent the whole token budget, empty choices,
+      // null content). The chain must fall through to the next
+      // model, and an empty answer must never be metered as a
+      // successful, token-billed call — developers were seeing
+      // "No response received from model" in their apps while
+      // their dashboards showed token cost (fixed 2026-11-18).
+      validateResponse: hasUsableCompletionContent,
     });
     upstream = completion.response;
     usedAttemptModel = completion.model;
@@ -363,6 +411,14 @@ export async function POST(request: NextRequest) {
         input: messages,
         output: null,
       });
+      if (error.lastErrorBody === "EMPTY_COMPLETION") {
+        return apiError(
+          502,
+          "model_empty_response",
+          "Every available model returned an empty response. You have not been charged for this call — please try again in a moment.",
+          "api_error",
+        );
+      }
       return apiError(
         status,
         status === 429 ? "model_busy" : "model_unavailable",
@@ -432,6 +488,38 @@ export async function POST(request: NextRequest) {
   }
   const content = result?.choices?.[0]?.message?.content ?? "";
   const usedModel = typeof result?.model === "string" ? result.model : requestedModel;
+
+  // Last line of defence (the chain's validateResponse hook
+  // normally catches this first): an empty answer is an error,
+  // recorded with ZERO billed tokens — never a "success" the
+  // developer's dashboard charges for while their app shows
+  // "No response received from model".
+  if (content.trim().length === 0) {
+    await recordApiCall(identity.uid, {
+      keyId: identity.keyId,
+      keyPrefix: identity.displayPrefix,
+      keyName: identity.keyName,
+      endpoint: "chat/completions",
+      model: usedModel,
+      status: "error",
+      httpStatus: 502,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      tokensEstimated: false,
+      context,
+      city,
+      country,
+      input: messages,
+      output: null,
+    });
+    return apiError(
+      502,
+      "model_empty_response",
+      "The model returned an empty response. You have not been charged for this call — please try again in a moment.",
+      "api_error",
+    );
+  }
 
   let promptTokens = result?.usage?.prompt_tokens;
   let completionTokens = result?.usage?.completion_tokens;
