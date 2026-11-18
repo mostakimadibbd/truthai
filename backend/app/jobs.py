@@ -16,7 +16,7 @@ import asyncio
 import time
 import uuid
 
-from . import chatjob
+from . import chatjob, logstream
 from .config import settings
 
 _jobs: dict[str, dict] = {}
@@ -80,6 +80,9 @@ async def _run(job: dict, db, rtdb_ref) -> None:
             )
             job["status"] = "complete"
             job["result"] = result
+            logstream.emit(
+                "xyro-backend", "info", f"Chat job {job['id']} complete"
+            )
         except chatjob.ChatJobError as error:
             job["status"] = "failed"
             job["error"] = {
@@ -87,6 +90,11 @@ async def _run(job: dict, db, rtdb_ref) -> None:
                 "code": error.code,
                 "message": error.message,
             }
+            logstream.emit(
+                "xyro-backend",
+                "error",
+                f"Chat job {job['id']} failed · {error.code}: {error.message}",
+            )
         except asyncio.TimeoutError:
             job["status"] = "failed"
             job["error"] = {
@@ -102,6 +110,11 @@ async def _run(job: dict, db, rtdb_ref) -> None:
                 "message": "Something went wrong while generating the reply.",
             }
             print(f"Chat job {job['id']} failed unexpectedly: {error!r}")
+            logstream.emit(
+                "xyro-backend",
+                "error",
+                f"Chat job {job['id']} failed unexpectedly · {error!r}",
+            )
             # Ledger the REAL exception where the admin panel's
             # Logs tab already reads (chatErrors) — the generic
             # user-facing message must never be the only trace of

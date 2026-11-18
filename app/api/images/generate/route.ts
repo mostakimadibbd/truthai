@@ -11,6 +11,7 @@ import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
 import { limitDeniedResponse, limit as rateLimit } from "@/lib/server/limit";
 import { getFreeImageModels } from "@/lib/server/models";
 import { recordUsageEvent } from "@/lib/server/analytics";
+import { logEvent } from "@/lib/server/logstream";
 import { authenticateVerifiedUser } from "@/lib/server/request-auth";
 import { readPreferences } from "@/lib/server/settings";
 import { buildWatermarkPayload, embedWatermark } from "@/lib/server/watermark";
@@ -727,6 +728,12 @@ export async function POST(request: NextRequest) {
     }
 
     if (!watermarked) {
+      await logEvent(
+        "warn",
+        anySourceAnswered
+          ? "Image creation → 502 · source image could not be processed"
+          : "Image creation → 503 · no free image source available",
+      );
       return anySourceAnswered
         ? errorResponse(502, "IMAGE_PROCESSING_FAILED", "The generated image couldn’t be processed.")
         : errorResponse(503, "IMAGE_MODEL_UNAVAILABLE", IMAGE_UNAVAILABLE_MESSAGE);
@@ -817,6 +824,7 @@ export async function POST(request: NextRequest) {
       chatId,
     });
 
+    await logEvent("info", `Image created → 200 · ${usedModel}`);
     return NextResponse.json(
       {
         success: true,

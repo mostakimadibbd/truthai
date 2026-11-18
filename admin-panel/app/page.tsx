@@ -160,6 +160,13 @@ type LogEntry = {
   code: number | string | null;
 };
 
+type LiveLogEntry = {
+  ts: number;
+  service: string;
+  level: "info" | "warn" | "error";
+  message: string;
+};
+
 type StorageInfo = {
   configured: boolean;
   source?: string;
@@ -518,14 +525,38 @@ export default function ConsolePage() {
   const [tab, setTab] = useState<Tab>("overview");
   const [overview, setOverview] = useState<Overview | null>(null);
   const [users, setUsers] = useState<UserRow[]>([]);
+  // The last known viewer is kept in sessionStorage so a page
+  // reload during a backend/Firestore outage doesn't make the
+  // owner look demoted to a plain admin (owner-only tabs used
+  // to vanish until the directory read succeeded again). This
+  // is display-only: the backend re-verifies the real role on
+  // every single call, so a stale cached role grants nothing.
   const [viewer, setViewer] = useState<{
     uid: string;
     role: string;
     registered: boolean;
     ownerSecretConfigured?: boolean;
-  } | null>(null);
+  } | null>(() => {
+    try {
+      const raw = window.sessionStorage.getItem("xyro-control-viewer");
+      return raw ? (JSON.parse(raw) as {
+        uid: string;
+        role: string;
+        registered: boolean;
+        ownerSecretConfigured?: boolean;
+      }) : null;
+    } catch {
+      return null;
+    }
+  });
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [liveLogs, setLiveLogs] = useState<LiveLogEntry[]>([]);
+  const [liveConfigured, setLiveConfigured] = useState(true);
+  const [livePaused, setLivePaused] = useState(false);
+  const [liveService, setLiveService] = useState("");
+  const [liveLevel, setLiveLevel] = useState("");
+  const [liveError, setLiveError] = useState("");
   const [flags, setFlags] = useState<FlagEntry[]>([]);
   const [flagsPending, setFlagsPending] = useState(0);
   const [media, setMedia] = useState<MediaEntry[]>([]);
@@ -655,6 +686,14 @@ export default function ConsolePage() {
         };
         setUsers(payload.users);
         setViewer(payload.viewer);
+        try {
+          window.sessionStorage.setItem(
+            "xyro-control-viewer",
+            JSON.stringify(payload.viewer),
+          );
+        } catch {
+          /* sessionStorage unavailable — display-only cache */
+        }
         setUsersError("");
       } else {
         // Never let a failed directory read masquerade as an
@@ -739,6 +778,43 @@ export default function ConsolePage() {
       /* best-effort */
     }
   }, [user]);
+
+  // Realtime server log stream. The backend serves this from
+  // Redis — zero Firestore reads — so polling it every 5s
+  // while the Logs tab is open is safe on the free plan.
+  const loadLiveLogs = useCallback(async () => {
+    if (!user) return;
+    try {
+      const query =
+        `/api/live-logs?limit=100` +
+        (liveService ? `&service=${encodeURIComponent(liveService)}` : "") +
+        (liveLevel ? `&level=${encodeURIComponent(liveLevel)}` : "");
+      const res = await panelApi(user, query);
+      if (res.ok) {
+        const data = (await res.json()) as {
+          entries?: LiveLogEntry[];
+          configured?: boolean;
+        };
+        setLiveLogs(data.entries ?? []);
+        setLiveConfigured(data.configured !== false);
+        setLiveError("");
+      } else {
+        setLiveError(await apiErrorMessage(res, "Live logs couldn’t be loaded."));
+      }
+    } catch {
+      setLiveError("Live logs couldn’t be loaded.");
+    }
+  }, [user, liveService, liveLevel]);
+
+  useEffect(() => {
+    if (state !== "ready" || tab !== "logs" || livePaused) return;
+    void loadLiveLogs();
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      void loadLiveLogs();
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [state, tab, livePaused, loadLiveLogs]);
 
   const loadFlags = useCallback(async () => {
     if (!user) return;
@@ -1025,7 +1101,6 @@ export default function ConsolePage() {
     const fast = window.setInterval(() => {
       if (document.hidden) return;
       void loadOverview();
-      if (tab === "logs") void loadLogs();
     }, 30_000);
     const slow = window.setInterval(() => {
       if (document.hidden) return;
@@ -1037,7 +1112,7 @@ export default function ConsolePage() {
       window.clearInterval(slow);
       window.clearInterval(ticker);
     };
-  }, [state, tab, loadOverview, loadDirectory, loadLogs]);
+  }, [state, tab, loadOverview, loadDirectory]);
 
   // Storage and trash are slow-changing: fetch them when their
   // tabs are opened rather than on the polling loop.
@@ -2215,6 +2290,79 @@ export default function ConsolePage() {
         )}
 
         {tab === "logs" && (
+          <>
+          <section className="card live-logs-card">
+            <div className="card-head">
+              <div>
+                <h2>Live server logs</h2>
+                <span className="muted small">
+                  The services’ real output, streamed as it happens — the same
+                  lines Vercel shows, captured at the source and stored in
+                  Redis, so this feed costs zero database reads.
+                </span>
+              </div>
+              <span className="live-pill">
+                <span className="live-dot" />
+                {livePaused ? "paused" : "live · refreshes every 5s"}
+              </span>
+            </div>
+            <div className="live-log-controls">
+              <select
+                value={liveService}
+                onChange={(event) => setLiveService(event.target.value)}
+                aria-label="Filter by service"
+              >
+                <option value="">All services</option>
+                <option value="truthai">truthai (main app)</option>
+                <option value="xyro-backend">xyro-backend</option>
+              </select>
+              <select
+                value={liveLevel}
+                onChange={(event) => setLiveLevel(event.target.value)}
+                aria-label="Filter by level"
+              >
+                <option value="">All levels</option>
+                <option value="info">Info</option>
+                <option value="warn">Warnings</option>
+                <option value="error">Errors</option>
+              </select>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setLivePaused((paused) => !paused)}
+              >
+                {livePaused ? "Resume" : "Pause"}
+              </button>
+              <button type="button" className="btn" onClick={() => void loadLiveLogs()}>
+                Refresh now
+              </button>
+            </div>
+            {liveError && <div className="alert" role="alert">{liveError}</div>}
+            {!liveConfigured && (
+              <p className="muted small">
+                The log stream store isn’t configured on the backend yet —
+                entries will appear once Upstash is connected there.
+              </p>
+            )}
+            <div className="live-log-list" role="log" aria-label="Live server logs">
+              {liveLogs.map((entry, index) => (
+                <div className="live-log-row" key={`${entry.ts}-${index}`}>
+                  <span className="live-log-time">
+                    {new Date(entry.ts).toLocaleTimeString([], { hour12: false })}
+                  </span>
+                  <span className={`live-log-level ${entry.level}`}>{entry.level}</span>
+                  <span className="live-log-service">{entry.service}</span>
+                  <span className="live-log-message">{entry.message}</span>
+                </div>
+              ))}
+              {liveLogs.length === 0 && !liveError && (
+                <p className="muted small">
+                  No log entries yet — they appear here as the services handle
+                  requests.
+                </p>
+              )}
+            </div>
+          </section>
           <section className="card">
             <div className="card-head">
               <h2>Realtime logs</h2>
@@ -2250,6 +2398,7 @@ export default function ConsolePage() {
               {logs.length === 0 && <p className="muted pad">No log entries yet — activity will appear here as it happens.</p>}
             </div>
           </section>
+          </>
         )}
 
         {tab === "activity" && overview && (

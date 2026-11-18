@@ -2041,6 +2041,64 @@ def test_analytics_writes_minutes_and_model_rollups():
     assert model_docs[0]["day"]
 
 
+def test_logstream_roundtrip_and_filters():
+    import json as _json
+
+    from app import logstream
+
+    store: list[str] = []
+    commands: list[tuple] = []
+
+    def fake_command(*parts):
+        commands.append(parts)
+        if parts[0] == "LPUSH":
+            store.insert(0, parts[2])
+            return len(store)
+        if parts[0] == "LTRIM":
+            del store[int(parts[3]) + 1:]
+            return "OK"
+        if parts[0] == "LRANGE":
+            return store[int(parts[2]): int(parts[3]) + 1]
+        return None
+
+    original = logstream._command
+    logstream._command = fake_command
+    try:
+        # emit() pushes on a background thread; drive _push
+        # directly for a deterministic roundtrip.
+        for payload in (
+            {"ts": 1, "service": "truthai", "level": "info", "message": "one"},
+            {"ts": 2, "service": "xyro-backend", "level": "error", "message": "two"},
+            {"ts": 3, "service": "truthai", "level": "error", "message": "three"},
+        ):
+            logstream._push(_json.dumps(payload))
+        all_entries = logstream.read(10)
+        assert [e["message"] for e in all_entries["entries"]] == ["three", "two", "one"]
+        only_errors = logstream.read(10, level="error")
+        assert [e["message"] for e in only_errors["entries"]] == ["three", "two"]
+        only_backend = logstream.read(10, service="xyro-backend")
+        assert [e["message"] for e in only_backend["entries"]] == ["two"]
+        limited = logstream.read(2)
+        assert len(limited["entries"]) == 2
+    finally:
+        logstream._command = original
+
+
+def test_registry_role_cache_avoids_repeat_reads():
+    from app import admin
+
+    db = _AdminDb()
+    db.store[("admins", "boss1")] = {"role": "owner"}
+    admin._role_cache.clear()
+    assert admin._registry_role_cached(db, "boss1") == "owner"
+    # Second call is served from the cache even if the
+    # registry document disappears underneath.
+    del db.store[("admins", "boss1")]
+    assert admin._registry_role_cached(db, "boss1") == "owner"
+    admin._role_cache.clear()
+    assert admin._registry_role_cached(db, "boss1") is None
+
+
 def test_database_explorer_reads_collections_documents_and_doc():
     from datetime import datetime, timezone
 

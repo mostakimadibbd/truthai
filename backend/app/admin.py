@@ -168,6 +168,26 @@ def _registry_role(db, uid: str) -> str | None:
         return None
 
 
+# Role lookups happen on EVERY admin API call, and the panel
+# polls — an uncached registry read per poll was a steady drain
+# on the Spark read quota (50k/day). Positive roles are cached
+# in-process for a minute; a revocation lands within that
+# window, and the gate's other two credentials are unaffected.
+_role_cache: dict[str, tuple[str, float]] = {}
+_ROLE_CACHE_TTL_SECONDS = 60.0
+
+
+def _registry_role_cached(db, uid: str) -> str | None:
+    now = time.time()
+    hit = _role_cache.get(uid)
+    if hit is not None and now - hit[1] < _ROLE_CACHE_TTL_SECONDS:
+        return hit[0]
+    role = _registry_role(db, uid)
+    if role:
+        _role_cache[uid] = (role, now)
+    return role
+
+
 def _owner_registered(db) -> bool:
     try:
         rows = (
@@ -258,7 +278,7 @@ async def authenticate_admin(
     # pass, so an unauthenticated probe gets a clean 401 even if
     # the service's database connection is not configured yet.
     db = db_factory()
-    role = await asyncio.to_thread(_registry_role, db, uid)
+    role = await asyncio.to_thread(_registry_role_cached, db, uid)
     if role:
         return uid, email, role
     if _is_admin_email(email):

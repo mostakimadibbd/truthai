@@ -19,6 +19,7 @@ import {
   OpenRouterAttemptsExhausted,
   fetchChatCompletionWithFallback,
 } from "@/lib/server/openrouter";
+import { logEvent } from "@/lib/server/logstream";
 import { readPreferences } from "@/lib/server/settings";
 import { getRemoteIp } from "@/lib/server/turnstile";
 import { getFirebaseAdminAuth } from "@/lib/server/firebase-admin";
@@ -412,6 +413,10 @@ export async function POST(request: NextRequest) {
         output: null,
       });
       if (error.lastErrorBody === "EMPTY_COMPLETION") {
+        await logEvent(
+          "warn",
+          "API chat/completions → 502 · every model returned an empty response (not charged)",
+        );
         return apiError(
           502,
           "model_empty_response",
@@ -556,6 +561,10 @@ export async function POST(request: NextRequest) {
   });
   void recordBudget({ firestoreWrites: 5, firestoreReads: 4 }).catch(
     () => undefined,
+  );
+  await logEvent(
+    "info",
+    `API chat/completions → 200 · ${usedModel} · ${totalTokens} tokens`,
   );
 
   return NextResponse.json(

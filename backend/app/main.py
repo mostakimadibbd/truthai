@@ -25,7 +25,7 @@ import io
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
-from . import admin, auth, jobs, models as model_lib, openrouter as openrouter_lib, security, watermark
+from . import admin, auth, jobs, logstream, models as model_lib, openrouter as openrouter_lib, security, watermark
 from .config import app_public_url, settings
 from .firebase import firestore_client
 
@@ -37,6 +37,33 @@ def _error(status: int, code: str, message: str) -> JSONResponse:
         status_code=status,
         content={"success": False, "error": {"code": code, "message": message}},
     )
+
+
+# Paths whose own traffic would flood the log stream with
+# itself: health probes and the panel's live-log polling.
+_LOG_SKIP_PATHS = ("/health", "/v1/admin/live-logs")
+
+
+@app.middleware("http")
+async def logging_middleware(request: Request, call_next):
+    """One structured entry per request into the realtime log
+    stream (app/logstream.py — Redis-backed, zero Firestore
+    reads), mirrored to stdout for Vercel's own log view."""
+    import time as _time
+
+    started = _time.time()
+    response = await call_next(request)
+    path = request.url.path
+    if not any(path.startswith(skip) for skip in _LOG_SKIP_PATHS):
+        status = response.status_code
+        level = "error" if status >= 500 else "warn" if status >= 400 else "info"
+        elapsed_ms = int((_time.time() - started) * 1000)
+        logstream.emit(
+            "xyro-backend",
+            level,
+            f"{request.method} {path} → {status} · {elapsed_ms}ms",
+        )
+    return response
 
 
 def _client_ip(request: Request) -> str:
@@ -417,7 +444,7 @@ async def admin_overview(request: Request):
         return {
             "success": True,
             **_admin_cached(
-                "overview", 30.0, lambda: admin.get_overview(firestore_client())
+                "overview", 45.0, lambda: admin.get_overview(firestore_client())
             ),
         }
     except Exception:
@@ -433,7 +460,7 @@ async def admin_audit(request: Request):
         return {
             "success": True,
             **_admin_cached(
-                "audit", 30.0, lambda: admin.get_audit(firestore_client())
+                "audit", 60.0, lambda: admin.get_audit(firestore_client())
             ),
         }
     except Exception:
@@ -456,7 +483,7 @@ async def admin_users(request: Request):
         else:
             payload = _admin_cached(
                 f"users:{viewer_uid}",
-                30.0,
+                90.0,
                 lambda: admin.get_users(
                     firestore_client(), viewer_uid, viewer_role, query
                 ),
@@ -475,11 +502,37 @@ async def admin_logs(request: Request):
         return {
             "success": True,
             **_admin_cached(
-                "logs", 30.0, lambda: admin.get_logs(firestore_client())
+                "logs", 60.0, lambda: admin.get_logs(firestore_client())
             ),
         }
     except Exception:
         return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
+
+
+@app.get("/v1/admin/live-logs")
+async def admin_live_logs(request: Request):
+    """The realtime server log stream (app/logstream.py).
+    Reads Redis only — ZERO Firestore reads beyond the gate's
+    cached role lookup — so the panel can poll it every few
+    seconds without touching the Spark read quota."""
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    import asyncio
+
+    try:
+        limit = int(request.query_params.get("limit") or 100)
+    except (TypeError, ValueError):
+        limit = 100
+    service = request.query_params.get("service") or ""
+    level = request.query_params.get("level") or ""
+    try:
+        payload = await asyncio.to_thread(
+            logstream.read, limit, service, level
+        )
+    except Exception:
+        return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
+    return {"success": True, **payload}
 
 
 @app.get("/v1/admin/media")
