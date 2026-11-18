@@ -1,17 +1,25 @@
-// Invisible watermark for AI-generated images (Phase 7).
+// Invisible watermark for AI-generated images (Phase 7,
+// upgraded 2026-11-18 at the owner's direction).
 //
-// Every picture Xyro AI creates passes through here before it is
-// stored: a short provenance payload — "xyro-ai:<generationId>:
-// <uid-hash>" — is embedded in the least significant bits of the
-// image's RGB channels (LSB steganography). Changing one bit per
-// channel shifts a colour value by at most 1/255, which is
-// imperceptible; dimensions and format are unchanged (output is
-// always PNG). The matching extractor below (and the
-// scripts/verify-watermark.mjs CLI) can read the payload back from
-// the stored PNG. Like all watermarking this is a provenance
-// SIGNAL, not proof: heavy editing, cropping, re-encoding to JPEG
-// or screenshots can destroy it, and a missing payload never proves
-// an image is human-made (see the XyroAIDetect public page).
+// Every picture TruthAI creates passes through here before it
+// is stored: a short provenance payload — "truthai:<generation
+// Id>:<uid-hash>" — is embedded in the least significant bits
+// of the image's RGB channels (LSB steganography), TILED
+// across the whole picture: the full frame is repeated at
+// every 256×256 pixel tile origin, microscopically, so the
+// mark survives local damage (a blurred corner, a sticker, a
+// covered region) as long as any one tile survives intact.
+// Changing one bit per channel shifts a colour value by at
+// most 1/255, which is imperceptible; dimensions and format
+// are unchanged (output is always PNG). The matching
+// extractor below, the scripts/verify-watermark.mjs CLI and
+// the public /verify-image page (which runs the same scan in
+// the visitor's browser, no account needed) can read the
+// payload back from the stored PNG. Like all watermarking
+// this is a provenance SIGNAL, not proof: heavy editing,
+// cropping, re-encoding to JPEG or screenshots can destroy
+// it, and a missing payload never proves an image is
+// human-made (see the XyroAIDetect public page).
 //
 // Implementation is dependency-light and pure JS:
 //  - PNG: decoded/encoded with pngjs.
@@ -40,7 +48,7 @@ type Pixels = { width: number; height: number; data: Buffer };
 /** The payload embedded in every generated image. */
 export function buildWatermarkPayload(generationId: string, uid: string): string {
   const uidHash = createHash("sha256").update(uid).digest("hex").slice(0, 16);
-  return `xyro-ai:${generationId}:${uidHash}`;
+  return `truthai:${generationId}:${uidHash}`;
 }
 
 // CRC-32 (IEEE) over the payload bytes, so random pixel noise or a
@@ -124,40 +132,45 @@ function capacityBits(pixels: Pixels): number {
   return pixels.width * pixels.height * 3;
 }
 
-function embedBytes(pixels: Pixels, bytes: Buffer): void {
-  const totalBits = bytes.length * 8;
-  if (totalBits > capacityBits(pixels)) {
-    throw new Error("The generated image is too small to watermark.");
-  }
-  let bitIndex = 0;
-  for (let i = 0; i < pixels.data.length && bitIndex < totalBits; i += 4) {
-    for (let channel = 0; channel < 3 && bitIndex < totalBits; channel += 1) {
-      const byte = bytes[bitIndex >> 3];
-      const bit = (byte >> (7 - (bitIndex & 7))) & 1;
-      const offset = i + channel;
-      pixels.data[offset] = (pixels.data[offset] & 0xfe) | bit;
-      bitIndex += 1;
+// The frame repeats at every TILE_PIXELS × TILE_PIXELS tile
+// origin. Bit addressing is direct: bit b lives in pixel
+// floor(b / 3), channel b % 3 (alpha skipped), so a frame can
+// be written or read at any bit offset in O(frame) time.
+export const WATERMARK_TILE_PIXELS = 256;
+
+function tileStartBits(pixels: Pixels): number[] {
+  const starts: number[] = [];
+  for (let ty = 0; ty < pixels.height; ty += WATERMARK_TILE_PIXELS) {
+    for (let tx = 0; tx < pixels.width; tx += WATERMARK_TILE_PIXELS) {
+      starts.push((ty * pixels.width + tx) * 3);
     }
+  }
+  return starts;
+}
+
+function embedFrameAt(pixels: Pixels, frame: Buffer, startBit: number): void {
+  const totalBits = frame.length * 8;
+  for (let i = 0; i < totalBits; i += 1) {
+    const bit = (frame[i >> 3] >> (7 - (i & 7))) & 1;
+    const absolute = startBit + i;
+    const pixel = Math.floor(absolute / 3);
+    const channel = absolute % 3;
+    const offset = pixel * 4 + channel;
+    pixels.data[offset] = (pixels.data[offset] & 0xfe) | bit;
   }
 }
 
-function readBytes(pixels: Pixels, startBit: number, byteCount: number): Buffer | null {
+function readBytesAt(pixels: Pixels, startBit: number, byteCount: number): Buffer | null {
   if (startBit + byteCount * 8 > capacityBits(pixels)) return null;
   const out = Buffer.alloc(byteCount);
-  const endBit = startBit + byteCount * 8;
-  let bitIndex = 0;
-  outer: for (let i = 0; i < pixels.data.length; i += 4) {
-    for (let channel = 0; channel < 3; channel += 1) {
-      if (bitIndex >= endBit) break outer;
-      if (bitIndex >= startBit) {
-        const bit = pixels.data[i + channel] & 1;
-        const bytePos = (bitIndex - startBit) >> 3;
-        out[bytePos] = (out[bytePos] << 1) | bit;
-      }
-      bitIndex += 1;
-    }
+  for (let i = 0; i < byteCount * 8; i += 1) {
+    const absolute = startBit + i;
+    const pixel = Math.floor(absolute / 3);
+    const channel = absolute % 3;
+    const bit = pixels.data[pixel * 4 + channel] & 1;
+    out[i >> 3] = (out[i >> 3] << 1) | bit;
   }
-  return bitIndex >= endBit ? out : null;
+  return out;
 }
 
 /**
@@ -177,7 +190,16 @@ export async function embedWatermark(image: Buffer, payload: string): Promise<Bu
   frame.writeUInt16BE(payloadBytes.length, 5);
   payloadBytes.copy(frame, HEADER_BYTES);
   frame.writeUInt32BE(crc32(payloadBytes), HEADER_BYTES + payloadBytes.length);
-  embedBytes(pixels, frame);
+  if (frame.length * 8 > capacityBits(pixels)) {
+    throw new Error("The generated image is too small to watermark.");
+  }
+  // Tile the frame across the whole picture (see the header
+  // comment): every tile that can hold the full frame gets a
+  // complete copy, starting with the origin tile at bit 0.
+  for (const startBit of tileStartBits(pixels)) {
+    if (startBit + frame.length * 8 > capacityBits(pixels)) continue;
+    embedFrameAt(pixels, frame, startBit);
+  }
   return pixelsToPng(pixels);
 }
 
@@ -191,20 +213,36 @@ export function extractWatermark(pngBuffer: Buffer): string | null {
   try {
     if (sniffImageType(pngBuffer) !== "png") return null;
     const pixels = pngToPixels(pngBuffer);
-    const header = readBytes(pixels, 0, HEADER_BYTES);
-    if (!header) return null;
-    for (let i = 0; i < MAGIC.length; i += 1) {
-      if (header[i] !== MAGIC[i]) return null;
+    // Scan every tile origin (bit 0 first): any intact copy of
+    // the frame verifies, so local damage to one region of the
+    // picture cannot erase the mark everywhere. Frames written
+    // before tiling existed live only at bit 0 and are found by
+    // the same scan.
+    for (const startBit of tileStartBits(pixels)) {
+      const header = readBytesAt(pixels, startBit, HEADER_BYTES);
+      if (!header) continue;
+      let magicOk = true;
+      for (let i = 0; i < MAGIC.length; i += 1) {
+        if (header[i] !== MAGIC[i]) {
+          magicOk = false;
+          break;
+        }
+      }
+      if (!magicOk || header[4] !== VERSION) continue;
+      const length = header.readUInt16BE(5);
+      if (length === 0 || length > MAX_PAYLOAD_BYTES) continue;
+      const rest = readBytesAt(
+        pixels,
+        startBit + HEADER_BYTES * 8,
+        length + CRC_BYTES,
+      );
+      if (!rest) continue;
+      const payloadBytes = rest.subarray(0, length);
+      const storedCrc = rest.readUInt32BE(length);
+      if (crc32(Buffer.from(payloadBytes)) !== storedCrc) continue;
+      return new TextDecoder("utf-8", { fatal: true }).decode(payloadBytes);
     }
-    if (header[4] !== VERSION) return null;
-    const length = header.readUInt16BE(5);
-    if (length === 0 || length > MAX_PAYLOAD_BYTES) return null;
-    const rest = readBytes(pixels, HEADER_BYTES * 8, length + CRC_BYTES);
-    if (!rest) return null;
-    const payloadBytes = rest.subarray(0, length);
-    const storedCrc = rest.readUInt32BE(length);
-    if (crc32(Buffer.from(payloadBytes)) !== storedCrc) return null;
-    return new TextDecoder("utf-8", { fatal: true }).decode(payloadBytes);
+    return null;
   } catch {
     return null;
   }

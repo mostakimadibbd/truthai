@@ -2,7 +2,7 @@
 //
 //   node scripts/verify-watermark.mjs <image.png>
 //
-// Prints the embedded payload ("xyro-ai:<generationId>:<uid-hash>")
+// Prints the embedded payload ("truthai:<generationId>:<uid-hash>")
 // and exits 0 when a valid watermark is found; prints "No Xyro AI
 // watermark found" and exits 1 otherwise. This is an INDEPENDENT
 // implementation of the frame format in lib/server/watermark.ts
@@ -65,7 +65,7 @@ let png;
 try {
   png = PNG.sync.read(readFileSync(path));
 } catch {
-  console.log("No Xyro AI watermark found (not a readable PNG).");
+  console.log("No TruthAI watermark found (not a readable PNG).");
   process.exit(1);
 }
 
@@ -75,17 +75,17 @@ const valid =
   MAGIC.every((byte, index) => header[index] === byte) &&
   header[4] === 1;
 if (!valid) {
-  console.log("No Xyro AI watermark found.");
+  console.log("No TruthAI watermark found.");
   process.exit(1);
 }
 const length = header.readUInt16BE(5);
 if (length === 0 || length > MAX_PAYLOAD_BYTES) {
-  console.log("No Xyro AI watermark found.");
+  console.log("No TruthAI watermark found.");
   process.exit(1);
 }
 const rest = readBytes(png.data, HEADER_BYTES * 8, length + CRC_BYTES);
 if (!rest || crc32(rest.subarray(0, length)) !== rest.readUInt32BE(length)) {
-  console.log("No Xyro AI watermark found.");
+  console.log("No TruthAI watermark found.");
   process.exit(1);
 }
 console.log(`Watermark found: ${rest.subarray(0, length).toString("utf8")}`);

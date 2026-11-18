@@ -28,9 +28,9 @@ import sharp from "sharp";
 //     image model from the live OpenRouter catalogue when one
 //     exists; (e) Pollinations (instant, keyless) LAST — its free
 //     tier burns a "pollinations.ai" logo into the corner and
-//     ignores nologo without a paid key, so its output passes
-//     through stripPollinationsBranding before use and Xyro
-//     images only ever carry Xyro's own watermark. Watermarking is
+//     ignores nologo without a paid key; the picture is used
+//     exactly as it comes (owner instruction, 2026-11-18: no
+//     blurring or patching of source marks). Watermarking is
 //     attempted per source, so a source whose bytes this runtime
 //     cannot decode falls through to the next. If every source
 //     fails the route answers 503 and the UI says so plainly —
@@ -274,46 +274,6 @@ async function fetchPollinationsImage(prompt: string): Promise<Buffer> {
     }
   }
   throw lastError ?? new Error("Pollinations failed.");
-}
-
-/**
- * Pollinations burns its own "pollinations.ai" branding into the
- * bottom-right corner of free-tier images, and its nologo flag is
- * ignored without a paid key (verified live 2026-11-17: the same
- * seed, with and without nologo=true, returned the same branded
- * picture). Xyro images must carry only Xyro's own watermark, so
- * when Pollinations is the source that answered, the branded
- * corner band is replaced with a heavily blurred copy of itself:
- * the local colours survive (the patch reads as soft shadow), the
- * letters are destroyed, and the invisible watermark is embedded
- * afterwards as usual. Verified against a real branded response
- * before shipping. Any failure returns the original bytes: this
- * must never break image generation.
- */
-async function stripPollinationsBranding(bytes: Buffer): Promise<Buffer> {
-  try {
-    const meta = await sharp(bytes).metadata();
-    const width = meta.width ?? 0;
-    const height = meta.height ?? 0;
-    if (width < 64 || height < 64) return bytes;
-    const bandHeight = Math.max(16, Math.round(height * 0.1));
-    const bandWidth = Math.max(32, Math.round(width * 0.38));
-    const left = width - bandWidth;
-    const top = height - bandHeight;
-    const patch = await sharp(bytes)
-      .extract({ left, top, width: bandWidth, height: bandHeight })
-      .blur(Math.max(3, Math.round(bandHeight * 0.4)))
-      .median(5)
-      .png()
-      .toBuffer();
-    return await sharp(bytes)
-      .composite([{ input: patch, left, top }])
-      .png()
-      .toBuffer();
-  } catch (error) {
-    console.error("Could not strip the source branding from a Pollinations image.", error);
-    return bytes;
-  }
 }
 
 /**
@@ -715,13 +675,18 @@ export async function POST(request: NextRequest) {
         run: () => fetchOpenRouterImage(prompt, apiKey, imageModels, request.nextUrl.origin),
       });
     }
-    // Pollinations is the LAST resort: free and instant, but its
-    // free tier brands the corner of every picture — strip that
-    // branding so the result carries only Xyro's own watermark.
+    // Pollinations is the LAST resort: free and instant. Its
+    // free tier burns a small "pollinations.ai" mark into the
+    // corner; the picture is used exactly as it comes (owner
+    // instruction, 2026-11-18: no blurring or patching of the
+    // corner — an earlier blur-strip was removed because it
+    // left a visible smudge). TruthAI's own invisible pixel
+    // watermark is embedded over the whole picture afterwards,
+    // as with every source.
     sources.push({
       label: "pollinations",
       run: async () => ({
-        bytes: await stripPollinationsBranding(await fetchPollinationsImage(prompt)),
+        bytes: await fetchPollinationsImage(prompt),
         model: "pollinations/free",
       }),
     });
@@ -816,7 +781,7 @@ export async function POST(request: NextRequest) {
     });
     batch.create(messagesRef.doc(assistantMessageId), {
       role: "assistant",
-      content: "Here’s the image you described. It was created with a free model and carries an invisible Xyro AI watermark.",
+      content: "Here’s the image you described. It was created with a free model and carries an invisible TruthAI watermark — anyone can check it on the public verifier page (/verify-image).",
       attachmentIds: [assetId],
       attachments: [attachment],
       status: "complete",
