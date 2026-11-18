@@ -232,7 +232,7 @@ type ChatMessageRow = {
   provider: string | null;
   createdAt: number | null;
 };
-type ActionKind = "promote" | "demote" | "disable" | "enable" | "delete" | "sign-out-all";
+type ActionKind = "promote" | "demote" | "disable" | "enable" | "delete" | "sign-out-all" | "verify-email" | "unverify-email";
 
 /** Actions the backend only performs for the owner AND with the
  * owner secret — the panel collects it in the confirm modal. */
@@ -282,6 +282,38 @@ function time(ts: number): string {
     minute: "2-digit",
     second: "2-digit",
   });
+}
+
+/** Date + time for ledger/log rows — a bare clock time made
+ * yesterday's activity look like it happened in the future. */
+function dateTime(ts: number): string {
+  return new Date(ts).toLocaleString("en-GB", {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** A temporary password that satisfies the platform's own
+ * password rules (10+ chars, lower, upper, symbol). */
+function generateTempPassword(): string {
+  const sets = [
+    "abcdefghijkmnopqrstuvwxyz",
+    "ABCDEFGHJKLMNPQRSTUVWXYZ",
+    "23456789",
+    "!@#$%",
+  ];
+  const all = sets.join("");
+  const pick = (source: string) =>
+    source[Math.floor((crypto.getRandomValues(new Uint32Array(1))[0] / 2 ** 32) * source.length)];
+  const chars = sets.map((set) => pick(set));
+  while (chars.length < 14) chars.push(pick(all));
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = Math.floor((crypto.getRandomValues(new Uint32Array(1))[0] / 2 ** 32) * (i + 1));
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join("");
 }
 
 function date(ms: number | null): string {
@@ -522,6 +554,22 @@ export default function ConsolePage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [resetLink, setResetLink] = useState<string | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
+  // Create-account modal (any admin; the backend enforces the
+  // platform password rules and writes the profile server-side).
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createEmail, setCreateEmail] = useState("");
+  const [createName, setCreateName] = useState("");
+  const [createPassword, setCreatePassword] = useState("");
+  const [createShowPassword, setCreateShowPassword] = useState(false);
+  const [createVerified, setCreateVerified] = useState(true);
+  const [createError, setCreateError] = useState("");
+  const [creating, setCreating] = useState(false);
+  // Tab-level load states so a slow or failed fetch never looks
+  // like a permanently stuck tab.
+  const [flagsLoading, setFlagsLoading] = useState(true);
+  const [flagsError, setFlagsError] = useState("");
+  const [mediaLoading, setMediaLoading] = useState(true);
+  const [detailError, setDetailError] = useState("");
 
   useEffect(() => {
     const auth = panelAuth();
@@ -676,14 +724,20 @@ export default function ConsolePage() {
         const data = (await res.json()) as { flags: FlagEntry[]; pendingCount: number };
         setFlags(data.flags);
         setFlagsPending(data.pendingCount);
+        setFlagsError("");
+      } else {
+        setFlagsError(await apiErrorMessage(res, "Safety flags couldn’t be loaded."));
       }
     } catch {
-      /* best-effort */
+      setFlagsError("Safety flags couldn’t be loaded.");
+    } finally {
+      setFlagsLoading(false);
     }
   }, [user]);
 
   const loadMedia = useCallback(async () => {
     if (!user) return;
+    setMediaLoading(true);
     try {
       const res = await panelApi(user, "/api/media");
       if (res.ok) {
@@ -695,9 +749,13 @@ export default function ConsolePage() {
         setMediaConfigured(data.configured);
         setMedia(data.resources ?? []);
         setMediaError(data.error ?? "");
+      } else {
+        setMediaError(await apiErrorMessage(res, "Media couldn’t be loaded."));
       }
     } catch {
-      /* best-effort */
+      setMediaError("Media couldn’t be loaded.");
+    } finally {
+      setMediaLoading(false);
     }
   }, [user]);
 
@@ -887,12 +945,17 @@ export default function ConsolePage() {
       setOpenChatId(null);
       setChatMessages([]);
       setResetLink(null);
+      setDetailError("");
       setDetailLoading(true);
       try {
         const response = await panelApi(user, `/api/user?uid=${encodeURIComponent(uid)}`);
-        if (response.ok) setDetail((await response.json()) as UserDetail);
+        if (response.ok) {
+          setDetail((await response.json()) as UserDetail);
+        } else {
+          setDetailError(await apiErrorMessage(response, "This account’s details couldn’t be loaded."));
+        }
       } catch {
-        /* drawer shows what it can */
+        setDetailError("This account’s details couldn’t be loaded.");
       } finally {
         setDetailLoading(false);
       }
@@ -940,7 +1003,11 @@ export default function ConsolePage() {
                 ? "Account re-enabled."
                 : done.action === "sign-out-all"
                   ? "Signed out on all devices."
-                  : "Account deleted — a snapshot was saved to the trash archive.",
+                  : done.action === "verify-email"
+                    ? "Email marked as verified."
+                    : done.action === "unverify-email"
+                      ? "Email marked as unverified."
+                      : "Account deleted — a snapshot was saved to the trash archive.",
       );
       window.setTimeout(() => setToast(""), 4500);
       await loadCore();
@@ -975,6 +1042,39 @@ export default function ConsolePage() {
     },
     [user],
   );
+
+  const runCreateAccount = useCallback(async () => {
+    if (!user) return;
+    setCreating(true);
+    setCreateError("");
+    try {
+      const response = await panelApi(user, "/api/users", {
+        method: "POST",
+        body: {
+          email: createEmail.trim(),
+          password: createPassword,
+          displayName: createName.trim() || undefined,
+          emailVerified: createVerified,
+        },
+      });
+      if (!response.ok) {
+        throw new Error(await apiErrorMessage(response, "The account couldn’t be created."));
+      }
+      const payload = (await response.json()) as { uid: string; email: string };
+      setCreateOpen(false);
+      setCreateEmail("");
+      setCreateName("");
+      setCreatePassword("");
+      setToast(`Account created for ${payload.email} — they can sign in now.`);
+      window.setTimeout(() => setToast(""), 4500);
+      await loadDirectory();
+      if (payload.uid) void openDetail(payload.uid);
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : "The account couldn’t be created.");
+    } finally {
+      setCreating(false);
+    }
+  }, [user, createEmail, createPassword, createName, createVerified, loadDirectory, openDetail]);
 
   const filteredUsers = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -1216,7 +1316,7 @@ export default function ConsolePage() {
         {tab === "overview" && overview?.dataIssues && overview.dataIssues.length > 0 && (
           <div className="alert" role="alert">
             {overview.dataIssues.some((issue) => issue.error === "ResourceExhausted")
-              ? "Live data is limited right now — the database's daily free read quota is used up (it resets at 13:00 Dhaka time). Figures below may be incomplete until then."
+              ? "Live data is limited right now — the database's daily free read quota is used up (it resets at midnight Pacific — 14:00 Dhaka time in winter). Figures below may be incomplete until then."
               : `Some sections couldn't load (${overview.dataIssues.map((issue) => issue.section).join(", ")}) — showing everything that did.`}
           </div>
         )}
@@ -1378,7 +1478,7 @@ export default function ConsolePage() {
                   <tbody>
                     {overview.recentEvents.slice(0, 10).map((event) => (
                       <tr key={event.id}>
-                        <td>{time(event.ts)}</td>
+                        <td>{dateTime(event.ts)}</td>
                         <td>{event.email ?? event.uid.slice(0, 8)}</td>
                         <td>{event.surface}</td>
                         <td>{event.model ?? "—"}</td>
@@ -1531,6 +1631,17 @@ export default function ConsolePage() {
               <div className="card-head">
                 <h2>All accounts</h2>
                 <span className="muted small">{searchRows ? `${filteredUsers.length} matches across all accounts` : `${filteredUsers.length} of ${users.length}`} · click a row for full control</span>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setCreateError("");
+                    setCreatePassword(generateTempPassword());
+                    setCreateOpen(true);
+                  }}
+                >
+                  Create account
+                </button>
               </div>
               {usersError && (
                 <div className="alert" role="alert">
@@ -1596,7 +1707,20 @@ export default function ConsolePage() {
                           ) : row.emailVerified ? (
                             <span className="pill ok">verified</span>
                           ) : (
-                            <span className="pill warn">unverified</span>
+                            <>
+                              <span className="pill warn">unverified</span>{" "}
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-mini"
+                                disabled={acting}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setPending({ uid: row.uid, action: "verify-email", label: `Mark ${row.email ?? row.uid} as verified? They’ll be able to use every feature that requires a verified email, without needing the verification email.` });
+                                }}
+                              >
+                                Verify
+                              </button>
+                            </>
                           )}
                         </td>
                         <td>{compact.format(row.totalTokensToday)} tok · {row.requestsToday} req</td>
@@ -1666,7 +1790,16 @@ export default function ConsolePage() {
               the chat, then dismiss the flag or mark it actioned and use the user
               controls (disable / delete) if the behaviour warrants it.
             </p>
-            {flags.length === 0 && <p className="muted small">No flags yet.</p>}
+            {flagsLoading && <p className="muted small">Loading safety flags…</p>}
+            {flagsError && (
+              <div className="alert" role="alert">
+                {flagsError}{" "}
+                <button type="button" className="btn btn-ghost" onClick={() => void loadFlags()}>
+                  Retry
+                </button>
+              </div>
+            )}
+            {!flagsLoading && !flagsError && flags.length === 0 && <p className="muted small">No flags yet.</p>}
             <div className="flag-list">
               {flags.map((flag) => (
                 <div key={flag.id} className="flag-row">
@@ -1755,7 +1888,8 @@ export default function ConsolePage() {
               value={mediaSearch}
               onChange={(event) => setMediaSearch(event.target.value)}
             />
-            {mediaConfigured && media.length === 0 && !mediaError && (
+            {mediaLoading && <p className="muted small">Loading media…</p>}
+            {mediaConfigured && media.length === 0 && !mediaError && !mediaLoading && (
               <p className="muted small">No media files yet.</p>
             )}
             <div className="media-grid">
@@ -1852,7 +1986,7 @@ export default function ConsolePage() {
                 .map((row) => (
                   <div key={row.id} className="log-row">
                     <span className={`log-dot ${row.kind}`} />
-                    <span className="log-time">{time(row.ts)}</span>
+                    <span className="log-time">{dateTime(row.ts)}</span>
                     <span className={`log-kind ${row.kind}`}>{row.kind}</span>
                     <span className="log-summary">
                       {row.email && <span className="log-email">{row.email} · </span>}
@@ -2046,6 +2180,14 @@ export default function ConsolePage() {
             </div>
 
             {detailLoading && <p className="muted pad">Loading everything about this account…</p>}
+            {detailError && !detail && (
+              <div className="alert" role="alert">
+                {detailError}{" "}
+                <button type="button" className="btn btn-ghost" onClick={() => detailUid && void openDetail(detailUid)}>
+                  Retry
+                </button>
+              </div>
+            )}
             {actionError && <div className="alert" role="alert">{actionError}</div>}
 
             {detail && (
@@ -2135,6 +2277,17 @@ export default function ConsolePage() {
 
                 <h3>Controls</h3>
                 <div className="drawer-actions">
+                  {detail.emailVerified ? (
+                    <button type="button" className="btn" disabled={acting}
+                      onClick={() => setPending({ uid: detail.uid, action: "unverify-email", label: `Mark ${detail.email ?? detail.uid} as UNVERIFIED? Features that require a verified email will stop working for them until they verify or an admin verifies them again.` })}>
+                      Mark email unverified
+                    </button>
+                  ) : (
+                    <button type="button" className="btn btn-primary" disabled={acting}
+                      onClick={() => setPending({ uid: detail.uid, action: "verify-email", label: `Mark ${detail.email ?? detail.uid} as verified? They’ll be able to use every feature that requires a verified email, without needing the verification email.` })}>
+                      Verify email
+                    </button>
+                  )}
                   {viewer?.role === "owner" && !detail.role && (
                     <button type="button" className="btn btn-primary" disabled={acting}
                       onClick={() => setPending({ uid: detail.uid, action: "promote", email: detail.email, label: `Make ${detail.email ?? detail.uid} an admin? They’ll be able to use this console (but not grant admin access). You can revoke this at any time.` })}>
@@ -2185,6 +2338,78 @@ export default function ConsolePage() {
               </>
             )}
           </aside>
+        </div>
+      )}
+
+      {createOpen && (
+        <div className="modal-wrap" role="dialog" aria-modal="true" aria-label="Create account">
+          <div className="modal">
+            <h2>Create account</h2>
+            <p className="muted">
+              The account is created instantly with a profile — the person can
+              sign in right away with the temporary password you give them.
+            </p>
+            <label className="modal-field">
+              <span>Email</span>
+              <input
+                type="email"
+                value={createEmail}
+                onChange={(event) => setCreateEmail(event.target.value)}
+                placeholder="person@example.com"
+                autoComplete="off"
+              />
+            </label>
+            <label className="modal-field">
+              <span>Display name (optional)</span>
+              <input
+                type="text"
+                value={createName}
+                onChange={(event) => setCreateName(event.target.value)}
+                placeholder="Their name"
+                autoComplete="off"
+              />
+            </label>
+            <label className="modal-field">
+              <span>Temporary password</span>
+              <span className="field-row">
+                <input
+                  type={createShowPassword ? "text" : "password"}
+                  value={createPassword}
+                  onChange={(event) => setCreatePassword(event.target.value)}
+                  autoComplete="new-password"
+                />
+                <button type="button" className="btn btn-ghost" onClick={() => setCreateShowPassword((show) => !show)}>
+                  {createShowPassword ? "Hide" : "Show"}
+                </button>
+                <button type="button" className="btn btn-ghost" onClick={() => setCreatePassword(generateTempPassword())}>
+                  Regenerate
+                </button>
+              </span>
+              <span className="muted small">
+                Must be 10+ characters with a lowercase letter, an uppercase letter and a symbol — the same rules as public sign-up. Share it with the person privately; they can change it in Settings.
+              </span>
+            </label>
+            <label className="check-field">
+              <input
+                type="checkbox"
+                checked={createVerified}
+                onChange={(event) => setCreateVerified(event.target.checked)}
+              />
+              <span>Mark the email as verified (recommended for people you know)</span>
+            </label>
+            {createError && <div className="alert" role="alert">{createError}</div>}
+            <div className="modal-actions">
+              <button type="button" className="btn" onClick={() => setCreateOpen(false)} disabled={creating}>Cancel</button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => void runCreateAccount()}
+                disabled={creating || !createEmail.trim() || !createPassword}
+              >
+                {creating ? "Creating…" : "Create account"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

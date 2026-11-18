@@ -517,3 +517,10 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Create-account modal + quick verify (2026-11-18) */
+.btn-mini { padding: 2px 10px; font-size: 12px; border-radius: 999px; }
+.modal-field .field-row { display: flex; gap: 8px; align-items: center; margin-bottom: 0; }
+.modal-field .field-row input { flex: 1; }
+.check-field { display: flex; gap: 10px; align-items: flex-start; margin-top: 14px; text-align: left; font-size: 13.5px; cursor: pointer; }
+.check-field input { margin-top: 2px; }

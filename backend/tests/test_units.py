@@ -358,9 +358,29 @@ class _FakeAuthModule:
 
         return _Page()
 
-    def update_user(self, uid, disabled=None):
+    def update_user(self, uid, disabled=None, email_verified=None):
         self.updated.append((uid, disabled))
-        self.records[uid].disabled = bool(disabled)
+        if disabled is not None:
+            self.records[uid].disabled = bool(disabled)
+        if email_verified is not None:
+            self.records[uid].email_verified = bool(email_verified)
+
+    def get_user_by_email(self, email):
+        for record in self.records.values():
+            if record.email == email:
+                return record
+        raise KeyError(email)
+
+    def create_user(self, email=None, password=None, display_name=None,
+                    email_verified=None, disabled=None):
+        uid = f"new{len(self.records) + 1}"
+        record = _FakeUserRecord(uid, email)
+        record.display_name = display_name
+        record.email_verified = bool(email_verified)
+        record.disabled = bool(disabled)
+        self.records[uid] = record
+        self.updated.append((uid, "created"))
+        return record
 
     def delete_user(self, uid):
         self.updated.append((uid, "deleted"))
@@ -1896,6 +1916,129 @@ def test_data_plane_status_reports_live_and_dead():
     dead = admin.data_plane_status(lambda: ExplodingDb(), lambda: ExplodingAuth())
     assert dead["firestore"] == {"live": False, "error": "RuntimeError"}
     assert dead["auth"] == {"live": False, "error": "ValueError"}
+
+
+def test_admin_verify_email_and_create_account():
+    from app import admin
+
+    db = _AdminDb()
+    db.store[("admins", "boss1")] = {"role": "owner", "grantedBy": "boss1"}
+    db.store[("admins", "emp1")] = {"role": "admin", "grantedBy": "boss1"}
+    records = {
+        "boss1": _FakeUserRecord("boss1", "boss@example.com"),
+        "emp1": _FakeUserRecord("emp1", "emp@example.com"),
+        "plain1": _FakeUserRecord("plain1", "plain@example.com"),
+    }
+    records["plain1"].email_verified = False
+    fake_auth = _FakeAuthModule(records)
+    original_auth = admin.firebase_auth
+    admin.firebase_auth = lambda: fake_auth
+    try:
+        # A plain ADMIN (not the owner) can verify ANY account.
+        result = admin.patch_user(
+            db, "emp1", "admin", "emp@example.com", "plain1", "verify-email"
+        )
+        assert result["emailVerified"] is True
+        assert records["plain1"].email_verified is True
+        # And un-verify again.
+        result = admin.patch_user(
+            db, "emp1", "admin", "emp@example.com", "plain1", "unverify-email"
+        )
+        assert result["emailVerified"] is False
+        assert records["plain1"].email_verified is False
+        # Unknown account -> 404, not a silent success.
+        try:
+            admin.patch_user(
+                db, "emp1", "admin", "emp@example.com", "ghost", "verify-email"
+            )
+            raise AssertionError("verify-email on a ghost must fail")
+        except admin.AdminAuthError as error:
+            assert error.status == 404
+
+        # Create account: happy path writes Auth + profile + audit.
+        created = admin.create_user_account(
+            db,
+            "emp1",
+            "admin",
+            "New.Person@Example.com",
+            "Temp!Passw0rd",
+            display_name="New Person",
+            email_verified=True,
+        )
+        assert created["email"] == "new.person@example.com"
+        new_uid = created["uid"]
+        assert records[new_uid].email_verified is True
+        profile = db.store[("users", new_uid)]
+        assert profile["email"] == "new.person@example.com"
+        assert profile["displayName"] == "New Person"
+        assert profile["createdByAdmin"] == "emp1"
+        actions = [
+            data.get("action")
+            for (collection, _doc_id), data in db.store.items()
+            if collection == "adminActions"
+        ]
+        assert "create" in actions and "verify-email" in actions
+
+        # Duplicate email is refused with 409.
+        try:
+            admin.create_user_account(
+                db, "emp1", "admin", "new.person@example.com", "Temp!Passw0rd"
+            )
+            raise AssertionError("duplicate create must fail")
+        except admin.AdminAuthError as error:
+            assert error.status == 409
+            assert error.code == "EMAIL_EXISTS"
+        # Weak temporary passwords are refused, naming the gap.
+        try:
+            admin.create_user_account(
+                db, "emp1", "admin", "two@example.com", "short"
+            )
+            raise AssertionError("weak password must fail")
+        except admin.AdminAuthError as error:
+            assert error.status == 400
+            assert error.code == "PASSWORD_RULES"
+        # Invalid email is refused.
+        try:
+            admin.create_user_account(
+                db, "emp1", "admin", "not-an-email", "Temp!Passw0rd"
+            )
+            raise AssertionError("invalid email must fail")
+        except admin.AdminAuthError as error:
+            assert error.status == 400
+    finally:
+        admin.firebase_auth = original_auth
+
+
+def test_analytics_writes_minutes_and_model_rollups():
+    from app import analytics
+    from tests.fakes import FakeFirestore
+
+    db = FakeFirestore()
+    analytics.record_usage_event(
+        db,
+        uid="u1",
+        surface="chat",
+        model="openai/gpt-oss-120b:free",
+        prompt_tokens=10,
+        completion_tokens=5,
+        chat_id="c1",
+        tokens_estimated=False,
+    )
+    collections = {path.split("/")[0] for path in db.store}
+    assert "analytics_minutes" in collections
+    assert "analytics_model_days" in collections
+    assert "analytics_model_minutes" in collections
+    minute_docs = [
+        data for path, data in db.store.items() if path.startswith("analytics_minutes/")
+    ]
+    assert minute_docs and minute_docs[0]["minute"]
+    model_docs = [
+        data
+        for path, data in db.store.items()
+        if path.startswith("analytics_model_days/")
+    ]
+    assert model_docs and model_docs[0]["model"] == "openai/gpt-oss-120b:free"
+    assert model_docs[0]["day"]
 
 
 if __name__ == "__main__":

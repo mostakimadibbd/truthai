@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
@@ -1175,6 +1176,8 @@ ACTIONS = (
     "delete",
     "reset-link",
     "sign-out-all",
+    "verify-email",
+    "unverify-email",
 )
 
 
@@ -1673,7 +1676,23 @@ def patch_user(
             pass
         return {"success": True, "uid": target_uid, "action": "delete"}
     result: dict = {"success": True, "uid": target_uid, "action": action}
-    if action in ("reset-link", "sign-out-all"):
+    if action in ("verify-email", "unverify-email"):
+        # Email verification is a routine support power: ANY
+        # admin (not just the owner) may verify — or un-verify —
+        # ANY account, including another admin's. The panel uses
+        # it to unblock users whose verification mail never
+        # arrived. Audited below like every other action.
+        try:
+            firebase_auth().get_user(target_uid)
+        except Exception:
+            raise AdminAuthError(
+                404, "USER_NOT_FOUND", "That account no longer exists."
+            )
+        firebase_auth().update_user(
+            target_uid, email_verified=(action == "verify-email")
+        )
+        result["emailVerified"] = action == "verify-email"
+    elif action in ("reset-link", "sign-out-all"):
         # Full-control actions. Touching the OWNER's account
         # this way stays the owner's own power.
         if target_role in ("owner", "admin") and actor_role != "owner":
@@ -1753,3 +1772,125 @@ def patch_user(
     except Exception:
         pass  # Auditing must never block the action itself.
     return result
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _password_gaps(password: str) -> list[str]:
+    """Mirror lib/password-rules.ts — the same composition rules
+    the public sign-up enforces, so an admin-created account is
+    held to exactly the same standard."""
+    gaps = []
+    if len(password) < 10:
+        gaps.append("at least 10 characters")
+    if not re.search(r"[a-z]", password):
+        gaps.append("a lowercase letter")
+    if not re.search(r"[A-Z]", password):
+        gaps.append("an uppercase letter")
+    if not re.search(r"[^A-Za-z0-9\s]", password):
+        gaps.append("a symbol such as ! @ # $ %")
+    return gaps
+
+
+def create_user_account(
+    db,
+    actor_uid: str,
+    actor_role: str,
+    email: str,
+    password: str,
+    display_name: str | None = None,
+    email_verified: bool = True,
+) -> dict:
+    """Create a complete account from the admin panel.
+
+    Any admin may create accounts (granting admin access stays
+    owner-only, via patch_user's promote). The account is made
+    in Firebase Auth with the admin-chosen temporary password,
+    and its Firestore profile document is written server-side —
+    the same shape the public sign-up route writes — so the
+    person can sign in immediately and appears in the directory
+    with a proper profile. Audited to adminActions."""
+    email = (email or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        raise AdminAuthError(
+            400, "INVALID_EMAIL", "Enter a valid email address."
+        )
+    if not isinstance(password, str):
+        password = ""
+    gaps = _password_gaps(password)
+    if gaps:
+        listing = (
+            gaps[0]
+            if len(gaps) == 1
+            else ", ".join(gaps[:-1]) + " and " + gaps[-1]
+        )
+        raise AdminAuthError(
+            400,
+            "PASSWORD_RULES",
+            f"The temporary password still needs {listing}.",
+        )
+    auth = firebase_auth()
+    try:
+        existing = auth.get_user_by_email(email)
+    except Exception:
+        existing = None
+    if existing is not None:
+        raise AdminAuthError(
+            409,
+            "EMAIL_EXISTS",
+            "An account with that email already exists.",
+        )
+    name = (display_name or "").strip()[:80] or None
+    try:
+        record = auth.create_user(
+            email=email,
+            password=password,
+            display_name=name,
+            email_verified=bool(email_verified),
+            disabled=False,
+        )
+    except AdminAuthError:
+        raise
+    except Exception:
+        raise AdminAuthError(
+            503,
+            "CREATE_FAILED",
+            "The account couldn't be created. Check the email and try again.",
+        )
+    uid = record.uid
+    now_ms = int(time.time() * 1000)
+    try:
+        db.collection("users").document(uid).set(
+            {
+                "uid": uid,
+                "email": email,
+                "displayName": name or "",
+                "photoURL": "",
+                "createdAt": now_ms,
+                "updatedAt": now_ms,
+                "lastSignInAt": now_ms,
+                "createdByAdmin": actor_uid,
+            }
+        )
+    except Exception:
+        pass  # The Auth account exists; the profile can heal on sign-in.
+    try:
+        db.collection("adminActions").add(
+            {
+                "actorUid": actor_uid,
+                "actorRole": actor_role,
+                "targetUid": uid,
+                "action": "create",
+                "ts": now_ms,
+            }
+        )
+    except Exception:
+        pass  # Auditing must never block the action itself.
+    return {
+        "success": True,
+        "uid": uid,
+        "email": email,
+        "emailVerified": bool(email_verified),
+        "action": "create",
+    }

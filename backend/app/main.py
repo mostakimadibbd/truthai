@@ -705,6 +705,43 @@ async def admin_user_chat_messages(request: Request, uid: str, chat_id: str):
         return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
 
 
+@app.post("/v1/admin/users/create")
+async def admin_users_create(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    actor_uid, _actor_email, actor_role = gate
+    try:
+        body = await request.json()
+    except Exception:
+        return _error(400, "INVALID_JSON", "Send a JSON body.")
+    if not isinstance(body, dict):
+        return _error(400, "INVALID_BODY", "Send a JSON object.")
+    email = body.get("email")
+    password = body.get("password")
+    if not isinstance(email, str) or not isinstance(password, str):
+        return _error(
+            400, "INVALID_CREATE", "An email and a temporary password are required."
+        )
+    display_name = body.get("displayName")
+    email_verified = body.get("emailVerified")
+    try:
+        result = admin.create_user_account(
+            firestore_client(),
+            actor_uid,
+            actor_role,
+            email,
+            password,
+            display_name=display_name if isinstance(display_name, str) else None,
+            email_verified=email_verified if isinstance(email_verified, bool) else True,
+        )
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+    except Exception:
+        return _error(503, "CREATE_FAILED", "The account couldn’t be created.")
+    return {"success": True, **result}
+
+
 @app.patch("/v1/admin/users")
 async def admin_users_patch(request: Request):
     gate = await _admin_gate(request)
