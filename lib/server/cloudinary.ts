@@ -341,10 +341,32 @@ export function getCloudinaryPrivateDownloadUrl(
     return `/api/media/${blobIdFromPublicId(publicId)}`;
   }
   getCloudinaryConfig();
-  return cloudinary.utils.private_download_url(publicId, format, {
+  // Signed AUTHENTICATED DELIVERY URL (res.cloudinary.com/…
+  // /authenticated/s--…--/…), NOT the API download endpoint.
+  // The old private_download_url pointed at
+  // api.cloudinary.com/v1_1/…/image/download, which answers
+  // with Content-Disposition: attachment — browsers refuse to
+  // render those responses in <img> tags, so every private
+  // attachment and generated image showed as a broken preview
+  // in chat ("attachment preview couldn't be loaded") even
+  // though the file itself was stored fine. The signed
+  // delivery URL serves the bytes inline with their real
+  // content type, works for <img> display AND for server-side
+  // fetches (vision providers, upload verification), and can
+  // only be minted by someone holding the API secret. Trade-
+  // off: a signature URL carries no expiry (Cloudinary signed
+  // URLs cannot expire without an auth-token key); these URLs
+  // are minted per owner request and kept in client memory
+  // only, never stored.
+  return cloudinary.url(publicId, {
     resource_type: resourceType,
     type: "authenticated",
-    expires_at: Math.floor(Date.now() / 1000) + 15 * 60,
+    sign_url: true,
+    secure: true,
+    // Image public ids carry no extension, so the format
+    // completes the URL; raw public ids already end in their
+    // extension (…asset.pdf), so appending it would double it.
+    ...(resourceType === "image" ? { format } : {}),
   });
 }
 

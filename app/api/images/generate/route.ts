@@ -491,6 +491,30 @@ async function fetchHordeImage(prompt: string): Promise<Buffer> {
   return bytes;
 }
 
+/**
+ * Blank-image guard: a source can answer 200 with a picture
+ * that is one flat colour (a queue placeholder, a filter
+ * blank, an empty render). Every byte-level check passes on
+ * such a file, so without this the app would watermark, store
+ * and present a blank PNG as the user's creation. A frame
+ * whose every colour channel is (near-)uniform is not a
+ * picture: the source counts as failed and the next one is
+ * tried. Undecodable bytes return false here — the watermark
+ * step below rejects those on its own.
+ */
+async function isUniformImage(bytes: Buffer): Promise<boolean> {
+  try {
+    const stats = await sharp(bytes).stats();
+    const colourChannels = stats.channels.slice(0, 3);
+    return (
+      colourChannels.length === 3 &&
+      colourChannels.every((channel) => channel.stdev < 2)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Free OpenRouter image models (last-resort source). */
 async function fetchOpenRouterImage(
   prompt: string,
@@ -722,6 +746,10 @@ export async function POST(request: NextRequest) {
         anySourceAnswered = true;
       } catch (error) {
         console.error(`Image source ${source.label} failed.`, error);
+        continue;
+      }
+      if (await isUniformImage(produced.bytes)) {
+        console.error(`Image source ${source.label} returned a blank image.`);
         continue;
       }
       try {

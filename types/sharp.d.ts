@@ -33,9 +33,23 @@ declare module "sharp" {
     top: number;
   };
 
+  type SharpChannelStats = {
+    min: number;
+    max: number;
+    sum: number;
+    mean: number;
+    stdev: number;
+  };
+
+  type SharpStats = {
+    channels: SharpChannelStats[];
+    isOpaque?: boolean;
+  };
+
   type SharpPipeline = {
     ensureAlpha(): SharpPipeline;
     metadata(): Promise<SharpMetadata>;
+    stats(): Promise<SharpStats>;
     extract(region: SharpRegion): SharpPipeline;
     blur(sigma?: number): SharpPipeline;
     median(size?: number): SharpPipeline;
