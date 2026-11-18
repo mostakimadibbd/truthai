@@ -742,6 +742,87 @@ async def admin_users_create(request: Request):
     return {"success": True, **result}
 
 
+def _owner_gate_error(gate):
+    """The database explorer is the owner's master data access:
+    a plain admin's token is not enough. Returns a 403 response
+    for non-owners, None for the owner."""
+    _uid, _email, role = gate
+    if role != "owner":
+        return _error(
+            403,
+            "OWNER_ONLY",
+            "The database explorer is available to the owner only.",
+        )
+    return None
+
+
+@app.get("/v1/admin/database/collections")
+async def admin_database_collections(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    denied = _owner_gate_error(gate)
+    if denied is not None:
+        return denied
+    try:
+        return {
+            "success": True,
+            **_admin_cached(
+                "database:collections",
+                30.0,
+                lambda: admin.database_collections(firestore_client()),
+            ),
+        }
+    except Exception:
+        return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
+
+
+@app.get("/v1/admin/database/docs")
+async def admin_database_docs(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    denied = _owner_gate_error(gate)
+    if denied is not None:
+        return denied
+    path = request.query_params.get("path") or ""
+    start_after = request.query_params.get("startAfter") or ""
+    try:
+        limit = int(request.query_params.get("limit") or 25)
+    except (TypeError, ValueError):
+        limit = 25
+    try:
+        payload = admin.database_documents(
+            firestore_client(), path, limit, start_after
+        )
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+    except Exception:
+        return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
+    return {"success": True, **payload}
+
+
+@app.get("/v1/admin/database/doc")
+async def admin_database_doc(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    denied = _owner_gate_error(gate)
+    if denied is not None:
+        return denied
+    actor_uid, _email, actor_role = gate
+    path = request.query_params.get("path") or ""
+    try:
+        payload = admin.database_document(
+            firestore_client(), path, actor_uid, actor_role
+        )
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+    except Exception:
+        return _error(503, "ADMIN_UNAVAILABLE", "Admin data couldn’t be loaded.")
+    return {"success": True, **payload}
+
+
 @app.patch("/v1/admin/users")
 async def admin_users_patch(request: Request):
     gate = await _admin_gate(request)

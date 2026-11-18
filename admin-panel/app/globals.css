@@ -524,3 +524,20 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
 .modal-field .field-row input { flex: 1; }
 .check-field { display: flex; gap: 10px; align-items: flex-start; margin-top: 14px; text-align: left; font-size: 13.5px; cursor: pointer; }
 .check-field input { margin-top: 2px; }
+
+/* Database explorer (owner-only master data access) */
+.db-explorer { display: grid; gap: 14px; }
+.db-collections { display: flex; flex-wrap: wrap; gap: 8px; }
+.db-chip { display: grid; gap: 2px; justify-items: start; padding: 9px 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); color: var(--text); cursor: pointer; font: inherit; text-align: left; }
+.db-chip span { color: var(--muted); font-size: 12px; }
+.db-chip:hover { border-color: var(--accent, #6ab0ff); }
+.db-chip.active { border-color: var(--accent, #6ab0ff); background: rgba(90, 140, 255, 0.12); }
+.db-pathbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.db-pathbar code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; word-break: break-all; }
+.db-docs { display: grid; gap: 6px; }
+.db-doc-row { display: flex; align-items: center; gap: 12px; width: 100%; padding: 9px 12px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--panel-2); color: var(--text); cursor: pointer; font: inherit; text-align: left; }
+.db-doc-row:hover { border-color: var(--accent, #6ab0ff); }
+.db-doc-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.db-doc-preview { flex: 1; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.db-detail { display: grid; gap: 12px; }
+.db-json { margin: 0; padding: 14px 16px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--panel-2); overflow: auto; max-height: 560px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; text-align: left; }

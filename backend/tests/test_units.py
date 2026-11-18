@@ -2041,6 +2041,67 @@ def test_analytics_writes_minutes_and_model_rollups():
     assert model_docs[0]["day"]
 
 
+def test_database_explorer_reads_collections_documents_and_doc():
+    from datetime import datetime, timezone
+
+    from app import admin
+
+    db = _AdminDb()
+    db.store[("users", "u1")] = {
+        "email": "one@example.com",
+        "plan": "free",
+        "createdAt": datetime(2026, 11, 18, tzinfo=timezone.utc),
+        "prefs": {"theme": "dark"},
+        "blob": b"\x00\x01\x02",
+    }
+    db.store[("users", "u2")] = {"email": "two@example.com", "plan": "free"}
+    db.store[("users/u1/chats", "c1")] = {"title": "Hello", "pinned": True}
+
+    # Collections list: curated names present; counts degrade to
+    # None when the client cannot count (the fake has no count()).
+    listing = admin.database_collections(db)
+    names = [entry["name"] for entry in listing["collections"]]
+    assert "users" in names and "safetyFlags" in names
+    assert all(entry["count"] is None for entry in listing["collections"])
+
+    # Document page: previews carry scalars, field counts are real.
+    page = admin.database_documents(db, "users", 25)
+    assert [doc["id"] for doc in page["documents"]] == ["u1", "u2"]
+    assert page["documents"][0]["preview"]["email"] == "one@example.com"
+    assert page["documents"][0]["fieldCount"] == 5
+    assert page["hasMore"] is False
+
+    # Subcollection listing works through a document path.
+    chats = admin.database_documents(db, "users/u1/chats", 25)
+    assert [doc["id"] for doc in chats["documents"]] == ["c1"]
+
+    # Full document: timestamps become ISO strings, bytes become
+    # a size marker, nested maps survive; the read is audited.
+    doc = admin.database_document(db, "users/u1", "boss1", "owner")
+    assert doc["data"]["email"] == "one@example.com"
+    assert doc["data"]["createdAt"].startswith("2026-11-18T")
+    assert doc["data"]["blob"] == {"__bytes__": 3}
+    assert doc["data"]["prefs"] == {"theme": "dark"}
+    audits = [
+        data for (collection, _id), data in db.store.items()
+        if collection == "adminActions"
+    ]
+    assert any(entry.get("action") == "database_view" for entry in audits)
+
+    # Bad paths and missing documents are clean errors.
+    for bad_call in (
+        lambda: admin.database_documents(db, "users/u1", 25),
+        lambda: admin.database_documents(db, "../etc", 25),
+        lambda: admin.database_document(db, "users/ghost", "boss1", "owner"),
+    ):
+        try:
+            bad_call()
+        except admin.AdminAuthError as error:
+            assert error.status in (400, 404)
+        else:
+            raise AssertionError("expected AdminAuthError")
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):

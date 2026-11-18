@@ -1894,3 +1894,208 @@ def create_user_account(
         "emailVerified": bool(email_verified),
         "action": "create",
     }
+
+
+# ------------------------------------------------------------------
+# Database explorer — the owner's master data access (2026-11-18).
+#
+# The owner asked for total visibility: every collection, every
+# document, readable from the panel. This is deliberately
+# READ-ONLY (mutations stay in the panel's controlled, audited
+# action buttons — a raw document editor could corrupt live
+# product data with one malformed field) and OWNER-ONLY (routes
+# enforce the role; a plain admin never sees raw database
+# contents). Reads are structurally capped so one huge document
+# cannot blow up the response, and every full-document read is
+# audited to adminActions like chat viewing is.
+# ------------------------------------------------------------------
+
+DATABASE_COLLECTIONS = [
+    "users",
+    "admins",
+    "adminActions",
+    "usageEvents",
+    "searchEvents",
+    "chatErrors",
+    "safetyFlags",
+    "deletedUsers",
+    "deviceSignals",
+    "chatJobs",
+    "mediaBlobs",
+    "mediaStats",
+    "analytics_days",
+    "analytics_minutes",
+    "analytics_model_days",
+    "analytics_model_minutes",
+    "analytics_user_days",
+]
+
+_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9_\-\:.@+]+$")
+
+
+def _valid_db_path(path: str, want: str) -> list[str] | None:
+    """Validate a Firestore path for the explorer. `want` is
+    "collection" (odd segment count) or "document" (even).
+    Returns the segments, or None for anything malformed."""
+    if not isinstance(path, str) or not path or len(path) > 512:
+        return None
+    segments = path.split("/")
+    if any(not _PATH_SEGMENT.match(segment) for segment in segments):
+        return None
+    if want == "collection" and len(segments) % 2 == 1:
+        return segments
+    if want == "document" and len(segments) % 2 == 0:
+        return segments
+    return None
+
+
+def _json_safe(value, depth: int = 0):
+    """Convert a Firestore value into JSON-safe data with
+    structural caps: strings truncated, containers bounded,
+    timestamps as ISO strings, references as paths."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value if len(value) <= 2000 else value[:2000] + "…[truncated]"
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat() if value.tzinfo else value.isoformat()
+    if isinstance(value, (bytes, bytearray)):
+        return {"__bytes__": len(value)}
+    if isinstance(value, dict):
+        if depth >= 10:
+            return {"__truncated__": "max depth"}
+        out = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 80:
+                out["__truncated__"] = f"{len(value) - 80} more fields"
+                break
+            out[str(key)] = _json_safe(item, depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        if depth >= 10:
+            return {"__truncated__": "max depth"}
+        items = [_json_safe(item, depth + 1) for item in value[:50]]
+        if len(value) > 50:
+            items.append({"__truncated__": f"{len(value) - 50} more items"})
+        return items
+    # DocumentReference and GeoPoint are recognised structurally
+    # so this module needs no google-cloud imports.
+    path = getattr(value, "path", None)
+    if isinstance(path, str) and hasattr(value, "id"):
+        return {"__ref__": path}
+    latitude = getattr(value, "latitude", None)
+    longitude = getattr(value, "longitude", None)
+    if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
+        return {"__geo__": [latitude, longitude]}
+    return str(value)
+
+
+def _collection_ref(db, segments: list[str]):
+    ref = db.collection(segments[0])
+    index = 1
+    while index < len(segments):
+        ref = ref.document(segments[index]).collection(segments[index + 1])
+        index += 2
+    return ref
+
+
+def _document_ref(db, segments: list[str]):
+    ref = db.collection(segments[0]).document(segments[1])
+    index = 2
+    while index < len(segments):
+        ref = ref.collection(segments[index]).document(segments[index + 1])
+        index += 2
+    return ref
+
+
+def database_collections(db) -> dict:
+    """The curated top-level collections with document counts.
+    Each count is fault-isolated: a collection that cannot be
+    counted reports null instead of failing the whole list."""
+    collections = []
+    for name in DATABASE_COLLECTIONS:
+        count = None
+        try:
+            result = db.collection(name).count().get()
+            count = int(result[0][0].value)
+        except Exception:
+            count = None
+        collections.append({"name": name, "count": count})
+    return {"collections": collections}
+
+
+def database_documents(db, path: str, limit: int, start_after: str = "") -> dict:
+    """One page of documents in a collection path. Each entry
+    carries a compact preview (scalar fields, short strings);
+    the full document is one more click away."""
+    segments = _valid_db_path(path, "collection")
+    if segments is None:
+        raise AdminAuthError(400, "INVALID_PATH", "That collection path isn’t valid.")
+    limit = max(1, min(int(limit or 25), 50))
+    collection = _collection_ref(db, segments)
+    query = collection.limit(limit + 1)
+    if start_after:
+        try:
+            cursor = collection.document(start_after).get()
+            if cursor.exists and hasattr(query, "start_after"):
+                query = collection.start_after(cursor).limit(limit + 1)
+        except Exception:
+            pass
+    docs = []
+    has_more = False
+    for snap in query.get():
+        if len(docs) >= limit:
+            has_more = True
+            break
+        data = snap.to_dict() or {}
+        preview = {}
+        for key, value in data.items():
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                preview[key] = (
+                    value[:120] + "…" if isinstance(value, str) and len(value) > 120 else value
+                )
+            if len(preview) >= 8:
+                break
+        docs.append({"id": snap.id, "preview": preview, "fieldCount": len(data)})
+    return {
+        "path": path,
+        "documents": docs,
+        "hasMore": has_more,
+        "nextStartAfter": docs[-1]["id"] if has_more and docs else "",
+    }
+
+
+def database_document(db, path: str, actor_uid: str, actor_role: str) -> dict:
+    """One full document (JSON-safe, capped) plus the names of
+    its subcollections, so the owner can drill down anywhere.
+    The read is audited — master access stays accountable."""
+    segments = _valid_db_path(path, "document")
+    if segments is None:
+        raise AdminAuthError(400, "INVALID_PATH", "That document path isn’t valid.")
+    ref = _document_ref(db, segments)
+    snap = ref.get()
+    if not snap.exists:
+        raise AdminAuthError(404, "DOCUMENT_NOT_FOUND", "That document doesn’t exist.")
+    subcollections = []
+    try:
+        subcollections = [child.id for child in ref.collections()]
+    except Exception:
+        subcollections = []
+    try:
+        db.collection("adminActions").add(
+            {
+                "action": "database_view",
+                "actorUid": actor_uid,
+                "actorRole": actor_role,
+                "path": path,
+                "ts": int(time.time() * 1000),
+            }
+        )
+    except Exception:
+        pass
+    return {
+        "path": path,
+        "id": segments[-1],
+        "data": _json_safe(snap.to_dict() or {}),
+        "subcollections": subcollections,
+    }

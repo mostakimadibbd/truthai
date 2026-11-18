@@ -196,7 +196,22 @@ type TrashEntry = {
 
 type RangeKey = "today" | "24h" | "48h" | "7d" | "lifetime";
 
-type Tab = "overview" | "users" | "owner" | "logs" | "safety" | "media" | "activity" | "system";
+type Tab = "overview" | "users" | "owner" | "logs" | "safety" | "media" | "activity" | "system" | "database";
+
+type DbCollection = { name: string; count: number | null };
+
+type DbDocSummary = {
+  id: string;
+  preview: Record<string, unknown>;
+  fieldCount: number;
+};
+
+type DbDocument = {
+  path: string;
+  id: string;
+  data: unknown;
+  subcollections: string[];
+};
 
 type MediaEntry = {
   publicId: string;
@@ -469,6 +484,7 @@ const ICONS = {
   owner: "M12 2l7 3v5c0 5-3.5 9.3-7 11-3.5-1.7-7-6-7-11V5l7-3zM9 12l2 2 4-4",
   flag: "M4 21V4c4-2 8 2 12 0v9c-4 2-8-2-12 0",
   image: "M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5Z M8.5 7a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z M21 15l-5-5L5 21",
+  database: "M12 3c4.97 0 9 1.34 9 3s-4.03 3-9 3-9-1.34-9-3 4.03-3 9-3zM3 6v12c0 1.66 4.03 3 9 3s9-1.34 9-3V6M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3",
   refresh: "M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6",
   out: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
 };
@@ -518,6 +534,14 @@ export default function ConsolePage() {
   const [mediaSearch, setMediaSearch] = useState("");
   const [mediaConfirmDelete, setMediaConfirmDelete] = useState("");
   const [mediaBusy, setMediaBusy] = useState("");
+  const [dbCollections, setDbCollections] = useState<DbCollection[]>([]);
+  const [dbPath, setDbPath] = useState("");
+  const [dbDocs, setDbDocs] = useState<DbDocSummary[]>([]);
+  const [dbHasMore, setDbHasMore] = useState(false);
+  const [dbNext, setDbNext] = useState("");
+  const [dbDoc, setDbDoc] = useState<DbDocument | null>(null);
+  const [dbLoading, setDbLoading] = useState(false);
+  const [dbError, setDbError] = useState("");
   const [reviewingId, setReviewingId] = useState("");
   const [openChatId, setOpenChatId] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessageRow[]>([]);
@@ -759,6 +783,94 @@ export default function ConsolePage() {
     }
   }, [user]);
 
+  // Database explorer (owner-only master data access). Loaded
+  // strictly on demand — never polled — because browsing reads
+  // count against the same free Firestore quota the panel
+  // burned through once before.
+  const loadDbCollections = useCallback(async () => {
+    if (!user) return;
+    setDbLoading(true);
+    setDbError("");
+    try {
+      const res = await panelApi(user, "/api/database?kind=collections");
+      if (res.ok) {
+        const data = (await res.json()) as { collections?: DbCollection[] };
+        setDbCollections(data.collections ?? []);
+      } else {
+        setDbError(await apiErrorMessage(res, "The database couldn’t be loaded."));
+      }
+    } catch {
+      setDbError("The database couldn’t be loaded.");
+    } finally {
+      setDbLoading(false);
+    }
+  }, [user]);
+
+  const loadDbDocs = useCallback(
+    async (path: string, startAfter = "") => {
+      if (!user) return;
+      setDbLoading(true);
+      setDbError("");
+      try {
+        const query = `/api/database?kind=docs&path=${encodeURIComponent(path)}&limit=25&startAfter=${encodeURIComponent(startAfter)}`;
+        const res = await panelApi(user, query);
+        if (res.ok) {
+          const data = (await res.json()) as {
+            documents?: DbDocSummary[];
+            hasMore?: boolean;
+            nextStartAfter?: string;
+          };
+          setDbDocs((previous) =>
+            startAfter ? [...previous, ...(data.documents ?? [])] : data.documents ?? [],
+          );
+          setDbHasMore(Boolean(data.hasMore));
+          setDbNext(data.nextStartAfter ?? "");
+        } else {
+          setDbError(await apiErrorMessage(res, "Those documents couldn’t be loaded."));
+        }
+      } catch {
+        setDbError("Those documents couldn’t be loaded.");
+      } finally {
+        setDbLoading(false);
+      }
+    },
+    [user],
+  );
+
+  const openDbCollection = useCallback(
+    (path: string) => {
+      setDbPath(path);
+      setDbDoc(null);
+      void loadDbDocs(path);
+    },
+    [loadDbDocs],
+  );
+
+  const openDbDoc = useCallback(
+    async (docPath: string) => {
+      if (!user) return;
+      setDbLoading(true);
+      setDbError("");
+      try {
+        const res = await panelApi(
+          user,
+          `/api/database?kind=doc&path=${encodeURIComponent(docPath)}`,
+        );
+        if (res.ok) {
+          const data = (await res.json()) as DbDocument;
+          setDbDoc(data);
+        } else {
+          setDbError(await apiErrorMessage(res, "That document couldn’t be loaded."));
+        }
+      } catch {
+        setDbError("That document couldn’t be loaded.");
+      } finally {
+        setDbLoading(false);
+      }
+    },
+    [user],
+  );
+
   const deleteMedia = async (entry: MediaEntry) => {
     if (!user) return;
     setMediaBusy(entry.publicId);
@@ -935,7 +1047,8 @@ export default function ConsolePage() {
     if (tab === "logs") void loadLogs();
     if (tab === "safety") void loadFlags();
     if (tab === "media") void loadMedia();
-  }, [tab, state, loadStorageTrash, loadLogs, loadFlags, loadMedia]);
+    if (tab === "database") void loadDbCollections();
+  }, [tab, state, loadStorageTrash, loadLogs, loadFlags, loadMedia, loadDbCollections]);
 
   const openDetail = useCallback(
     async (uid: string) => {
@@ -1236,6 +1349,7 @@ export default function ConsolePage() {
   // The Owner tab exists only for the owner — admins never see it.
   if (viewer?.role === "owner") {
     navItems.splice(2, 0, { id: "owner", label: "Owner", icon: ICONS.owner });
+    navItems.push({ id: "database", label: "Database", icon: ICONS.database });
   }
   const pendingGated = pending ? SECRET_GATED_ACTIONS.includes(pending.action) : false;
   const pendingEmailOk =
@@ -1959,6 +2073,144 @@ export default function ConsolePage() {
                   </div>
                 ))}
             </div>
+          </section>
+        )}
+
+        {tab === "database" && viewer?.role === "owner" && (
+          <section className="card db-explorer">
+            <div className="card-head">
+              <div>
+                <h2>Database</h2>
+                <span className="muted small">
+                  Master data access — owner only, read-only. Browse every
+                  collection and document; changes stay in the panel’s
+                  controlled actions, and every document you open is logged
+                  in the audit trail.
+                </span>
+              </div>
+              <button
+                type="button"
+                className="btn"
+                disabled={dbLoading}
+                onClick={() => {
+                  void loadDbCollections();
+                  if (dbPath) void loadDbDocs(dbPath);
+                }}
+              >
+                Refresh
+              </button>
+            </div>
+            {dbError && <div className="alert" role="alert">{dbError}</div>}
+            {dbLoading && <p className="muted small">Loading…</p>}
+            {!dbDoc && (
+              <>
+                <div className="db-collections">
+                  {dbCollections.map((collection) => (
+                    <button
+                      key={collection.name}
+                      type="button"
+                      className={dbPath === collection.name ? "db-chip active" : "db-chip"}
+                      onClick={() => openDbCollection(collection.name)}
+                    >
+                      <strong>{collection.name}</strong>
+                      <span>{collection.count == null ? "—" : `${collection.count.toLocaleString()} docs`}</span>
+                    </button>
+                  ))}
+                </div>
+                {dbPath && (
+                  <>
+                    <div className="db-pathbar">
+                      <button
+                        type="button"
+                        className="btn-mini"
+                        onClick={() => {
+                          setDbPath("");
+                          setDbDocs([]);
+                        }}
+                      >
+                        ← All collections
+                      </button>
+                      <code>{dbPath}</code>
+                    </div>
+                    <div className="db-docs">
+                      {dbDocs.map((doc) => (
+                        <button
+                          key={doc.id}
+                          type="button"
+                          className="db-doc-row"
+                          onClick={() => void openDbDoc(`${dbPath}/${doc.id}`)}
+                        >
+                          <span className="db-doc-id">{doc.id}</span>
+                          <span className="db-doc-preview">
+                            {Object.entries(doc.preview)
+                              .slice(0, 3)
+                              .map(([key, value]) => `${key}: ${String(value)}`)
+                              .join(" · ")}
+                          </span>
+                          <span className="muted small">{doc.fieldCount} fields</span>
+                        </button>
+                      ))}
+                      {dbDocs.length === 0 && !dbLoading && (
+                        <p className="muted small">No documents in this collection.</p>
+                      )}
+                    </div>
+                    {dbHasMore && (
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={dbLoading}
+                        onClick={() => void loadDbDocs(dbPath, dbNext)}
+                      >
+                        Load more
+                      </button>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+            {dbDoc && (
+              <div className="db-detail">
+                <div className="db-pathbar">
+                  <button type="button" className="btn-mini" onClick={() => setDbDoc(null)}>
+                    ← Back to documents
+                  </button>
+                  <code>{dbDoc.path}</code>
+                  <button
+                    type="button"
+                    className="btn-mini"
+                    onClick={() => {
+                      const blob = new Blob([JSON.stringify(dbDoc.data, null, 2)], {
+                        type: "application/json",
+                      });
+                      const url = URL.createObjectURL(blob);
+                      const link = document.createElement("a");
+                      link.href = url;
+                      link.download = `${dbDoc.id}.json`;
+                      link.click();
+                      URL.revokeObjectURL(url);
+                    }}
+                  >
+                    Download JSON
+                  </button>
+                </div>
+                {dbDoc.subcollections.length > 0 && (
+                  <div className="db-collections">
+                    {dbDoc.subcollections.map((name) => (
+                      <button
+                        key={name}
+                        type="button"
+                        className="db-chip"
+                        onClick={() => openDbCollection(`${dbDoc.path}/${name}`)}
+                      >
+                        <strong>{name}</strong>
+                        <span>subcollection</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <pre className="db-json">{JSON.stringify(dbDoc.data, null, 2)}</pre>
+              </div>
+            )}
           </section>
         )}
 
