@@ -148,6 +148,7 @@ export default function SiteHeader() {
       </Link>
       <nav className="main-nav" aria-label="Main navigation">
         <Link href="/chat">Workspace</Link>
+        <Link href="/verify-image">Verify image</Link>
         <Link href="/about">About</Link>
         <Link href="/help">Help</Link>
         <Link href="/pricing">Pricing</Link>
@@ -187,6 +188,9 @@ export default function SiteHeader() {
                   <small>{user.email}</small>
                 </span>
               </div>
+              <Link href="/verify-image" onClick={closeProfileMenu}>
+                Verify an image
+              </Link>
               <Link href="/settings/profile" onClick={closeProfileMenu}>
                 Account
               </Link>
@@ -219,6 +223,7 @@ export default function SiteHeader() {
         </summary>
         <nav aria-label="Mobile navigation">
           <Link href="/chat" onClick={closeMobileMenu}>Workspace</Link>
+          <Link href="/verify-image" onClick={closeMobileMenu}>Verify image</Link>
           <Link href="/about" onClick={closeMobileMenu}>About</Link>
           <Link href="/help" onClick={closeMobileMenu}>Help</Link>
           <Link href="/pricing" onClick={closeMobileMenu}>Pricing</Link>

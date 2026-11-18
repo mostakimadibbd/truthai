@@ -167,6 +167,9 @@ export default function Home() {
             <Link href="/sign-up" className="button button-primary">
               Get started free <span aria-hidden="true">↗</span>
             </Link>
+            <Link href="/verify-image" className="button button-quiet">
+              Verify an image <span aria-hidden="true">✓</span>
+            </Link>
             <Link href="/sign-in" className="button button-quiet">
               Sign in <span aria-hidden="true">→</span>
             </Link>

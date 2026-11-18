@@ -86,6 +86,7 @@ export default async function RootLayout({
             <div className="footer-links">
               <div>
                 <span className="footer-heading">Explore</span>
+                <Link href="/verify-image">Verify an image</Link>
                 <Link href="/about">About</Link>
                 <Link href="/company">Company</Link>
                 <Link href="/pricing">Pricing</Link>
