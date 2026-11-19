@@ -565,6 +565,13 @@ export default function ConsolePage() {
   const [mediaSearch, setMediaSearch] = useState("");
   const [mediaConfirmDelete, setMediaConfirmDelete] = useState("");
   const [mediaBusy, setMediaBusy] = useState("");
+  const [mediaPreview, setMediaPreview] = useState<{
+    entry: MediaEntry;
+    url: string;
+    kind: "image" | "pdf" | "text" | "other";
+    text?: string;
+  } | null>(null);
+  const [mediaPreviewBusy, setMediaPreviewBusy] = useState("");
   const [dbCollections, setDbCollections] = useState<DbCollection[]>([]);
   const [dbPath, setDbPath] = useState("");
   const [dbDocs, setDbDocs] = useState<DbDocSummary[]>([]);
@@ -968,8 +975,8 @@ export default function ConsolePage() {
     }
   };
 
-  const downloadMedia = async (entry: MediaEntry) => {
-    if (!user) return;
+  const fetchMediaBlob = async (entry: MediaEntry): Promise<Blob | null> => {
+    if (!user) return null;
     const params = new URLSearchParams({
       publicId: entry.publicId,
       resourceType: entry.resourceType,
@@ -977,14 +984,57 @@ export default function ConsolePage() {
     });
     if (entry.format) params.set("format", entry.format);
     const res = await panelApi(user, `/api/media/download?${params.toString()}`);
-    if (!res.ok) return;
-    const blob = await res.blob();
+    if (!res.ok) return null;
+    return res.blob();
+  };
+
+  const downloadMedia = async (entry: MediaEntry) => {
+    const blob = await fetchMediaBlob(entry);
+    if (!blob) return;
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = entry.publicId.split("/").pop() ?? "download";
     anchor.click();
     URL.revokeObjectURL(url);
+  };
+
+  // Preview the REAL file in a modal — private (authenticated)
+  // assets have no public thumbnail, so the tile alone can't
+  // show what a file actually is. The bytes come through the
+  // same gated download proxy as Download and render from a
+  // blob URL: images as <img>, PDFs in an <iframe>, text
+  // formats as plain text.
+  const previewMedia = async (entry: MediaEntry) => {
+    setMediaPreviewBusy(entry.publicId);
+    try {
+      const blob = await fetchMediaBlob(entry);
+      if (!blob) {
+        setMediaError("That file couldn't be previewed — try Download instead.");
+        return;
+      }
+      const format = (entry.format ?? entry.publicId.split(".").pop() ?? "").toLowerCase();
+      const url = URL.createObjectURL(blob);
+      if (entry.resourceType === "image") {
+        setMediaPreview({ entry, url, kind: "image" });
+      } else if (format === "pdf") {
+        setMediaPreview({ entry, url, kind: "pdf" });
+      } else if (format === "txt" || format === "md" || format === "csv") {
+        const text = (await blob.text()).slice(0, 100_000);
+        setMediaPreview({ entry, url, kind: "text", text });
+      } else {
+        setMediaPreview({ entry, url, kind: "other" });
+      }
+    } finally {
+      setMediaPreviewBusy("");
+    }
+  };
+
+  const closeMediaPreview = () => {
+    setMediaPreview((current) => {
+      if (current) URL.revokeObjectURL(current.url);
+      return null;
+    });
   };
 
   const uploadMedia = async (file: File) => {
@@ -2122,6 +2172,14 @@ export default function ConsolePage() {
                       )}
                     </div>
                     <div className="flag-actions">
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        disabled={mediaPreviewBusy === entry.publicId}
+                        onClick={() => void previewMedia(entry)}
+                      >
+                        {mediaPreviewBusy === entry.publicId ? "Loading…" : "Preview"}
+                      </button>
                       <button type="button" className="btn btn-ghost" onClick={() => void downloadMedia(entry)}>
                         Download
                       </button>
@@ -2808,6 +2866,47 @@ export default function ConsolePage() {
                 disabled={creating || !createEmail.trim() || !createPassword}
               >
                 {creating ? "Creating…" : "Create account"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mediaPreview && (
+        <div className="modal-wrap" role="dialog" aria-modal="true" aria-label="File preview">
+          <div className="modal media-preview-modal">
+            <h2 title={mediaPreview.entry.publicId}>
+              {mediaPreview.entry.publicId.split("/").pop()}
+            </h2>
+            <p className="muted small">
+              {mediaPreview.entry.resourceType} · {mediaPreview.entry.deliveryType} ·{" "}
+              {bytes(mediaPreview.entry.bytes)}
+            </p>
+            <div className="media-preview-body">
+              {mediaPreview.kind === "image" && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={mediaPreview.url} alt="" />
+              )}
+              {mediaPreview.kind === "pdf" && (
+                <iframe src={mediaPreview.url} title="PDF preview" />
+              )}
+              {mediaPreview.kind === "text" && <pre>{mediaPreview.text}</pre>}
+              {mediaPreview.kind === "other" && (
+                <p className="muted">
+                  This file type can’t be rendered here — use Download to open it.
+                </p>
+              )}
+            </div>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => void downloadMedia(mediaPreview.entry)}
+              >
+                Download
+              </button>
+              <button type="button" className="btn" onClick={closeMediaPreview}>
+                Close
               </button>
             </div>
           </div>

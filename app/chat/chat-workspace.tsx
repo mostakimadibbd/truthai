@@ -1348,13 +1348,24 @@ export default function ChatWorkspace() {
     const validFiles: File[] = [];
     let totalBytes = pendingAttachments.reduce((total, item) => total + item.size, 0);
     let validationMessage = "";
+    // One picked file must upload exactly once: skip exact
+    // duplicates inside this batch (a picker/drop double-fire
+    // can deliver the same file twice) and files that are
+    // already attached to this message under the same name and
+    // size.
+    const seenFileKeys = new Set(
+      pendingAttachments.map((item) => `${item.name}:${item.size}`),
+    );
     for (const file of files.slice(0, slots)) {
+      const fileKey = `${file.name}:${file.size}`;
+      if (seenFileKeys.has(fileKey)) continue;
       const extension = file.name.split(".").at(-1)?.toLowerCase();
       const accepted = ACCEPTED_FILE_TYPES.split(",").includes(`.${extension}`);
       if (!accepted || file.size < 1 || file.size > MAX_FILE_SIZE) {
         validationMessage = "Use an image, PDF, TXT, Markdown, or CSV file no larger than 10 MB.";
         continue;
       }
+      seenFileKeys.add(fileKey);
       if (totalBytes + file.size > MAX_FILE_BYTES_PER_MESSAGE) {
         validationMessage = "Files in one message can total no more than 20 MB.";
         continue;
@@ -1513,6 +1524,24 @@ export default function ChatWorkspace() {
               throw new Error("The uploaded file didn’t match its verified metadata.");
             }
             attachmentValue = fallbackAttachment;
+            // The direct-to-Cloudinary attempt may already have
+            // stored a copy before its confirmation failed —
+            // delete that orphan (asset + record) so one picked
+            // file leaves exactly one stored copy. Best-effort
+            // and fire-and-forget: the delete route refuses
+            // anything already attached to a message, and the
+            // fallback copy above is the one this message will
+            // reference.
+            if (assetId && assetId !== fallbackAttachment.id) {
+              const orphanAssetId = assetId;
+              void fetch(`/api/uploads/${encodeURIComponent(orphanAssetId)}`, {
+                method: "DELETE",
+                headers: {
+                  Authorization: `Bearer ${idToken}`,
+                  "X-Requested-With": "xyro",
+                },
+              }).catch(() => undefined);
+            }
           }
           if (!attachmentValue) {
             throw new Error("The uploaded file couldn’t be verified.");

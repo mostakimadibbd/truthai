@@ -157,11 +157,26 @@ export async function POST(request: NextRequest) {
     const deliveryType = getValue(resource, "type");
     const format = getValue(resource, "format");
     const bytes = getValue(resource, "bytes");
+    // Cloudinary reports format as null for RAW assets — the
+    // extension lives in the public id itself (…asset.pdf) — so
+    // a raw upload can NEVER satisfy format === upload.format.
+    // That one check failed every document confirmation, which
+    // made the client retry through the server fallback and
+    // stored every PDF/TXT/MD/CSV twice (2026-11-19). For raw,
+    // accept Cloudinary's null (or a matching) format and pin
+    // the extension carried in the public id instead; images
+    // keep the strict format equality.
+    const formatMatches =
+      upload.resourceType === "raw"
+        ? (format === null || format === undefined || format === upload.format) &&
+          typeof actualPublicId === "string" &&
+          actualPublicId.endsWith(`.${upload.format}`)
+        : format === upload.format;
     if (
       actualPublicId !== upload.publicId ||
       actualResourceType !== upload.resourceType ||
       deliveryType !== "authenticated" ||
-      format !== upload.format ||
+      !formatMatches ||
       typeof bytes !== "number" ||
       bytes !== upload.expectedBytes ||
       bytes < 1 ||
