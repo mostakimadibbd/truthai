@@ -1211,6 +1211,9 @@ def get_users(db, viewer_uid: str, viewer_role: str, query: str = "") -> dict:
                 or (profile.get("photoURL") if isinstance(profile.get("photoURL"), str) else None),
                 "emailVerified": bool(record.email_verified),
                 "disabled": bool(record.disabled),
+                "suspendedUntil": profile.get("suspendedUntil")
+                if isinstance(profile.get("suspendedUntil"), (int, float))
+                else None,
                 "admin": role is not None,
                 "role": role,
                 "createdAt": getattr(metadata, "creation_timestamp", None),
@@ -1265,6 +1268,8 @@ ACTIONS = (
     "verify-email",
     "unverify-email",
     "revoke-api-keys",
+    "suspend",
+    "unsuspend",
 )
 
 
@@ -1636,6 +1641,18 @@ def get_user_detail(db, uid: str) -> dict:
         or (profile.get("displayName") if isinstance(profile.get("displayName"), str) else None),
         "emailVerified": bool(record.email_verified),
         "disabled": bool(record.disabled),
+        "suspendedUntil": profile.get("suspendedUntil")
+        if isinstance(profile.get("suspendedUntil"), (int, float))
+        else None,
+        "suspendedAt": profile.get("suspendedAt")
+        if isinstance(profile.get("suspendedAt"), (int, float))
+        else None,
+        "suspendedBy": profile.get("suspendedBy")
+        if isinstance(profile.get("suspendedBy"), str)
+        else None,
+        "suspendReason": profile.get("suspendReason")
+        if isinstance(profile.get("suspendReason"), str)
+        else None,
         "role": _registry_role(db, uid),
         "providers": providers,
         "createdAt": getattr(metadata, "creation_timestamp", None),
@@ -1672,6 +1689,56 @@ def revoke_user_api_keys(db, uid: str) -> int:
             keys_ref.document(doc.id).set({"revoked": True}, merge=True)
             revoked += 1
     return revoked
+
+
+def suspend_user(db, uid: str, *, hours: int, reason: str, actor_uid: str) -> int:
+    """Suspend an account for a fixed time. The suspension is a
+    deadline stored on the profile (suspendedUntil, epoch ms);
+    the account restores ITSELF when the deadline passes — the
+    app's session gate stops refusing and clears the record on
+    the next sign-in, and the API gate compares the same
+    deadline. No cron, no manual lift needed (an admin can
+    still lift it early with the unsuspend action).
+
+    Suspending also ends every live session immediately:
+    Firebase refresh tokens are revoked, and the app-session
+    validAfter watermark (the same Upstash key the TS
+    sign-out-all sets) is bumped, so existing session cookies
+    fail their very next request. Returns the deadline."""
+    now_ms = int(time.time() * 1000)
+    until = now_ms + hours * 3600 * 1000
+    db.collection("users").document(uid).set(
+        {
+            "suspendedUntil": until,
+            "suspendedAt": now_ms,
+            "suspendedBy": actor_uid,
+            "suspendReason": (reason or "")[:200],
+        },
+        merge=True,
+    )
+    try:
+        firebase_auth().revoke_refresh_tokens(uid)
+    except Exception:
+        pass
+    try:
+        _upstash_command("set", f"validAfter:{uid}", str(now_ms))
+    except Exception:
+        pass
+    return until
+
+
+def unsuspend_user(db, uid: str) -> None:
+    """Lift a suspension early (the deadline passing lifts it
+    automatically; this is only for admin mercy)."""
+    db.collection("users").document(uid).set(
+        {
+            "suspendedUntil": None,
+            "suspendedAt": None,
+            "suspendedBy": None,
+            "suspendReason": None,
+        },
+        merge=True,
+    )
 
 
 def purge_user_api_keys(db, uid: str) -> None:
@@ -1748,6 +1815,8 @@ def patch_user(
     target_uid: str,
     action: str,
     owner_secret_value: str | None = None,
+    duration_hours: int | None = None,
+    suspend_reason: str = "",
 ) -> dict:
     if action not in ACTIONS:
         raise AdminAuthError(400, "INVALID_ACTION", "A valid action is required.")
@@ -1911,6 +1980,41 @@ def patch_user(
                 "Only the owner can revoke an admin’s or the owner’s API keys.",
             )
         result["revokedKeys"] = revoke_user_api_keys(db, target_uid)
+    elif action in ("suspend", "unsuspend"):
+        # Timed suspension. The owner's account can never be
+        # suspended; suspending an admin's account is the
+        # owner's power alone; nobody suspends themselves.
+        if target_role == "owner":
+            raise AdminAuthError(
+                400, "OWNER_PROTECTED", "The owner’s account can’t be suspended."
+            )
+        if target_role == "admin" and actor_role != "owner":
+            raise AdminAuthError(
+                403,
+                "OWNER_ONLY",
+                "Only the owner can suspend an admin’s account.",
+            )
+        if target_uid == actor_uid:
+            raise AdminAuthError(
+                400, "SELF_ACTION", "You can’t suspend your own account."
+            )
+        if action == "suspend":
+            hours = duration_hours if isinstance(duration_hours, int) else 0
+            if hours < 1 or hours > 24 * 30:
+                raise AdminAuthError(
+                    400,
+                    "INVALID_DURATION",
+                    "Choose a suspension length between 1 hour and 30 days.",
+                )
+            result["suspendedUntil"] = suspend_user(
+                db,
+                target_uid,
+                hours=hours,
+                reason=suspend_reason,
+                actor_uid=actor_uid,
+            )
+        else:
+            unsuspend_user(db, target_uid)
     else:
         if target_role in ("owner", "admin") and actor_role != "owner":
             raise AdminAuthError(

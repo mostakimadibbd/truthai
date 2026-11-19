@@ -6,6 +6,7 @@ import {
   deleteCloudinaryResource,
   getCloudinaryPrivateDownloadUrl,
   getCloudinaryResource,
+  ownFileAccessUrl,
   type CloudinaryResourceType,
 } from "@/lib/server/cloudinary";
 import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
@@ -137,11 +138,7 @@ export async function POST(request: NextRequest) {
             name: upload.name,
             mimeType: upload.mimeType,
             size: upload.bytes,
-            accessUrl: getCloudinaryPrivateDownloadUrl(
-              upload.publicId,
-              upload.format,
-              upload.resourceType as CloudinaryResourceType,
-            ),
+            accessUrl: ownFileAccessUrl(upload.publicId, assetId),
           },
         },
         { headers: { "Cache-Control": "no-store" } },
@@ -227,11 +224,7 @@ export async function POST(request: NextRequest) {
       confirmedAt: Timestamp.now(),
     });
     await recordBudget({ firestoreWrites: 1, firestoreReads: 1, redisCommands: 4 });
-    const accessUrl = getCloudinaryPrivateDownloadUrl(
-      upload.publicId,
-      upload.format,
-      upload.resourceType as CloudinaryResourceType,
-    );
+    const accessUrl = ownFileAccessUrl(upload.publicId, assetId);
     return NextResponse.json(
       {
         attachment: {

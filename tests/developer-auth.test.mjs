@@ -28,6 +28,12 @@ test("apiKeyAuthError maps every refusal reason to its outward error", () => {
     code: "account_disabled",
     message: "This account is disabled.",
   });
+  assert.deepEqual(apiKeyAuthError("account_suspended"), {
+    status: 403,
+    code: "account_suspended",
+    message:
+      "This account is temporarily suspended. API access resumes automatically when the suspension ends.",
+  });
   assert.equal(apiKeyAuthError("email_not_verified").status, 403);
   assert.equal(apiKeyAuthError("email_not_verified").code, "email_not_verified");
   assert.deepEqual(apiKeyAuthError("account_unavailable"), {
@@ -54,6 +60,21 @@ test("authenticateApiKey enforces key, profile and account state", () => {
   assert.match(source, /email_not_verified/);
   // A deleted account's key reads as invalid, not as a 503.
   assert.match(source, /auth\/user-not-found/);
+  // A suspended account's keys are refused until the deadline
+  // passes (timed suspension restores itself automatically).
+  assert.match(source, /account_suspended/);
+  assert.match(source, /suspendedUntil/);
+});
+
+test("the session gate refuses suspended accounts and clears expired ones", () => {
+  const source = readFileSync(
+    new URL("../app/api/auth/session/route.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /ACCOUNT_SUSPENDED/);
+  assert.match(source, /suspendedUntil/);
+  // Expired suspensions are wiped by the sign-in upsert.
+  assert.match(source, /profile\.suspendedUntil = FieldValue\.delete\(\)/);
 });
 
 test("every /api/v1 route authenticates through the strict gate", () => {

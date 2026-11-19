@@ -172,6 +172,29 @@ export async function POST(request: NextRequest) {
     }
 
     const existingData = existing.data();
+
+    // Timed suspension (admin panel): while suspendedUntil is
+    // in the future, no session is issued or renewed — the
+    // account is simply off, for exactly as long as the admin
+    // chose. The moment the time passes, the account comes
+    // back ON ITS OWN: the check below stops matching and the
+    // stale suspension fields are cleared by the upsert.
+    const suspendedRaw = existingData?.suspendedUntil;
+    const suspendedUntilMs =
+      typeof suspendedRaw === "number"
+        ? suspendedRaw
+        : suspendedRaw &&
+            typeof suspendedRaw.toMillis === "function"
+          ? suspendedRaw.toMillis()
+          : 0;
+    if (suspendedUntilMs > Date.now()) {
+      return authErrorResponse(
+        403,
+        "ACCOUNT_SUSPENDED",
+        `This account is suspended until ${new Date(suspendedUntilMs).toUTCString()}. It will be restored automatically after that time.`,
+      );
+    }
+
     const lastSignInAt =
       existingData?.lastSignInAt &&
       typeof existingData.lastSignInAt.toMillis === "function"
@@ -184,6 +207,14 @@ export async function POST(request: NextRequest) {
       photoURL: user.photoURL ?? "",
       updatedAt: FieldValue.serverTimestamp(),
     };
+    if (suspendedUntilMs > 0) {
+      // Expired suspension: clear the record as part of this
+      // sign-in, so the account's slate is clean again.
+      profile.suspendedUntil = FieldValue.delete();
+      profile.suspendedAt = FieldValue.delete();
+      profile.suspendedBy = FieldValue.delete();
+      profile.suspendReason = FieldValue.delete();
+    }
     if (!existing.exists) {
       profile.createdAt = FieldValue.serverTimestamp();
     }

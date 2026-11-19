@@ -395,6 +395,25 @@ export function getCloudinaryPrivateDownloadUrl(
 }
 
 /**
+ * The ONLY file URL shape a browser ever sees (owner
+ * requirement, 2026-11-19): our own domain, never a Cloudinary
+ * link. Cloudinary-backed assets are streamed by
+ * /api/files/[assetId], which re-checks the session and
+ * ownership before fetching the bytes server-side — so no
+ * signed Cloudinary URL is ever handed to a client, and a
+ * copied link is useless without the owner's session. Blob
+ * assets keep their /api/media URL (same our-domain rule).
+ * getCloudinaryPrivateDownloadUrl above remains strictly for
+ * server-side fetches (verification, model input, streaming).
+ */
+export function ownFileAccessUrl(publicId: string, assetId: string): string {
+  if (isBlobPublicId(publicId)) {
+    return `/api/media/${blobIdFromPublicId(publicId)}`;
+  }
+  return `/api/files/${assetId}`;
+}
+
+/**
  * Uploads a profile avatar (Phase 3). Unlike chat attachments, avatars
  * are public profile pictures, so they use delivery type "upload"
  * under xyro/avatars/{uid} with a random public id, overwrite +

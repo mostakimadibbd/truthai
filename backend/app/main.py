@@ -894,6 +894,8 @@ async def admin_users_patch(request: Request):
         return _error(400, "INVALID_ACTION", "A target user and action are required.")
     try:
         provided_secret = body.get("ownerSecret")
+        duration = body.get("durationHours")
+        reason = body.get("reason")
         result = admin.patch_user(
             firestore_client(),
             actor_uid,
@@ -902,6 +904,10 @@ async def admin_users_patch(request: Request):
             target,
             action,
             owner_secret_value=provided_secret if isinstance(provided_secret, str) else None,
+            duration_hours=duration
+            if isinstance(duration, int) and not isinstance(duration, bool)
+            else None,
+            suspend_reason=reason if isinstance(reason, str) else "",
         )
     except admin.AdminAuthError as error:
         return _error(error.status, error.code, error.message)

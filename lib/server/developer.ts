@@ -458,6 +458,7 @@ export type ApiKeyAuthFailure =
   | "invalid_key"
   | "developer_access_revoked"
   | "account_disabled"
+  | "account_suspended"
   | "email_not_verified"
   | "account_unavailable";
 
@@ -477,6 +478,13 @@ export function apiKeyAuthError(reason: ApiKeyAuthFailure): {
         status: 403,
         code: "account_disabled",
         message: "This account is disabled.",
+      };
+    case "account_suspended":
+      return {
+        status: 403,
+        code: "account_suspended",
+        message:
+          "This account is temporarily suspended. API access resumes automatically when the suspension ends.",
       };
     case "email_not_verified":
       return {
@@ -544,6 +552,19 @@ export async function authenticateApiKey(
   // admin, or account-deletion cleanup) — the key dies with it.
   const profile = await getDeveloperProfile(uid).catch(() => null);
   if (!profile) return { ok: false, reason: "developer_access_revoked" };
+  // Timed suspension (admin panel): while suspendedUntil is in
+  // the future the account — and therefore its keys — is off.
+  // It restores itself automatically when the time passes;
+  // nothing needs to be lifted by hand.
+  const userSnapshot = await db()
+    .collection("users")
+    .doc(uid)
+    .get()
+    .catch(() => null);
+  const suspendedUntil = userSnapshot?.data()?.suspendedUntil;
+  if (typeof suspendedUntil === "number" && suspendedUntil > Date.now()) {
+    return { ok: false, reason: "account_suspended" };
+  }
   // Account state: keys only work for existing, enabled,
   // email-verified accounts — the same bar as the app itself.
   try {

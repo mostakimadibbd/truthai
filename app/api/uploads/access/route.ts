@@ -1,8 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  getCloudinaryPrivateDownloadUrl,
-  type CloudinaryResourceType,
-} from "@/lib/server/cloudinary";
+import { ownFileAccessUrl } from "@/lib/server/cloudinary";
 import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
 import { limitDeniedResponse, limit as rateLimit } from "@/lib/server/limit";
 import { authenticateVerifiedUser } from "@/lib/server/request-auth";
@@ -22,7 +19,7 @@ export async function GET(request: NextRequest) {
   const auth = await authenticateVerifiedUser(request);
   if (!auth.ok) return errorResponse(auth.status, auth.code, auth.message);
 
-  // Phase 4: signed-URL minting is capped at 60 per user per hour.
+  // Phase 4: access-link minting is capped at 60 per user per hour.
   // This is a cheap read, so the limiter fails open (with a warning)
   // when Redis is unreachable; when Redis is unconfigured the check
   // is skipped, as with the other limiters. (The brief lists this
@@ -63,18 +60,15 @@ export async function GET(request: NextRequest) {
       return errorResponse(404, "FILE_NOT_FOUND", "This file is unavailable.");
     }
 
+    // Our own link, never a Cloudinary URL: /api/files/[assetId]
+    // re-checks the session and ownership, then streams the
+    // bytes from our domain.
     return NextResponse.json(
-      {
-        accessUrl: getCloudinaryPrivateDownloadUrl(
-          data.publicId,
-          data.format,
-          data.resourceType as CloudinaryResourceType,
-        ),
-      },
+      { accessUrl: ownFileAccessUrl(data.publicId, assetId) },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
-    console.error("Couldn’t create a temporary Cloudinary file link.", error);
+    console.error("Couldn’t create a file access link.", error);
     return errorResponse(503, "FILE_ACCESS_UNAVAILABLE", "This file is temporarily unavailable.");
   }
 }

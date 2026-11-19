@@ -2232,6 +2232,79 @@ def test_admin_api_key_revocation_and_purge():
         admin.firebase_auth = original_auth
 
 
+def test_admin_timed_suspension():
+    """Timed suspension: a deadline lands on the profile (the
+    app/API gates restore the account automatically when it
+    passes); the owner can never be suspended, a plain admin
+    can't suspend another admin, a bad duration is refused, and
+    unsuspend clears the record."""
+    import time as _time
+
+    from app import admin
+
+    db = _AdminDb()
+    db.store[("admins", "boss1")] = {"role": "owner", "grantedBy": "boss1"}
+    db.store[("admins", "emp1")] = {"role": "admin", "grantedBy": "boss1"}
+    db.store[("users", "dev1")] = {"displayName": "Dev"}
+    records = {
+        "dev1": _FakeUserRecord("dev1", "dev@example.com"),
+        "emp1": _FakeUserRecord("emp1", "emp@example.com"),
+        "boss1": _FakeUserRecord("boss1", "boss@example.com"),
+    }
+    fake_auth = _FakeAuthModule(records)
+    original_auth = admin.firebase_auth
+    admin.firebase_auth = lambda: fake_auth
+    try:
+        before = int(_time.time() * 1000)
+        result = admin.patch_user(
+            db, "emp1", "admin", "emp@example.com", "dev1", "suspend",
+            duration_hours=24, suspend_reason="safety flags",
+        )
+        until = result["suspendedUntil"]
+        assert before + 23 * 3600 * 1000 < until <= before + 25 * 3600 * 1000
+        profile = db.store[("users", "dev1")]
+        assert profile["suspendedUntil"] == until
+        assert profile["suspendReason"] == "safety flags"
+        assert profile["suspendedBy"] == "emp1"
+
+        # A plain admin can't suspend another admin…
+        try:
+            admin.patch_user(
+                db, "emp1", "admin", "emp@example.com", "emp1", "suspend",
+                duration_hours=1,
+            )
+            raise AssertionError("admin suspended an admin")
+        except admin.AdminAuthError as error:
+            assert error.code in ("OWNER_ONLY", "SELF_ACTION")
+        # …nobody suspends the owner…
+        try:
+            admin.patch_user(
+                db, "boss1", "owner", "boss@example.com", "boss1", "suspend",
+                duration_hours=1,
+            )
+            raise AssertionError("owner was suspended")
+        except admin.AdminAuthError as error:
+            assert error.code == "OWNER_PROTECTED"
+        # …and a missing/zero duration is refused.
+        try:
+            admin.patch_user(
+                db, "emp1", "admin", "emp@example.com", "dev1", "suspend",
+            )
+            raise AssertionError("suspend without duration succeeded")
+        except admin.AdminAuthError as error:
+            assert error.code == "INVALID_DURATION"
+
+        # Unsuspend clears the record.
+        admin.patch_user(
+            db, "emp1", "admin", "emp@example.com", "dev1", "unsuspend"
+        )
+        profile = db.store[("users", "dev1")]
+        assert profile["suspendedUntil"] is None
+        assert profile["suspendReason"] is None
+    finally:
+        admin.firebase_auth = original_auth
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):

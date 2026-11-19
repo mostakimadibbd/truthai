@@ -103,6 +103,7 @@ type UserRow = {
   photoUrl?: string | null;
   emailVerified: boolean;
   disabled: boolean;
+  suspendedUntil?: number | null;
   admin: boolean;
   role: "owner" | "admin" | null;
   createdAt: number | null;
@@ -120,6 +121,10 @@ type UserDetail = {
   displayName: string | null;
   emailVerified: boolean;
   disabled: boolean;
+  suspendedUntil?: number | null;
+  suspendedAt?: number | null;
+  suspendedBy?: string | null;
+  suspendReason?: string | null;
   role: "owner" | "admin" | null;
   providers: string[];
   createdAt: number | null;
@@ -264,7 +269,7 @@ type ChatMessageRow = {
   provider: string | null;
   createdAt: number | null;
 };
-type ActionKind = "promote" | "demote" | "disable" | "enable" | "delete" | "sign-out-all" | "verify-email" | "unverify-email" | "revoke-api-keys";
+type ActionKind = "promote" | "demote" | "disable" | "enable" | "delete" | "sign-out-all" | "verify-email" | "unverify-email" | "revoke-api-keys" | "unsuspend";
 
 /** Actions the backend only performs for the owner AND with the
  * owner secret — the panel collects it in the confirm modal. */
@@ -606,6 +611,12 @@ export default function ConsolePage() {
   const [userSort, setUserSort] = useState<UserSort>("tokens");
   const [logFilter, setLogFilter] = useState<"all" | LogEntry["kind"]>("all");
   const [pending, setPending] = useState<{ uid: string; action: ActionKind; label: string; email?: string | null } | null>(null);
+  const [suspendTarget, setSuspendTarget] = useState<{ uid: string; email: string | null } | null>(null);
+  const [suspendHours, setSuspendHours] = useState(24);
+  const [suspendReason, setSuspendReason] = useState("");
+  const [suspendBusy, setSuspendBusy] = useState(false);
+  const [suspendError, setSuspendError] = useState("");
+  const [pinnedChatId, setPinnedChatId] = useState<string | null>(null);
   // Step-up confirmation state for privilege changes: the owner
   // types the target's email (grants) and the owner secret (all
   // gated actions) before anything is sent.
@@ -930,6 +941,7 @@ export default function ConsolePage() {
     [user],
   );
 
+
   const openDbCollection = useCallback(
     (path: string) => {
       setDbPath(path);
@@ -1123,6 +1135,7 @@ export default function ConsolePage() {
     [user, openChatId],
   );
 
+
   const loadStorageTrash = useCallback(async () => {
     if (!user) return;
     try {
@@ -1191,6 +1204,7 @@ export default function ConsolePage() {
       setDetailUid(uid);
       setDetail(null);
       setOpenChatId(null);
+      setPinnedChatId(null);
       setChatMessages([]);
       setResetLink(null);
       setDetailError("");
@@ -1210,6 +1224,70 @@ export default function ConsolePage() {
     },
     [user],
   );
+
+  // From a safety flag: open the account and pin the flagged
+  // chat open with its messages loaded, so the admin reads the
+  // exact conversation that was flagged (the chat may not be
+  // among the drawer's recent six, so it gets its own block).
+  const openFlagChat = useCallback(
+    async (flag: FlagEntry) => {
+      if (!user || !flag.uid || !flag.chatId) return;
+      await openDetail(flag.uid);
+      setPinnedChatId(flag.chatId);
+      setOpenChatId(flag.chatId);
+      setChatLoading(true);
+      setChatMessages([]);
+      try {
+        const res = await panelApi(
+          user,
+          `/api/user-chats?uid=${encodeURIComponent(flag.uid)}&chatId=${encodeURIComponent(flag.chatId)}`,
+        );
+        if (res.ok) {
+          setChatMessages(((await res.json()) as { messages: ChatMessageRow[] }).messages);
+        }
+      } catch {
+        /* best-effort */
+      } finally {
+        setChatLoading(false);
+      }
+    },
+    [user, openDetail],
+  );
+
+  const runSuspend = useCallback(async () => {
+    if (!user || !suspendTarget) return;
+    setSuspendBusy(true);
+    setSuspendError("");
+    try {
+      const response = await panelApi(user, "/api/users", {
+        method: "PATCH",
+        body: {
+          uid: suspendTarget.uid,
+          action: "suspend",
+          durationHours: suspendHours,
+          reason: suspendReason.trim(),
+        },
+      });
+      if (!response.ok) {
+        throw new Error(await apiErrorMessage(response, "The suspension couldn’t be applied."));
+      }
+      const payload = (await response.json().catch(() => null)) as { suspendedUntil?: number } | null;
+      setSuspendTarget(null);
+      setSuspendReason("");
+      setToast(
+        payload?.suspendedUntil
+          ? `Account suspended until ${dateTime(payload.suspendedUntil)} — it restores automatically after that.`
+          : "Account suspended — it restores automatically when the time ends.",
+      );
+      window.setTimeout(() => setToast(""), 4500);
+      await loadCore();
+      if (detailUid) void openDetail(detailUid);
+    } catch (error) {
+      setSuspendError(error instanceof Error ? error.message : "The suspension couldn’t be applied.");
+    } finally {
+      setSuspendBusy(false);
+    }
+  }, [user, suspendTarget, suspendHours, suspendReason, loadCore, detailUid, openDetail]);
 
   // Fresh confirmation fields for every new pending action —
   // keyed on the action's identity, not the object, so a
@@ -1257,7 +1335,9 @@ export default function ConsolePage() {
                       ? "Email marked as unverified."
                       : done.action === "revoke-api-keys"
                         ? "All API keys revoked — they can no longer reach the API."
-                        : "Account deleted — a snapshot was saved to the trash archive.",
+                        : done.action === "unsuspend"
+                          ? "Suspension lifted — the account can sign in again."
+                          : "Account deleted — a snapshot was saved to the trash archive.",
       );
       window.setTimeout(() => setToast(""), 4500);
       await loadCore();
@@ -1433,6 +1513,9 @@ export default function ConsolePage() {
     totals && totals.totalTokens > 0 ? Math.round((totals.promptTokens / totals.totalTokens) * 100) : 0;
   const secondsAgo = updatedAt ? Math.max(0, Math.round((nowTick - updatedAt) / 1000)) : null;
   const detailRow = detailUid ? users.find((row) => row.uid === detailUid) : undefined;
+  const detailSuspended = Boolean(
+    detail?.suspendedUntil != null && detail.suspendedUntil > Date.now(),
+  );
 
   if (state === "loading") {
     return (
@@ -1988,6 +2071,10 @@ export default function ConsolePage() {
                         <td>
                           {row.disabled ? (
                             <span className="pill bad">disabled</span>
+                          ) : row.suspendedUntil && row.suspendedUntil > Date.now() ? (
+                            <span className="pill warn" title={`Suspended until ${dateTime(row.suspendedUntil)}`}>
+                              suspended
+                            </span>
                           ) : row.emailVerified ? (
                             <span className="pill ok">verified</span>
                           ) : (
@@ -2070,9 +2157,11 @@ export default function ConsolePage() {
             <p className="muted small">
               Accounts are flagged silently when a message matches a harmful-request
               pattern or the model refuses on safety grounds. The user is never told
-              and keeps using Xyro normally — review the prompt, open the account or
-              the chat, then dismiss the flag or mark it actioned and use the user
-              controls (disable / delete) if the behaviour warrants it.
+              and keeps using Xyro normally — read the flagged message, use View chat
+              to see the whole conversation for context, then dismiss the flag or mark
+              it actioned. From the account you can suspend them for a set time (they
+              come back automatically), revoke their API keys, or disable / delete
+              the account if the behaviour warrants it.
             </p>
             {flagsLoading && <p className="muted small">Loading safety flags…</p>}
             {flagsError && (
@@ -2091,7 +2180,8 @@ export default function ConsolePage() {
                     <span className={`flag-chip ${flag.category}`}>{flag.category}</span>
                     <span className="flag-chip signal">{flag.signal === "model_refusal" ? "model refused" : "prompt pattern"}</span>
                     <span className={`flag-chip status-${flag.status}`}>{flag.status}</span>
-                    <span className="muted small">{flag.ts ? time(flag.ts) : ""}</span>
+                    {flag.model && <span className="flag-chip signal">{flag.model}</span>}
+                    <span className="muted small">{flag.ts ? dateTime(flag.ts) : ""}</span>
                   </div>
                   <p className="flag-prompt">“{flag.prompt}”</p>
                   <div className="flag-actions">
@@ -2102,6 +2192,15 @@ export default function ConsolePage() {
                     >
                       {flag.email ?? flag.uid}
                     </button>
+                    {flag.chatId && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => void openFlagChat(flag)}
+                      >
+                        View chat
+                      </button>
+                    )}
                     {flag.status === "pending" && (
                       <>
                         <button
@@ -2696,23 +2795,79 @@ export default function ConsolePage() {
 
             {detail && (
               <>
+                <div className="pill-row">
+                  {detail.emailVerified ? (
+                    <span className="pill ok">email verified</span>
+                  ) : (
+                    <span className="pill warn">email unverified</span>
+                  )}
+                  {detail.disabled ? (
+                    <span className="pill bad">disabled</span>
+                  ) : detailSuspended ? (
+                    <span className="pill warn">
+                      suspended until {dateTime(detail.suspendedUntil as number)}
+                    </span>
+                  ) : (
+                    <span className="pill ok">active</span>
+                  )}
+                  {detail.developer && <span className="pill">developer API</span>}
+                </div>
+
                 <div className="stat-grid">
                   <div><span>Joined</span><strong>{date(detail.createdAt)}</strong></div>
                   <div><span>Last sign-in</span><strong>{date(detail.lastSignInAt)}</strong></div>
                   <div><span>Email</span><strong>{detail.emailVerified ? "Verified" : "Unverified"}</strong></div>
-                  <div><span>State</span><strong>{detail.disabled ? "Disabled" : "Active"}</strong></div>
+                  <div><span>State</span><strong>{detail.disabled ? "Disabled" : detailSuspended ? "Suspended" : "Active"}</strong></div>
                   <div><span>Sign-in via</span><strong>{detail.providers.join(", ") || "password"}</strong></div>
                   <div><span>Developer</span><strong>{detail.developer ? "API active" : "—"}</strong></div>
                   <div><span>Lifetime tokens</span><strong>{compact.format(detail.lifetime.totalTokens)}</strong></div>
                   <div><span>Lifetime requests</span><strong>{detail.lifetime.requests.toLocaleString("en-US")}</strong></div>
                 </div>
 
+                {detailSuspended && (
+                  <div className="alert" role="status">
+                    Suspended until {dateTime(detail.suspendedUntil as number)}
+                    {detail.suspendReason ? <> — “{detail.suspendReason}”</> : ""}. The
+                    account restores automatically when the time ends; use Lift
+                    suspension in Controls to end it now.
+                  </div>
+                )}
+
                 <h3>Last 7 days</h3>
                 <WeekBars week={detail.week} field="totalTokens" />
 
                 <h3>Chats · {detail.chats.count}</h3>
                 <p className="muted small">Tap a chat to read its messages. Chat views are recorded in the audit log.</p>
-                {detail.chats.recent.length === 0 && <p className="muted small">No chats yet.</p>}
+                {detail.chats.recent.length === 0 && !pinnedChatId && <p className="muted small">No chats yet.</p>}
+                {pinnedChatId && !detail.chats.recent.some((chat) => chat.id === pinnedChatId) && (
+                  <div>
+                    <button
+                      type="button"
+                      className="mini-row chat-open-row"
+                      onClick={() => void loadChatMessages(detail.uid, pinnedChatId)}
+                    >
+                      <span>🚩 Flagged chat</span>
+                      <span className="muted small">{openChatId === pinnedChatId ? "hide" : "show"}</span>
+                    </button>
+                    {openChatId === pinnedChatId && (
+                      <div className="chat-thread">
+                        {chatLoading && <p className="muted small">Loading messages…</p>}
+                        {!chatLoading && chatMessages.length === 0 && (
+                          <p className="muted small">No messages in this chat.</p>
+                        )}
+                        {chatMessages.map((message) => (
+                          <div key={message.id} className={`chat-msg ${message.role}`}>
+                            <span className="chat-msg-role">
+                              {message.role}
+                              {message.provider ? ` · via ${message.provider}` : ""}
+                            </span>
+                            <p>{message.content || <em className="muted">(no text)</em>}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
                 {detail.chats.recent.map((chat) => (
                   <div key={chat.id}>
                     <button
@@ -2825,6 +2980,19 @@ export default function ConsolePage() {
                       Revoke all API keys
                     </button>
                   )}
+                  {detailSuspended ? (
+                    <button type="button" className="btn" disabled={acting}
+                      onClick={() => setPending({ uid: detail.uid, action: "unsuspend", label: `Lift the suspension on ${detail.email ?? detail.uid} now? They’ll be able to sign in again immediately.` })}>
+                      Lift suspension
+                    </button>
+                  ) : (
+                    !detail.disabled && detail.role !== "owner" && (
+                      <button type="button" className="btn" disabled={acting}
+                        onClick={() => { setSuspendTarget({ uid: detail.uid, email: detail.email }); setSuspendHours(24); setSuspendReason(""); setSuspendError(""); }}>
+                        Suspend account…
+                      </button>
+                    )
+                  )}
                   <button type="button" className="btn" disabled={acting} onClick={() => void runResetLink(detail.uid)}>
                     Password reset link
                   </button>
@@ -2917,6 +3085,53 @@ export default function ConsolePage() {
                 disabled={creating || !createEmail.trim() || !createPassword}
               >
                 {creating ? "Creating…" : "Create account"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {suspendTarget && (
+        <div className="modal-wrap" role="dialog" aria-modal="true" aria-label="Suspend account">
+          <div className="modal">
+            <h2>Suspend account</h2>
+            <p className="muted">
+              {suspendTarget.email ?? suspendTarget.uid} will be signed out everywhere
+              and won’t be able to sign in, chat or use the API until the suspension
+              ends. When the time is up the account comes back automatically — no
+              manual step needed.
+            </p>
+            <label className="modal-field">
+              <span>Duration</span>
+              <select
+                value={suspendHours}
+                onChange={(event) => setSuspendHours(Number(event.target.value))}
+              >
+                <option value={1}>1 hour</option>
+                <option value={6}>6 hours</option>
+                <option value={24}>24 hours</option>
+                <option value={72}>3 days</option>
+                <option value={168}>7 days</option>
+                <option value={720}>30 days</option>
+              </select>
+            </label>
+            <label className="modal-field">
+              <span>Reason (optional — shown on their profile while suspended)</span>
+              <input
+                type="text"
+                value={suspendReason}
+                onChange={(event) => setSuspendReason(event.target.value)}
+                placeholder="e.g. Repeated harmful requests (safety flags)"
+                maxLength={200}
+              />
+            </label>
+            {suspendError && <div className="alert" role="alert">{suspendError}</div>}
+            <div className="modal-actions">
+              <button type="button" className="btn btn-ghost" disabled={suspendBusy} onClick={() => setSuspendTarget(null)}>
+                Cancel
+              </button>
+              <button type="button" className="btn btn-danger" disabled={suspendBusy} onClick={() => void runSuspend()}>
+                {suspendBusy ? "Suspending…" : "Suspend account"}
               </button>
             </div>
           </div>

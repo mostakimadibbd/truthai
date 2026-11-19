@@ -3,7 +3,7 @@ import { Timestamp } from "firebase-admin/firestore";
 import { NextRequest, NextResponse } from "next/server";
 import { guardMutationHeaders } from "@/lib/server/auth-guard";
 import {
-  getCloudinaryPrivateDownloadUrl,
+  ownFileAccessUrl,
   uploadUserFile, cloudinaryErrorMessage } from "@/lib/server/cloudinary";
 import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
 import { validateUploadContent } from "@/lib/server/image-sniff";
@@ -152,11 +152,7 @@ export async function POST(request: NextRequest) {
           name,
           mimeType: spec.mimeType,
           size: uploaded.bytes,
-          accessUrl: getCloudinaryPrivateDownloadUrl(
-            uploaded.publicId,
-            spec.format,
-            spec.resourceType,
-          ),
+          accessUrl: ownFileAccessUrl(uploaded.publicId, assetId),
         },
       },
       { headers: { "Cache-Control": "no-store" } },

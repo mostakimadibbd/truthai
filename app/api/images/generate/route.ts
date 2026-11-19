@@ -5,7 +5,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { guardMutationHeaders } from "@/lib/server/auth-guard";
 import { getBudgetStatus, recordBudget } from "@/lib/server/budget";
 import {
-  getCloudinaryPrivateDownloadUrl,
+  ownFileAccessUrl,
   uploadGeneratedImage, cloudinaryErrorMessage } from "@/lib/server/cloudinary";
 import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
 import { limitDeniedResponse, limit as rateLimit } from "@/lib/server/limit";
@@ -832,7 +832,7 @@ export async function POST(request: NextRequest) {
         generationId,
         model: usedModel,
         messageId: assistantMessageId,
-        accessUrl: getCloudinaryPrivateDownloadUrl(stored.publicId, "png", "image"),
+        accessUrl: ownFileAccessUrl(stored.publicId, assetId),
       },
       { headers: { "Cache-Control": "no-store" } },
     );
