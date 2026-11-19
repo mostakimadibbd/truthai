@@ -58,6 +58,15 @@ type BackendInfo = {
   integrationsOk: boolean;
 };
 
+type DeveloperTotals = {
+  developers: number;
+  activeKeys: number;
+  revokedKeys: number;
+  apiRequestsLifetime: number;
+  apiTokensLifetime: number;
+  apiCostUsdLifetime: number;
+};
+
 type Overview = {
   today: string;
   totals: Totals;
@@ -73,6 +82,7 @@ type Overview = {
   live: { streams: number; generating: number };
   lifetime: Totals;
   lifetimeDays: number;
+  developer?: DeveloperTotals;
   ranges: Partial<
     Record<
       "24h" | "48h",
@@ -254,7 +264,7 @@ type ChatMessageRow = {
   provider: string | null;
   createdAt: number | null;
 };
-type ActionKind = "promote" | "demote" | "disable" | "enable" | "delete" | "sign-out-all" | "verify-email" | "unverify-email";
+type ActionKind = "promote" | "demote" | "disable" | "enable" | "delete" | "sign-out-all" | "verify-email" | "unverify-email" | "revoke-api-keys";
 
 /** Actions the backend only performs for the owner AND with the
  * owner secret — the panel collects it in the confirm modal. */
@@ -1245,7 +1255,9 @@ export default function ConsolePage() {
                     ? "Email marked as verified."
                     : done.action === "unverify-email"
                       ? "Email marked as unverified."
-                      : "Account deleted — a snapshot was saved to the trash archive.",
+                      : done.action === "revoke-api-keys"
+                        ? "All API keys revoked — they can no longer reach the API."
+                        : "Account deleted — a snapshot was saved to the trash archive.",
       );
       window.setTimeout(() => setToast(""), 4500);
       await loadCore();
@@ -1642,6 +1654,39 @@ export default function ConsolePage() {
                   </div>
                 </div>
               )}
+            </section>
+
+            <section className="live-strip">
+              <div className="live-cell">
+                <div>
+                  <strong>{compact.format(overview.developer?.apiRequestsLifetime ?? 0)} API requests</strong>
+                  <span className="muted small">
+                    lifetime · {compact.format(rangeTotals.apiRequests)} in this view
+                  </span>
+                </div>
+              </div>
+              <div className="live-cell">
+                <div>
+                  <strong>{compact.format(overview.developer?.apiTokensLifetime ?? 0)} API tokens</strong>
+                  <span className="muted small">
+                    lifetime · est. {usd(overview.developer?.apiCostUsdLifetime ?? 0)} at list prices
+                  </span>
+                </div>
+              </div>
+              <div className="live-cell">
+                <div>
+                  <strong>{overview.developer?.developers ?? 0} developers</strong>
+                  <span className="muted small">accounts with API access activated</span>
+                </div>
+              </div>
+              <div className="live-cell">
+                <div>
+                  <strong>{overview.developer?.activeKeys ?? 0} active keys</strong>
+                  <span className="muted small">
+                    {overview.developer?.revokedKeys ?? 0} revoked — a revoked key can’t reach the API at all
+                  </span>
+                </div>
+              </div>
             </section>
 
             <div className="grid-2">
@@ -2774,6 +2819,12 @@ export default function ConsolePage() {
                     onClick={() => setPending({ uid: detail.uid, action: "sign-out-all", label: `Sign ${detail.email ?? detail.uid} out on every device? Their current sessions will end.` })}>
                     Sign out everywhere
                   </button>
+                  {detail.apiKeys.some((key) => !key.revoked) && (
+                    <button type="button" className="btn" disabled={acting}
+                      onClick={() => setPending({ uid: detail.uid, action: "revoke-api-keys", label: `Revoke ALL API keys for ${detail.email ?? detail.uid}? Every key stops working immediately — the API will refuse them completely. They can create new keys later unless you also disable the account.` })}>
+                      Revoke all API keys
+                    </button>
+                  )}
                   <button type="button" className="btn" disabled={acting} onClick={() => void runResetLink(detail.uid)}>
                     Password reset link
                   </button>

@@ -551,6 +551,61 @@ def get_overview(db) -> dict:
         issues, "lifetime", load_lifetime, (_totals(None), 0)
     )
 
+    def load_developer() -> dict:
+        # Developer platform totals for the panel's API card, so
+        # the owner sees the whole API surface at a glance: how
+        # many developers, how many keys are live vs revoked,
+        # and the lifetime API traffic. Active keys are counted
+        # from the top-level auth-lookup collection — one doc
+        # per live key, so the document count IS the key count.
+        # The rest needs collection-group scans over the
+        # per-user developer subcollections; capped, cached with
+        # the overview, and fault-isolated like every section.
+        section_data = {
+            "developers": 0,
+            "activeKeys": 0,
+            "revokedKeys": 0,
+            "apiRequestsLifetime": 0,
+            "apiTokensLifetime": 0,
+            "apiCostUsdLifetime": 0.0,
+        }
+        section_data["activeKeys"] = len(db.collection("apiKeys").limit(5000).get())
+        group = getattr(db, "collection_group", None)
+        if callable(group):
+            section_data["developers"] = len(
+                group("developerProfile").limit(5000).get()
+            )
+            revoked = 0
+            for doc in group("apiKeys").limit(5000).get():
+                if (doc.to_dict() or {}).get("revoked") is True:
+                    revoked += 1
+            section_data["revokedKeys"] = revoked
+            for doc in group("apiUsage").limit(5000).get():
+                data = doc.to_dict() or {}
+                for field, target in (
+                    ("requests", "apiRequestsLifetime"),
+                    ("totalTokens", "apiTokensLifetime"),
+                    ("costUsd", "apiCostUsdLifetime"),
+                ):
+                    value = data.get(field)
+                    if isinstance(value, (int, float)):
+                        section_data[target] += value
+        return section_data
+
+    developer = _section(
+        issues,
+        "developer",
+        load_developer,
+        {
+            "developers": 0,
+            "activeKeys": 0,
+            "revokedKeys": 0,
+            "apiRequestsLifetime": 0,
+            "apiTokensLifetime": 0,
+            "apiCostUsdLifetime": 0.0,
+        },
+    )
+
     return {
         "today": today,
         "totals": totals,
@@ -566,6 +621,7 @@ def get_overview(db) -> dict:
         "live": _live_streams(),
         "lifetime": lifetime,
         "lifetimeDays": days_with_data,
+        "developer": developer,
         "ranges": _ranges(db, now, minute_rows),
         "dataIssues": issues,
     }
@@ -1208,6 +1264,7 @@ ACTIONS = (
     "sign-out-all",
     "verify-email",
     "unverify-email",
+    "revoke-api-keys",
 )
 
 
@@ -1594,6 +1651,56 @@ def get_user_detail(db, uid: str) -> dict:
     }
 
 
+def revoke_user_api_keys(db, uid: str) -> int:
+    """Revoke EVERY API key a user owns: mark each key record
+    revoked AND delete its top-level apiKeys/{keyHash} auth
+    lookup. The lookup deletion is what kills the key — the
+    public API authenticates through that collection — so a
+    revoked key reaches nothing, effective on the very next
+    request. Returns how many keys were newly revoked."""
+    revoked = 0
+    keys_ref = db.collection("users").document(uid).collection("apiKeys")
+    for doc in keys_ref.limit(200).get():
+        data = doc.to_dict() or {}
+        key_hash = data.get("keyHash")
+        if isinstance(key_hash, str) and key_hash:
+            try:
+                db.collection("apiKeys").document(key_hash).delete()
+            except Exception:
+                pass
+        if data.get("revoked") is not True:
+            keys_ref.document(doc.id).set({"revoked": True}, merge=True)
+            revoked += 1
+    return revoked
+
+
+def purge_user_api_keys(db, uid: str) -> None:
+    """Delete a user's API keys outright (account deletion):
+    the top-level auth lookups, the key records and the
+    developer profile, so nothing that can authenticate
+    survives the account. (Firestore document deletes do not
+    cascade into subcollections, which is how deleted accounts'
+    keys kept working before this purge existed.)"""
+    user_ref = db.collection("users").document(uid)
+    keys_ref = user_ref.collection("apiKeys")
+    for doc in keys_ref.limit(200).get():
+        data = doc.to_dict() or {}
+        key_hash = data.get("keyHash")
+        if isinstance(key_hash, str) and key_hash:
+            try:
+                db.collection("apiKeys").document(key_hash).delete()
+            except Exception:
+                pass
+        try:
+            keys_ref.document(doc.id).delete()
+        except Exception:
+            pass
+    try:
+        user_ref.collection("developerProfile").document("main").delete()
+    except Exception:
+        pass
+
+
 SECRET_GATED_ACTIONS = ("promote", "demote", "delete")
 
 
@@ -1685,6 +1792,15 @@ def patch_user(
             pass
         try:
             db.collection("admins").document(target_uid).delete()
+        except Exception:
+            pass
+        # The account's API keys die with it: purge the auth
+        # lookups, key records and developer profile. They live
+        # in subcollections the user-document delete below does
+        # NOT cascade to — without this purge a deleted
+        # account's keys kept authenticating.
+        try:
+            purge_user_api_keys(db, target_uid)
         except Exception:
             pass
         firebase_auth().delete_user(target_uid)
@@ -1781,6 +1897,20 @@ def patch_user(
             # Revocation deletes the registry entry and takes
             # effect on the target's very next request.
             db.collection("admins").document(target_uid).delete()
+    elif action == "revoke-api-keys":
+        # Killing a developer's API access: every key is revoked
+        # and its auth lookup deleted, so the keys reach nothing
+        # from the next request on. A routine support power for
+        # any admin — except on an admin's or the owner's own
+        # account, which stays owner-only like the other
+        # full-control actions.
+        if target_role in ("owner", "admin") and actor_role != "owner":
+            raise AdminAuthError(
+                403,
+                "OWNER_ONLY",
+                "Only the owner can revoke an admin’s or the owner’s API keys.",
+            )
+        result["revokedKeys"] = revoke_user_api_keys(db, target_uid)
     else:
         if target_role in ("owner", "admin") and actor_role != "owner":
             raise AdminAuthError(
@@ -1943,6 +2073,7 @@ def create_user_account(
 DATABASE_COLLECTIONS = [
     "users",
     "admins",
+    "apiKeys",
     "adminActions",
     "usageEvents",
     "searchEvents",

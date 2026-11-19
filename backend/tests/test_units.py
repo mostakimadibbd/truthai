@@ -2160,6 +2160,78 @@ def test_database_explorer_reads_collections_documents_and_doc():
             raise AssertionError("expected AdminAuthError")
 
 
+def test_admin_api_key_revocation_and_purge():
+    """Revoked API access is TOTAL: revoking deletes each key's
+    top-level auth lookup (what the public API authenticates
+    through) and marks the record revoked; account deletion
+    purges keys + developer profile outright."""
+    from app import admin
+
+    db = _AdminDb()
+    db.store[("admins", "boss1")] = {"role": "owner", "grantedBy": "boss1"}
+    db.store[("admins", "emp1")] = {"role": "admin", "grantedBy": "boss1"}
+    db.store[("users", "dev1")] = {"displayName": "Dev"}
+    db.store[("users/dev1/apiKeys", "k1")] = {
+        "name": "one", "keyHash": "hash1", "revoked": False,
+    }
+    db.store[("users/dev1/apiKeys", "k2")] = {
+        "name": "two", "keyHash": "hash2", "revoked": True,
+    }
+    db.store[("apiKeys", "hash1")] = {"uid": "dev1", "keyId": "k1"}
+    db.store[("users/dev1/developerProfile", "main")] = {"projectName": "X"}
+    records = {
+        "dev1": _FakeUserRecord("dev1", "dev@example.com"),
+        "dev2": _FakeUserRecord("dev2", "dev2@example.com"),
+        "boss1": _FakeUserRecord("boss1", "boss@example.com"),
+    }
+    fake_auth = _FakeAuthModule(records)
+    original_auth = admin.firebase_auth
+    admin.firebase_auth = lambda: fake_auth
+    try:
+        # Direct revoke: the lookup dies, both records end up
+        # revoked, and the count is newly-revoked only.
+        count = admin.revoke_user_api_keys(db, "dev1")
+        assert count == 1
+        assert ("apiKeys", "hash1") not in db.store
+        assert db.store[("users/dev1/apiKeys", "k1")]["revoked"] is True
+        assert db.store[("users/dev1/apiKeys", "k2")]["revoked"] is True
+
+        # Panel action: a plain admin may revoke a normal user's
+        # keys…
+        db.store[("users", "dev2")] = {"displayName": "Dev Two"}
+        db.store[("users/dev2/apiKeys", "k9")] = {
+            "name": "x", "keyHash": "hash9", "revoked": False,
+        }
+        db.store[("apiKeys", "hash9")] = {"uid": "dev2", "keyId": "k9"}
+        result = admin.patch_user(
+            db, "emp1", "admin", "emp@example.com", "dev2", "revoke-api-keys"
+        )
+        assert result["revokedKeys"] == 1
+        assert ("apiKeys", "hash9") not in db.store
+        # …but never the owner's.
+        db.store[("users/boss1/apiKeys", "k0")] = {
+            "name": "o", "keyHash": "hash0", "revoked": False,
+        }
+        db.store[("apiKeys", "hash0")] = {"uid": "boss1", "keyId": "k0"}
+        try:
+            admin.patch_user(
+                db, "emp1", "admin", "emp@example.com", "boss1", "revoke-api-keys"
+            )
+            raise AssertionError("admin revoked the owner's keys")
+        except admin.AdminAuthError as error:
+            assert error.code == "OWNER_ONLY"
+        assert ("apiKeys", "hash0") in db.store
+
+        # Deletion purge: key records, lookups and the developer
+        # profile are all gone.
+        admin.purge_user_api_keys(db, "dev1")
+        assert ("users/dev1/apiKeys", "k1") not in db.store
+        assert ("users/dev1/apiKeys", "k2") not in db.store
+        assert ("users/dev1/developerProfile", "main") not in db.store
+    finally:
+        admin.firebase_auth = original_auth
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):

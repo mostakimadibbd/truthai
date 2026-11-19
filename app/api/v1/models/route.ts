@@ -3,7 +3,11 @@ import {
   checkWindowLimit,
   hashRateLimitKeyPart,
 } from "@/lib/server/auth-rate-limit";
-import { authenticateApiKey } from "@/lib/server/developer";
+import {
+  apiKeyAuthError,
+  authenticateApiKey,
+  type ApiKeyAuthResult,
+} from "@/lib/server/developer";
 import { getFreeModels } from "@/lib/server/models";
 import { getRemoteIp } from "@/lib/server/turnstile";
 
@@ -25,50 +29,65 @@ export async function OPTIONS() {
 }
 
 export async function GET(request: NextRequest) {
-  const identity = await authenticateApiKey(
+  // The SAME strict gate as chat completions (see
+  // authenticateApiKey): a revoked key, removed developer
+  // access, or a disabled/unverified/deleted account gets
+  // nothing here either — this route previously checked the
+  // key alone and let those accounts through.
+  const authResult = await authenticateApiKey(
     request.headers.get("authorization"),
-  ).catch(() => null);
-  if (!identity) {
+  ).catch(
+    (): ApiKeyAuthResult => ({ ok: false, reason: "account_unavailable" }),
+  );
+  if (!authResult.ok) {
+    const failure = apiKeyAuthError(authResult.reason);
     // Same failed-key throttling as chat completions.
-    try {
-      const failures = await checkWindowLimit(
-        `xyro:api:authfail:ip:${hashRateLimitKeyPart(getRemoteIp(request) ?? "unknown")}`,
-        60 * 1000,
-        30,
-      );
-      if (failures.state === "limited") {
-        return NextResponse.json(
-          {
-            error: {
-              message:
-                "Too many failed API key attempts from this network. Wait a minute and try again.",
-              type: "rate_limit_error",
-              code: "rate_limit_exceeded",
-            },
-          },
-          {
-            status: 429,
-            headers: {
-              ...CORS_HEADERS,
-              "Cache-Control": "no-store",
-              "Retry-After": String(failures.retryAfter),
-            },
-          },
+    if (
+      authResult.reason === "invalid_key" ||
+      authResult.reason === "developer_access_revoked"
+    ) {
+      try {
+        const failures = await checkWindowLimit(
+          `xyro:api:authfail:ip:${hashRateLimitKeyPart(getRemoteIp(request) ?? "unknown")}`,
+          60 * 1000,
+          30,
         );
+        if (failures.state === "limited") {
+          return NextResponse.json(
+            {
+              error: {
+                message:
+                  "Too many failed API key attempts from this network. Wait a minute and try again.",
+                type: "rate_limit_error",
+                code: "rate_limit_exceeded",
+              },
+            },
+            {
+              status: 429,
+              headers: {
+                ...CORS_HEADERS,
+                "Cache-Control": "no-store",
+                "Retry-After": String(failures.retryAfter),
+              },
+            },
+          );
+        }
+      } catch {
+        // Limiter trouble never changes the refusal below.
       }
-    } catch {
-      // Limiter trouble never changes the 401 below.
     }
     return NextResponse.json(
       {
         error: {
-          message:
-            "Invalid or missing API key. Send your key as 'Authorization: Bearer xyro_sk_live_…'.",
-          type: "authentication_error",
-          code: "invalid_api_key",
+          message: failure.message,
+          type: failure.status >= 500 ? "api_error" : "authentication_error",
+          code: failure.code,
         },
       },
-      { status: 401, headers: { ...CORS_HEADERS, "Cache-Control": "no-store" } },
+      {
+        status: failure.status,
+        headers: { ...CORS_HEADERS, "Cache-Control": "no-store" },
+      },
     );
   }
   const { models } = await getFreeModels();

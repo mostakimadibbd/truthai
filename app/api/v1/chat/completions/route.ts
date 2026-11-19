@@ -10,10 +10,11 @@ import { getDeviceContext } from "@/lib/server/device";
 import {
   FREE_PLAN_DAILY_TOKEN_LIMIT,
   apiDateKey,
+  apiKeyAuthError,
   authenticateApiKey,
   getDailyUsage,
-  getDeveloperProfile,
   recordApiCall,
+  type ApiKeyAuthResult,
 } from "@/lib/server/developer";
 import {
   OpenRouterAttemptsExhausted,
@@ -22,7 +23,6 @@ import {
 import { logEvent } from "@/lib/server/logstream";
 import { readPreferences } from "@/lib/server/settings";
 import { getRemoteIp } from "@/lib/server/turnstile";
-import { getFirebaseAdminAuth } from "@/lib/server/firebase-admin";
 import {
   AUTO_MODEL_ID,
   isAllowedFreeModel,
@@ -119,69 +119,54 @@ const ALLOWED_PARAMETERS = new Set([
 ]);
 
 export async function POST(request: NextRequest) {
-  const identity = await authenticateApiKey(
+  // One strict gate for the whole API (see authenticateApiKey):
+  // the key must be live, developer access must still exist, and
+  // the owning account must exist, be enabled and be verified —
+  // a revoked key or revoked account reaches nothing.
+  const authResult = await authenticateApiKey(
     request.headers.get("authorization"),
-  ).catch(() => null);
-  if (!identity) {
+  ).catch(
+    (): ApiKeyAuthResult => ({ ok: false, reason: "account_unavailable" }),
+  );
+  if (!authResult.ok) {
+    const failure = apiKeyAuthError(authResult.reason);
     // Failed key attempts are throttled per IP so keys can't be
-    // brute-force scanned against the auth lookup.
-    try {
-      const failures = await checkWindowLimit(
-        `xyro:api:authfail:ip:${hashRateLimitKeyPart(getRemoteIp(request) ?? "unknown")}`,
-        60 * 1000,
-        30,
-      );
-      if (failures.state === "limited") {
-        return apiError(
-          429,
-          "rate_limit_exceeded",
-          "Too many failed API key attempts from this network. Wait a minute and try again.",
-          "rate_limit_error",
-          { "Retry-After": String(failures.retryAfter) },
+    // brute-force scanned against the auth lookup. Only bad-key
+    // refusals count: a disabled or unverified account presenting
+    // its real key is not an attack.
+    if (
+      authResult.reason === "invalid_key" ||
+      authResult.reason === "developer_access_revoked"
+    ) {
+      try {
+        const failures = await checkWindowLimit(
+          `xyro:api:authfail:ip:${hashRateLimitKeyPart(getRemoteIp(request) ?? "unknown")}`,
+          60 * 1000,
+          30,
         );
+        if (failures.state === "limited") {
+          return apiError(
+            429,
+            "rate_limit_exceeded",
+            "Too many failed API key attempts from this network. Wait a minute and try again.",
+            "rate_limit_error",
+            { "Retry-After": String(failures.retryAfter) },
+          );
+        }
+      } catch {
+        // Limiter trouble never changes the refusal below.
       }
-    } catch {
-      // Limiter trouble never changes the 401 below.
     }
     return apiError(
-      401,
-      "invalid_api_key",
-      "Invalid or missing API key. Send your key as 'Authorization: Bearer xyro_sk_live_…'.",
-      "authentication_error",
+      failure.status,
+      failure.code,
+      failure.message,
+      failure.status >= 500 ? "api_error" : "authentication_error",
     );
   }
-
-  // An orphaned key (developer access removed) stops working.
-  const profile = await getDeveloperProfile(identity.uid).catch(() => null);
-  if (!profile) {
-    return apiError(
-      401,
-      "invalid_api_key",
-      "This API key is no longer active.",
-      "authentication_error",
-    );
-  }
+  const identity = authResult.identity;
   const context = getDeviceContext(request, undefined);
   const { city, country } = geo(request);
-
-  // Account state: keys only work for enabled, email-verified
-  // accounts — the same bar as sending messages in the app.
-  try {
-    const user = await getFirebaseAdminAuth().getUser(identity.uid);
-    if (user.disabled) {
-      return apiError(403, "account_disabled", "This account is disabled.", "authentication_error");
-    }
-    if (!user.emailVerified) {
-      return apiError(
-        403,
-        "email_not_verified",
-        "The account that owns this API key has not verified its email address.",
-        "authentication_error",
-      );
-    }
-  } catch {
-    return apiError(503, "api_unavailable", "The API is temporarily unavailable.", "api_error");
-  }
 
   // Per-key request rate limit (the daily token cap below is the
   // hard plan gate; this one smooths bursts).

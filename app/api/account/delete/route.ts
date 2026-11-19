@@ -172,6 +172,42 @@ export async function POST(request: NextRequest) {
         await batch.commit();
       }
     }
+
+    // Stage: developer platform data. API keys must die with
+    // the account — until now this stage didn't exist, so a
+    // deleted account's key records and their top-level auth
+    // lookups survived and the key still authenticated. Delete
+    // every lookup first (that alone kills the keys instantly),
+    // then the key records and the remaining developer
+    // subcollections, in resumable chunks like the other stages.
+    const keyDocs = await userRef.collection("apiKeys").limit(100).get();
+    if (!keyDocs.empty) {
+      const batch = db.batch();
+      for (const doc of keyDocs.docs) {
+        const keyHash = doc.data()?.keyHash;
+        if (typeof keyHash === "string") {
+          batch.delete(db.collection("apiKeys").doc(keyHash));
+        }
+        batch.delete(doc.ref);
+      }
+      await batch.commit();
+      return progress("developer");
+    }
+    for (const sub of [
+      "developerProfile",
+      "apiUsage",
+      "apiEvents",
+      "apiModelUsage",
+      "apiAccessPoints",
+    ] as const) {
+      const docs = await userRef.collection(sub).limit(100).get();
+      if (!docs.empty) {
+        const batch = db.batch();
+        docs.docs.forEach((doc) => batch.delete(doc.ref));
+        await batch.commit();
+        return progress("developer");
+      }
+    }
     if (realtimeDb) {
       await realtimeDb.ref(`presence/${auth.uid}`).remove().catch(() => {});
       await realtimeDb.ref(`chatStreams/${auth.uid}`).remove().catch(() => {});

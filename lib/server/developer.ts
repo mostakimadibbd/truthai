@@ -1,7 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import { FieldValue } from "firebase-admin/firestore";
 import type { DeviceContext } from "@/lib/server/device";
-import { getFirebaseAdminFirestore } from "@/lib/server/firebase-admin";
+import {
+  getFirebaseAdminAuth,
+  getFirebaseAdminFirestore,
+} from "@/lib/server/firebase-admin";
 import { estimateCostUsd, getModelPricing } from "@/lib/server/models";
 import { recordUsageEvent } from "@/lib/server/analytics";
 
@@ -432,28 +435,134 @@ export async function revokeApiKey(
   return true;
 }
 
+export type ApiKeyIdentity = {
+  uid: string;
+  keyId: string;
+  displayPrefix: string;
+  keyName: string;
+};
+
 /**
- * Authenticates an Authorization header against the key store.
- * Returns the owner + key identity, or null. Touches lastUsedAt at
- * most once every 5 minutes per key.
+ * Why an API key was refused. Revocation is TOTAL (owner
+ * requirement, 2026-11-19): a key that is revoked, whose
+ * developer access was removed, or whose owning account is
+ * disabled, unverified or deleted must not reach ANY part of
+ * the API. Every /api/v1 route therefore authenticates through
+ * this one function — there is no lighter check anywhere — and
+ * maps the reason to an outward error with apiKeyAuthError.
+ * (GET /api/v1/models previously checked the key alone and let
+ * disabled/deleted accounts through; that gap is why the
+ * account-state checks live here now, not in one route.)
+ */
+export type ApiKeyAuthFailure =
+  | "invalid_key"
+  | "developer_access_revoked"
+  | "account_disabled"
+  | "email_not_verified"
+  | "account_unavailable";
+
+export type ApiKeyAuthResult =
+  | { ok: true; identity: ApiKeyIdentity }
+  | { ok: false; reason: ApiKeyAuthFailure };
+
+/** The outward error for each refusal reason. */
+export function apiKeyAuthError(reason: ApiKeyAuthFailure): {
+  status: number;
+  code: string;
+  message: string;
+} {
+  switch (reason) {
+    case "account_disabled":
+      return {
+        status: 403,
+        code: "account_disabled",
+        message: "This account is disabled.",
+      };
+    case "email_not_verified":
+      return {
+        status: 403,
+        code: "email_not_verified",
+        message:
+          "The account that owns this API key has not verified its email address.",
+      };
+    case "account_unavailable":
+      return {
+        status: 503,
+        code: "api_unavailable",
+        message: "The API is temporarily unavailable.",
+      };
+    case "developer_access_revoked":
+      return {
+        status: 401,
+        code: "invalid_api_key",
+        message: "This API key is no longer active.",
+      };
+    case "invalid_key":
+    default:
+      return {
+        status: 401,
+        code: "invalid_api_key",
+        message:
+          "Invalid or missing API key. Send your key as 'Authorization: Bearer xyro_sk_live_…'.",
+      };
+  }
+}
+
+/**
+ * Authenticates an Authorization header against the key store
+ * AND the owning account's current state: the key record must
+ * exist and not be revoked, the developer profile must still
+ * exist, and the Firebase Auth account must exist, be enabled
+ * and have a verified email. Touches lastUsedAt at most once
+ * every 5 minutes per key.
  */
 export async function authenticateApiKey(
   authorization: string | null,
-): Promise<{ uid: string; keyId: string; displayPrefix: string; keyName: string } | null> {
-  if (!authorization || !authorization.startsWith("Bearer ")) return null;
+): Promise<ApiKeyAuthResult> {
+  if (!authorization || !authorization.startsWith("Bearer ")) {
+    return { ok: false, reason: "invalid_key" };
+  }
   const key = authorization.slice("Bearer ".length).trim();
-  if (!key.startsWith(API_KEY_PREFIX) || key.length > 80) return null;
+  if (!key.startsWith(API_KEY_PREFIX) || key.length > 80) {
+    return { ok: false, reason: "invalid_key" };
+  }
   const lookup = await db()
     .collection("apiKeys")
     .doc(hashApiKey(key))
     .get();
-  if (!lookup.exists) return null;
+  if (!lookup.exists) return { ok: false, reason: "invalid_key" };
   const { uid, keyId } = lookup.data() as { uid: string; keyId: string };
-  if (typeof uid !== "string" || typeof keyId !== "string") return null;
+  if (typeof uid !== "string" || typeof keyId !== "string") {
+    return { ok: false, reason: "invalid_key" };
+  }
   const keyRef = keysCollection(uid).doc(keyId);
   const keySnapshot = await keyRef.get();
   if (!keySnapshot.exists || keySnapshot.data()?.revoked === true) {
-    return null;
+    return { ok: false, reason: "invalid_key" };
+  }
+  // Developer access removed (profile deleted by the owner, an
+  // admin, or account-deletion cleanup) — the key dies with it.
+  const profile = await getDeveloperProfile(uid).catch(() => null);
+  if (!profile) return { ok: false, reason: "developer_access_revoked" };
+  // Account state: keys only work for existing, enabled,
+  // email-verified accounts — the same bar as the app itself.
+  try {
+    const user = await getFirebaseAdminAuth().getUser(uid);
+    if (user.disabled) return { ok: false, reason: "account_disabled" };
+    if (!user.emailVerified) {
+      return { ok: false, reason: "email_not_verified" };
+    }
+  } catch (error) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { code: unknown }).code
+        : undefined;
+    // A deleted account's key is simply invalid; any other
+    // failure is a transient platform problem.
+    if (code === "auth/user-not-found") {
+      return { ok: false, reason: "invalid_key" };
+    }
+    return { ok: false, reason: "account_unavailable" };
   }
   const data = keySnapshot.data() ?? {};
   const lastUsedMs = data.lastUsedAt ? toMillis(data.lastUsedAt) : 0;
@@ -463,13 +572,16 @@ export async function authenticateApiKey(
       .catch(() => undefined);
   }
   return {
-    uid,
-    keyId,
-    displayPrefix:
-      typeof data.displayPrefix === "string"
-        ? data.displayPrefix
-        : "xyro_sk_live_…",
-    keyName: typeof data.name === "string" ? data.name : "API key",
+    ok: true,
+    identity: {
+      uid,
+      keyId,
+      displayPrefix:
+        typeof data.displayPrefix === "string"
+          ? data.displayPrefix
+          : "xyro_sk_live_…",
+      keyName: typeof data.name === "string" ? data.name : "API key",
+    },
   };
 }
 
