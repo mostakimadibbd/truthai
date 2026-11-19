@@ -872,12 +872,22 @@ def list_media(prefix: str = "") -> dict:
                 public_id = item.get("public_id")
                 if not isinstance(public_id, str):
                     continue
+                # Cloudinary reports format=None for raw assets —
+                # the extension lives in the public id itself
+                # (…asset.pdf). Surface it so the panel tile can
+                # label the tile "PDF" instead of a bare "RAW",
+                # which reads like a broken/blank file.
+                item_format = item.get("format")
+                if not item_format and (item.get("resource_type") or resource_type) == "raw":
+                    _, dot, ext = public_id.rpartition(".")
+                    if dot and ext and len(ext) <= 5 and ext.isalnum():
+                        item_format = ext.lower()
                 resources.append(
                     {
                         "publicId": public_id,
                         "resourceType": item.get("resource_type") or resource_type,
                         "deliveryType": item.get("type") or delivery_type,
-                        "format": item.get("format"),
+                        "format": item_format,
                         "bytes": item.get("bytes") if isinstance(item.get("bytes"), (int, float)) else None,
                         "createdAt": item.get("created_at"),
                         "ownerUid": _media_owner(public_id),

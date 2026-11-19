@@ -341,6 +341,30 @@ export function getCloudinaryPrivateDownloadUrl(
     return `/api/media/${blobIdFromPublicId(publicId)}`;
   }
   getCloudinaryConfig();
+  if (resourceType === "raw") {
+    // RAW files (PDF, TXT, MD, CSV) must NOT use the signed
+    // delivery URL below: Cloudinary rejects it with 401 for
+    // raw authenticated assets (proven live 2026-11-19 — the
+    // same URL shape returns 200 for images but 401 for raw,
+    // with the extension in the public id and with it passed
+    // as `format`). That single rejection broke document chat
+    // end to end: the confirm route's content sample 401'd
+    // (which forced the client's server-fallback upload — a
+    // duplicate asset for every document), and the chat
+    // route's server-side download 401'd, so the file never
+    // reached the model (422 ATTACHMENT_PROCESSING_FAILED)
+    // even though the file itself was stored perfectly.
+    // The API download endpoint (private_download_url) is
+    // Cloudinary's supported path for authenticated raw
+    // files and returns the exact bytes (verified live: 200,
+    // byte-for-byte). Its Content-Disposition: attachment is
+    // correct for document chips (click = download the file)
+    // and irrelevant for server-side fetches.
+    return cloudinary.utils.private_download_url(publicId, format, {
+      resource_type: "raw",
+      type: "authenticated",
+    });
+  }
   // Signed AUTHENTICATED DELIVERY URL (res.cloudinary.com/…
   // /authenticated/s--…--/…), NOT the API download endpoint.
   // The old private_download_url pointed at
