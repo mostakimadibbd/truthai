@@ -1,5 +1,5 @@
 import { serverEnv } from "@/lib/server/env";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Timestamp } from "firebase-admin/firestore";
 import { NextRequest, NextResponse } from "next/server";
 import { guardMutationHeaders } from "@/lib/server/auth-guard";
@@ -767,6 +767,33 @@ export async function POST(request: NextRequest) {
       /* dimensions stay null */
     }
 
+    // File fingerprints for the admin image-verification panel:
+    // SHA-256 identifies the exact stored bytes; the 8x8
+    // average hash recognises the same picture after light
+    // edits (re-encode, small resize) even if the watermark is
+    // destroyed. Both best-effort.
+    const fileSha256 = createHash("sha256").update(watermarked).digest("hex");
+    let averageHash: string | null = null;
+    try {
+      const { data } = await sharp(watermarked)
+        .resize(8, 8, { fit: "fill" })
+        .grayscale()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      if (data.length === 64) {
+        let mean = 0;
+        for (const value of data) mean += value;
+        mean /= 64;
+        const bits = Buffer.alloc(8);
+        for (let i = 0; i < 64; i += 1) {
+          if (data[i] > mean) bits[i >> 3] |= 0x80 >> (i & 7);
+        }
+        averageHash = bits.toString("hex");
+      }
+    } catch {
+      /* average hash stays null */
+    }
+
     const assetId = randomUUID();
     const name = `xyro-created-${generationId.slice(0, 8)}.png`;
     const attachment = { id: assetId, name, mimeType: "image/png", size: stored.bytes };
@@ -842,6 +869,8 @@ export async function POST(request: NextRequest) {
       bytes: stored.bytes,
       width: imageWidth,
       height: imageHeight,
+      sha256: fileSha256,
+      averageHash,
       createdAt: now,
       createdAtMs: Date.now(),
     });

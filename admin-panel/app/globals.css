@@ -460,6 +460,19 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
 .flag-chip.status-dismissed { background: var(--panel-2); color: var(--muted); }
 .flag-chip.status-actioned { background: #14331f; color: #7ee2a8; }
 .flag-prompt { margin: 8px 0 6px; font-size: 0.92rem; word-break: break-word; white-space: pre-wrap; }
+.dropzone {
+  border: 1.5px dashed var(--border, #2a3a5f); border-radius: 12px;
+  padding: 22px 16px; margin: 14px 0; text-align: center;
+}
+.dropzone.drag { border-color: #2f6df6; background: rgba(47, 109, 246, 0.08); }
+.dropzone p { margin: 4px 0 10px; }
+.swatch {
+  display: inline-block; width: 14px; height: 14px; border-radius: 4px;
+  border: 1px solid var(--border, #2a3a5f); vertical-align: -2px;
+}
+.hash-line { word-break: break-all; }
+.meta-value { white-space: pre-wrap; word-break: break-word; max-width: 520px; }
+.alert.ok { border-color: #2f9e6e; }
 .trace-card {
   border: 1px solid var(--border, #2a3a5f); border-radius: 12px;
   padding: 14px 16px; margin: 14px 0;

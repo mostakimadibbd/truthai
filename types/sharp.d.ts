@@ -50,6 +50,8 @@ declare module "sharp" {
     ensureAlpha(): SharpPipeline;
     metadata(): Promise<SharpMetadata>;
     stats(): Promise<SharpStats>;
+    resize(width: number, height: number, options?: { fit?: string }): SharpPipeline;
+    grayscale(): SharpPipeline;
     extract(region: SharpRegion): SharpPipeline;
     blur(sigma?: number): SharpPipeline;
     median(size?: number): SharpPipeline;

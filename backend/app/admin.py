@@ -1143,6 +1143,8 @@ def _generation_view(doc_id: str, data: dict) -> dict:
         "bytes": data.get("bytes"),
         "width": data.get("width"),
         "height": data.get("height"),
+        "sha256": data.get("sha256"),
+        "averageHash": data.get("averageHash"),
         "createdAtMs": data.get("createdAtMs"),
     }
 
@@ -1177,9 +1179,12 @@ def lookup_image_generations(db, actor_uid: str, *, generation_id: str = "", fin
         if snap.exists:
             records.append(_generation_view(snap.id, snap.to_dict() or {}))
     elif fingerprint or uid:
+        # A creator's ID never changes (it is a one-way hash of
+        # their account id), so this returns their creations in
+        # one place — capped at 200, newest first.
         field = "creatorFingerprint" if fingerprint else "uid"
         value = fingerprint or uid
-        snaps = collection.where(field, "==", value).limit(50).get()
+        snaps = collection.where(field, "==", value).limit(200).get()
         views = [_generation_view(snap.id, snap.to_dict() or {}) for snap in snaps]
         views.sort(key=lambda row: row.get("createdAtMs") or 0, reverse=True)
         records = views
@@ -1203,13 +1208,86 @@ def lookup_image_generations(db, actor_uid: str, *, generation_id: str = "", fin
     return {"records": records}
 
 
+def _average_hash(image) -> str:
+    """8x8 average (perceptual) hash of a PIL image, as 16 hex
+    chars — the same construction the main app stores on each
+    generation record, so an uploaded picture can be matched
+    against a creator's work even after the watermark is gone.
+    Resampling differs slightly between imaging libraries, so
+    matches are judged by Hamming distance, never equality."""
+    from PIL import Image
+
+    gray = image.convert("L").resize((8, 8), Image.LANCZOS)
+    pixels = list(gray.getdata())
+    mean = sum(pixels) / 64
+    value = 0
+    for pixel in pixels:
+        value = (value << 1) | (1 if pixel > mean else 0)
+    return f"{value:016x}"
+
+
+def _hamming_hex(a: str, b: str) -> int:
+    try:
+        return bin(int(a, 16) ^ int(b, 16)).count("1")
+    except (TypeError, ValueError):
+        return 64
+
+
+def _image_metadata(image) -> dict:
+    """Embedded metadata an admin should see: EXIF (camera,
+    software, timestamps, GPS) and PNG/JPEG text chunks — AI
+    tools often embed the prompt or generator name there. All
+    values are stringified and truncated; anything unreadable
+    is skipped rather than failing the analysis."""
+    exif: dict[str, str] = {}
+    try:
+        from PIL.ExifTags import GPSTAGS, TAGS
+
+        raw = image.getexif()
+        for tag_id, value in raw.items():
+            name = str(TAGS.get(tag_id, tag_id))
+            exif[name] = str(value)[:200]
+        try:
+            gps = raw.get_ifd(0x8825)
+            for tag_id, value in (gps or {}).items():
+                exif[f"GPS {GPSTAGS.get(tag_id, tag_id)}"] = str(value)[:200]
+        except Exception:
+            pass
+    except Exception:
+        pass
+    text_chunks: dict[str, str] = {}
+    raw_text = getattr(image, "text", None)
+    if isinstance(raw_text, dict):
+        for key, value in raw_text.items():
+            text_chunks[str(key)] = str(value)[:1000]
+    info = getattr(image, "info", None)
+    if isinstance(info, dict):
+        for key, value in info.items():
+            if key in text_chunks or key in ("exif", "icc_profile", "transparency"):
+                continue
+            if isinstance(value, str):
+                text_chunks[str(key)] = value[:1000]
+            elif isinstance(value, bytes) and len(value) <= 512:
+                try:
+                    text_chunks[str(key)] = value.decode("utf-8")[:1000]
+                except UnicodeDecodeError:
+                    continue
+    return {"exif": exif, "textChunks": text_chunks}
+
+
 def verify_image(db, actor_uid: str, image_bytes: bytes) -> dict:
-    """Detect the hidden provenance credentials in an image the
-    admin uploads: extract the watermark payload (the main app's
-    tiled LSB frame), then resolve the generation record and
-    the creator. An image generated before records existed (or
-    whose record was removed) still yields its generation ID +
-    fingerprint from the pixels alone."""
+    """Deep-analyse an image the admin uploads (the Image
+    verify panel): file facts, SHA-256 + perceptual hashes,
+    embedded EXIF/text metadata and average colour — plus
+    provenance resolution, strongest signal first: the hidden
+    watermark payload (the main app's tiled LSB frame) → the
+    generation record + creator; an exact SHA-256 byte match;
+    then perceptual near-matches against recent generations.
+    An image generated before records existed still yields its
+    generation ID + creator ID from the pixels alone. The
+    creator ID is a stable one-way hash of the account — it
+    never changes for a creator — and it is ADMIN-ONLY data:
+    no public surface displays it (privacy rule, 2026-11-20)."""
     import io
 
     from PIL import Image
@@ -1226,21 +1304,84 @@ def verify_image(db, actor_uid: str, image_bytes: bytes) -> dict:
     width, height = image.size
     if width * height > 64_000_000:
         raise AdminAuthError(413, "IMAGE_TOO_LARGE", "That image’s dimensions are too large to verify.")
-    rgba = image.convert("RGBA").tobytes()
-    payload = watermark.extract_provenance(rgba, width, height)
-    if not payload:
-        return {
-            "found": False,
-            "reason": "No TruthAI watermark could be read from this image. It may not be ours, or the mark was destroyed (JPEG re-encode, screenshot, heavy edit or crop).",
-        }
-    parts = payload.split(":")
-    if len(parts) != 3 or parts[0] not in ("truthai", "xyro-ai"):
-        return {"found": False, "reason": "A watermark was present but its payload wasn’t recognised."}
-    _, generation_id, fingerprint = parts
+
+    # ---- Deep file analysis (always reported) ----
+    import hashlib
+
+    file_sha256 = hashlib.sha256(image_bytes).hexdigest()
+    average_hash = _average_hash(image)
+    try:
+        avg_pixel = image.convert("RGB").resize((1, 1)).getpixel((0, 0))
+        avg_color = f"#{avg_pixel[0]:02x}{avg_pixel[1]:02x}{avg_pixel[2]:02x}"
+        brightness = round(
+            (0.299 * avg_pixel[0] + 0.587 * avg_pixel[1] + 0.114 * avg_pixel[2]) / 255,
+            3,
+        )
+    except Exception:
+        avg_color, brightness = None, None
+    analysis = {
+        "file": {
+            "format": image.format,
+            "mode": image.mode,
+            "bytes": len(image_bytes),
+            "width": width,
+            "height": height,
+            "aspectRatio": round(width / height, 3) if height else None,
+            "hasAlpha": image.mode in ("RGBA", "LA", "PA")
+            or "transparency" in (getattr(image, "info", {}) or {}),
+        },
+        "hashes": {"sha256": file_sha256, "averageHash": average_hash},
+        "metadata": _image_metadata(image),
+        "color": {"average": avg_color, "brightness": brightness},
+    }
+
+    # ---- Provenance resolution, strongest signal first ----
+    collection = db.collection("imageGenerations")
     record = None
-    snap = db.collection("imageGenerations").document(generation_id).get()
-    if snap.exists:
-        record = _generation_view(snap.id, snap.to_dict() or {})
+    matched_by = None
+    payload = None
+    generation_id = None
+    fingerprint = None
+    rgba = image.convert("RGBA").tobytes()
+    raw_payload = watermark.extract_provenance(rgba, width, height)
+    if raw_payload:
+        parts = raw_payload.split(":")
+        if len(parts) == 3 and parts[0] in ("truthai", "xyro-ai"):
+            payload = raw_payload
+            _, generation_id, fingerprint = parts
+            snap = collection.document(generation_id).get()
+            if snap.exists:
+                record = _generation_view(snap.id, snap.to_dict() or {})
+                matched_by = "watermark"
+    if record is None:
+        # Exact bytes match (the untouched stored file).
+        snaps = collection.where("sha256", "==", file_sha256).limit(1).get()
+        for snap in snaps:
+            record = _generation_view(snap.id, snap.to_dict() or {})
+            matched_by = "sha256"
+    near_matches: list[dict] = []
+    if record is None:
+        # Visual near-match: scan the newest records' perceptual
+        # hashes. Capped — this is a rare manual investigation,
+        # and the scan costs one read per candidate.
+        candidates = collection.limit(300).get()
+        scored = []
+        for snap in candidates:
+            data = snap.to_dict() or {}
+            stored_hash = data.get("averageHash")
+            if not isinstance(stored_hash, str):
+                continue
+            distance = _hamming_hex(average_hash, stored_hash)
+            if distance <= 8:
+                scored.append((distance, snap.id, data))
+        scored.sort(key=lambda item: item[0])
+        for distance, doc_id, data in scored[:5]:
+            view = _generation_view(doc_id, data)
+            near_email, _near_name = _creator_identity(view.get("uid"))
+            view["creatorEmail"] = near_email
+            view["distance"] = distance
+            near_matches.append(view)
+
     creator_uid = record.get("uid") if record else None
     email, name = _creator_identity(creator_uid)
     if record:
@@ -1252,21 +1393,29 @@ def verify_image(db, actor_uid: str, image_bytes: bytes) -> dict:
                 "action": "image_verify",
                 "actorUid": actor_uid,
                 "targetUid": creator_uid,
-                "generationId": generation_id,
+                "generationId": generation_id or (record or {}).get("generationId"),
+                "matchedBy": matched_by,
                 "ts": int(time.time() * 1000),
             }
         )
     except Exception:
         pass
+    found = payload is not None
     return {
-        "found": True,
+        "found": found,
+        "reason": None
+        if found or record or near_matches
+        else "No TruthAI watermark could be read from this image, and no saved generation matches its bytes or appearance. It may not be ours, or the mark was destroyed (JPEG re-encode, screenshot, heavy edit or crop).",
         "payload": payload,
-        "generationId": generation_id,
-        "creatorFingerprint": fingerprint,
+        "generationId": generation_id or (record or {}).get("generationId"),
+        "creatorFingerprint": fingerprint or (record or {}).get("creatorFingerprint"),
         "record": record,
+        "matchedBy": matched_by,
+        "nearMatches": near_matches,
         "creatorUid": creator_uid,
         "creatorEmail": email,
         "creatorName": name,
+        **analysis,
     }
 
 

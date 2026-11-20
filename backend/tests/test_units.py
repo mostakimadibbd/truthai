@@ -2424,6 +2424,90 @@ def test_admin_image_lookup_and_verify():
         admin.firebase_auth = original_auth
 
 
+def test_admin_image_deep_analysis():
+    """The Image verify panel's deep analysis: file facts,
+    embedded text metadata, hashes — plus provenance fallbacks:
+    an exact SHA-256 byte match, and a perceptual near-match
+    when the watermark is gone entirely."""
+    import hashlib
+    import io
+
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+
+    from app import admin
+
+    db = _AdminDb()
+    records = {"dev1": _FakeUserRecord("dev1", "dev@example.com")}
+    fake_auth = _FakeAuthModule(records)
+    original_auth = admin.firebase_auth
+    admin.firebase_auth = lambda: fake_auth
+    try:
+        # A PNG carrying generator-style text metadata.
+        info = PngInfo()
+        info.add_text("parameters", "a red kite, steps: 20, sampler: Euler")
+        buffer = io.BytesIO()
+        Image.new("RGBA", (120, 80), (200, 60, 40, 255)).save(
+            buffer, format="PNG", pnginfo=info
+        )
+        png_bytes = buffer.getvalue()
+
+        result = admin.verify_image(db, "boss1", png_bytes)
+        assert result["found"] is False
+        assert result["file"]["format"] == "PNG"
+        assert result["file"]["width"] == 120
+        assert result["file"]["height"] == 80
+        assert result["file"]["hasAlpha"] is True
+        assert result["hashes"]["sha256"] == hashlib.sha256(png_bytes).hexdigest()
+        assert len(result["hashes"]["averageHash"]) == 16
+        assert "parameters" in result["metadata"]["textChunks"]
+        assert "red kite" in result["metadata"]["textChunks"]["parameters"]
+        assert result["color"]["average"] == "#c83c28"
+
+        # Exact-byte match: register the file's SHA-256 and the
+        # same bytes resolve to the record with no watermark.
+        db.store[("imageGenerations", "gen-sha")] = {
+            "generationId": "gen-sha",
+            "uid": "dev1",
+            "creatorFingerprint": "0123456789abcdef",
+            "chatId": "chat-1",
+            "prompt": "kite",
+            "sha256": hashlib.sha256(png_bytes).hexdigest(),
+            "createdAtMs": 1700000000000,
+        }
+        matched = admin.verify_image(db, "boss1", png_bytes)
+        assert matched["matchedBy"] == "sha256"
+        assert matched["record"]["generationId"] == "gen-sha"
+        assert matched["creatorEmail"] == "dev@example.com"
+
+        # Perceptual near-match: a record holding only the
+        # perceptual hash of a similar picture is found by
+        # appearance after the watermark/sha paths miss.
+        base = Image.new("RGB", (64, 64), (30, 90, 160))
+        for x in range(32):
+            for y in range(64):
+                base.putpixel((x, y), (220, 220, 220))
+        db.store[("imageGenerations", "gen-visual")] = {
+            "generationId": "gen-visual",
+            "uid": "dev1",
+            "creatorFingerprint": "0123456789abcdef",
+            "chatId": "chat-2",
+            "prompt": "half and half",
+            "averageHash": admin._average_hash(base),
+            "createdAtMs": 1700000001000,
+        }
+        edited = base.copy()
+        edited.putpixel((40, 40), (31, 91, 161))  # one pixel off
+        edited_buffer = io.BytesIO()
+        edited.save(edited_buffer, format="PNG")
+        visual = admin.verify_image(db, "boss1", edited_buffer.getvalue())
+        assert visual["record"] is None
+        assert [m["generationId"] for m in visual["nearMatches"]] == ["gen-visual"]
+        assert visual["nearMatches"][0]["distance"] <= 8
+    finally:
+        admin.firebase_auth = original_auth
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):

@@ -218,7 +218,7 @@ type TrashEntry = {
 
 type RangeKey = "today" | "24h" | "48h" | "7d" | "lifetime";
 
-type Tab = "overview" | "users" | "owner" | "logs" | "safety" | "media" | "activity" | "system" | "database";
+type Tab = "overview" | "users" | "owner" | "logs" | "safety" | "media" | "verify" | "activity" | "system" | "database";
 
 type DbCollection = { name: string; count: number | null };
 
@@ -268,14 +268,28 @@ type GenerationRecord = {
 
 type VerifyResult = {
   found: boolean;
-  reason?: string;
-  payload?: string;
-  generationId?: string;
-  creatorFingerprint?: string;
+  reason?: string | null;
+  payload?: string | null;
+  generationId?: string | null;
+  creatorFingerprint?: string | null;
   record?: GenerationRecord | null;
+  matchedBy?: string | null;
+  nearMatches?: (GenerationRecord & { distance?: number })[];
   creatorUid?: string | null;
   creatorEmail?: string | null;
   creatorName?: string | null;
+  file?: {
+    format?: string | null;
+    mode?: string | null;
+    bytes?: number | null;
+    width?: number | null;
+    height?: number | null;
+    aspectRatio?: number | null;
+    hasAlpha?: boolean;
+  };
+  hashes?: { sha256?: string; averageHash?: string };
+  metadata?: { exif?: Record<string, string>; textChunks?: Record<string, string> };
+  color?: { average?: string | null; brightness?: number | null };
 };
 
 type FlagEntry = {
@@ -584,6 +598,7 @@ const ICONS = {
   owner: "M12 2l7 3v5c0 5-3.5 9.3-7 11-3.5-1.7-7-6-7-11V5l7-3zM9 12l2 2 4-4",
   flag: "M4 21V4c4-2 8 2 12 0v9c-4 2-8-2-12 0",
   image: "M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5Z M8.5 7a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z M21 15l-5-5L5 21",
+  verify: "M11 5a6 6 0 1 0 0 12 6 6 0 0 0 0-12zM21 21l-4.35-4.35M8.5 11l2 2 3.5-4",
   database: "M12 3c4.97 0 9 1.34 9 3s-4.03 3-9 3-9-1.34-9-3 4.03-3 9-3zM3 6v12c0 1.66 4.03 3 9 3s9-1.34 9-3V6M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3",
   refresh: "M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6",
   out: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
@@ -673,6 +688,15 @@ export default function ConsolePage() {
   const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null);
   const [originalLink, setOriginalLink] = useState<{ publicId: string; url: string } | null>(null);
   const [originalBusy, setOriginalBusy] = useState("");
+  const [vfyBusy, setVfyBusy] = useState(false);
+  const [vfyError, setVfyError] = useState("");
+  const [vfyResult, setVfyResult] = useState<VerifyResult | null>(null);
+  const [vfyFileName, setVfyFileName] = useState("");
+  const [vfyDrag, setVfyDrag] = useState(false);
+  const [vfyQuery, setVfyQuery] = useState("");
+  const [vfySearchBusy, setVfySearchBusy] = useState(false);
+  const [vfyRecords, setVfyRecords] = useState<GenerationRecord[] | null>(null);
+  const [vfyRecordsLabel, setVfyRecordsLabel] = useState("");
   const [dbCollections, setDbCollections] = useState<DbCollection[]>([]);
   const [dbPath, setDbPath] = useState("");
   const [dbDocs, setDbDocs] = useState<DbDocSummary[]>([]);
@@ -1139,6 +1163,74 @@ export default function ConsolePage() {
       setTraceError(error instanceof Error ? error.message : "That image couldn’t be checked.");
     } finally {
       setVerifyBusy(false);
+    }
+  };
+
+  // Image verify tab: deep analysis of an uploaded image, and
+  // record search by generation ID / creator ID / account uid.
+  // A creator's ID is the same on every image they ever make,
+  // so a creator-ID search gathers all their creations in one
+  // place. Creator IDs are ADMIN-ONLY data — the public
+  // verifier page never displays them (privacy rule).
+  const runVerifyTabUpload = async (file: File) => {
+    if (!user) return;
+    setVfyBusy(true);
+    setVfyError("");
+    setVfyResult(null);
+    setVfyFileName(file.name);
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const text = String(reader.result ?? "");
+          resolve(text.includes(",") ? text.slice(text.indexOf(",") + 1) : text);
+        };
+        reader.onerror = () => reject(new Error("read failed"));
+        reader.readAsDataURL(file);
+      });
+      const res = await panelApi(user, "/api/image-verify", {
+        method: "POST",
+        body: { imageBase64: base64 },
+      });
+      if (!res.ok) {
+        throw new Error(await apiErrorMessage(res, "That image couldn’t be analysed."));
+      }
+      setVfyResult((await res.json()) as VerifyResult);
+    } catch (error) {
+      setVfyError(error instanceof Error ? error.message : "That image couldn’t be analysed.");
+    } finally {
+      setVfyBusy(false);
+    }
+  };
+
+  const runVerifyLookup = async (param: "generationId" | "fingerprint" | "uid", value: string, label: string) => {
+    if (!user || !value) return;
+    setVfySearchBusy(true);
+    setVfyError("");
+    try {
+      const res = await panelApi(user, `/api/image-lookup?${param}=${encodeURIComponent(value)}`);
+      if (!res.ok) {
+        throw new Error(await apiErrorMessage(res, "The image records couldn’t be searched."));
+      }
+      const data = (await res.json()) as { records: GenerationRecord[] };
+      setVfyRecords(data.records);
+      setVfyRecordsLabel(label);
+    } catch (error) {
+      setVfyError(error instanceof Error ? error.message : "The image records couldn’t be searched.");
+    } finally {
+      setVfySearchBusy(false);
+    }
+  };
+
+  const runVerifySearch = () => {
+    const query = vfyQuery.trim();
+    if (!query) return;
+    if (/^[0-9a-f]{16}$/i.test(query)) {
+      void runVerifyLookup("fingerprint", query.toLowerCase(), `All creations by creator ${query.toLowerCase()}`);
+    } else if (/^[0-9a-f-]{36}$/i.test(query)) {
+      void runVerifyLookup("generationId", query, `Generation ${query}`);
+    } else {
+      void runVerifyLookup("uid", query, `All creations by account ${query}`);
     }
   };
 
@@ -1735,6 +1827,7 @@ export default function ConsolePage() {
     { id: "logs", label: "Logs", icon: ICONS.logs },
     { id: "safety", label: "Safety flags", icon: ICONS.flag },
     { id: "media", label: "Media", icon: ICONS.image },
+    { id: "verify", label: "Image verify", icon: ICONS.verify },
     { id: "activity", label: "Activity", icon: ICONS.activity },
     { id: "system", label: "System", icon: ICONS.system },
   ];
@@ -2476,17 +2569,22 @@ export default function ConsolePage() {
                 </label>
               </div>
               {traceError && <div className="alert" role="alert">{traceError}</div>}
-              {verifyResult && !verifyResult.found && (
-                <p className="muted small">{verifyResult.reason}</p>
+              {verifyResult && !verifyResult.found && !verifyResult.record && (
+                <p className="muted small">
+                  {verifyResult.reason ??
+                    (verifyResult.nearMatches && verifyResult.nearMatches.length > 0
+                      ? "No watermark, but this picture is visually close to a saved generation — see the Image verify tab for the full analysis."
+                      : "No TruthAI provenance could be established for this image.")}
+                </p>
               )}
-              {verifyResult?.found && (
+              {(verifyResult?.found || verifyResult?.record) && (
                 <div>
                   <p className="muted small">
-                    Watermark read from the image — generation{" "}
-                    <code>{verifyResult.generationId}</code> · fingerprint{" "}
-                    <code>{verifyResult.creatorFingerprint}</code>
+                    {verifyResult.found
+                      ? <>Watermark read from the image — generation <code>{verifyResult.generationId}</code> · creator ID <code>{verifyResult.creatorFingerprint}</code> (admin only, never shown publicly).</>
+                      : <>This file exactly matches a saved generation (SHA-256) — generation <code>{verifyResult.generationId}</code>.</>}
                     {!verifyResult.record &&
-                      " · No saved record for this one (it was created before records were kept, or the record was removed) — the fingerprint still identifies the creator’s watermark."}
+                      " No saved record for this one (created before records were kept, or the record was removed) — the creator ID still identifies whose watermark it is; search it in the Image verify tab to see their other creations."}
                   </p>
                   {verifyResult.record && (
                     <GenerationCard
@@ -2855,6 +2953,225 @@ export default function ConsolePage() {
             </div>
           </section>
           </>
+        )}
+
+        {tab === "verify" && (
+          <section className="card">
+            <div className="card-head">
+              <h2>Image verification</h2>
+              <span className="muted small">deep analysis · admins only</span>
+            </div>
+            <p className="muted small">
+              Upload any image to analyse it in depth: the hidden TruthAI watermark,
+              file facts, embedded metadata (EXIF, generator text chunks), SHA-256 and
+              perceptual hashes, and matches against saved generations. Or search the
+              records by generation ID, creator ID or account ID. A creator’s ID is the
+              same on every image they make, so one search gathers all their creations —
+              and it is shown <strong>only here</strong>: the public verifier never
+              displays it, so creators can’t be tracked by strangers.
+            </p>
+
+            <div
+              className={`dropzone${vfyDrag ? " drag" : ""}`}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setVfyDrag(true);
+              }}
+              onDragLeave={() => setVfyDrag(false)}
+              onDrop={(event) => {
+                event.preventDefault();
+                setVfyDrag(false);
+                const file = event.dataTransfer.files?.[0];
+                if (file) void runVerifyTabUpload(file);
+              }}
+            >
+              <p>{vfyBusy ? "Analysing…" : "Drop an image here, or"}</p>
+              <label className="btn">
+                {vfyBusy ? "Working…" : "Upload image"}
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/bmp"
+                  hidden
+                  disabled={vfyBusy}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.target.value = "";
+                    if (file) void runVerifyTabUpload(file);
+                  }}
+                />
+              </label>
+              {vfyFileName && <p className="muted small">{vfyFileName}</p>}
+            </div>
+
+            <div className="trace-row">
+              <input
+                className="input"
+                type="search"
+                placeholder="Search by generation ID, creator ID (16 hex) or account ID…"
+                value={vfyQuery}
+                onChange={(event) => setVfyQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") runVerifySearch();
+                }}
+              />
+              <button type="button" className="btn" disabled={vfySearchBusy || !vfyQuery.trim()} onClick={runVerifySearch}>
+                {vfySearchBusy ? "Searching…" : "Search records"}
+              </button>
+            </div>
+
+            {vfyError && <div className="alert" role="alert">{vfyError}</div>}
+
+            {vfyRecords && (
+              <div>
+                <h3>{vfyRecordsLabel} · {vfyRecords.length} creation{vfyRecords.length === 1 ? "" : "s"}</h3>
+                {vfyRecords.length === 0 && <p className="muted small">No generation records match.</p>}
+                {vfyRecords.map((record) => (
+                  <GenerationCard
+                    key={record.generationId}
+                    record={record}
+                    onOpenProfile={(uid) => void openDetail(uid)}
+                    onViewChat={(uid, chatId) => void openPinnedChat(uid, chatId)}
+                  />
+                ))}
+              </div>
+            )}
+
+            {vfyResult && (
+              <div>
+                <h3>Analysis{vfyFileName ? ` — ${vfyFileName}` : ""}</h3>
+                {vfyResult.record ? (
+                  <div className="alert ok" role="status">
+                    {vfyResult.matchedBy === "watermark"
+                      ? "✓ TruthAI watermark verified — this is one of our generations and the creator is identified below."
+                      : "✓ This file exactly matches a saved TruthAI generation (SHA-256) — creator identified below."}
+                  </div>
+                ) : vfyResult.found ? (
+                  <div className="alert" role="status">
+                    This image carries a genuine TruthAI watermark (generation{" "}
+                    <code>{vfyResult.generationId}</code>, creator ID{" "}
+                    <code>{vfyResult.creatorFingerprint}</code>) but no saved record
+                    exists for it — it was created before records were kept, or the
+                    record was removed. Use “All creations by this creator” below to
+                    see everything else they made.
+                  </div>
+                ) : vfyResult.nearMatches && vfyResult.nearMatches.length > 0 ? (
+                  <div className="alert" role="status">
+                    No readable watermark and no exact file match — but the picture is
+                    visually very close to {vfyResult.nearMatches.length} saved
+                    generation{vfyResult.nearMatches.length === 1 ? "" : "s"} below.
+                    Treat those as leads, not proof.
+                  </div>
+                ) : (
+                  <div className="alert" role="status">{vfyResult.reason}</div>
+                )}
+
+                {vfyResult.record && (
+                  <GenerationCard
+                    record={vfyResult.record}
+                    onOpenProfile={(uid) => void openDetail(uid)}
+                    onViewChat={(uid, chatId) => void openPinnedChat(uid, chatId)}
+                  />
+                )}
+
+                {(vfyResult.creatorFingerprint || vfyResult.record?.creatorFingerprint) && (
+                  <p>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={vfySearchBusy}
+                      onClick={() =>
+                        void runVerifyLookup(
+                          "fingerprint",
+                          (vfyResult.creatorFingerprint ?? vfyResult.record?.creatorFingerprint) as string,
+                          `All creations by creator ${(vfyResult.creatorFingerprint ?? vfyResult.record?.creatorFingerprint) as string}`,
+                        )
+                      }
+                    >
+                      All creations by this creator
+                    </button>
+                  </p>
+                )}
+
+                {vfyResult.file && (
+                  <>
+                    <h3>File details</h3>
+                    <div className="stat-grid">
+                      <div><span>Format</span><strong>{vfyResult.file.format ?? "—"}</strong></div>
+                      <div><span>Dimensions</span><strong>{vfyResult.file.width}×{vfyResult.file.height}</strong></div>
+                      <div><span>Size</span><strong>{bytes(vfyResult.file.bytes)}</strong></div>
+                      <div><span>Colour mode</span><strong>{vfyResult.file.mode ?? "—"}</strong></div>
+                      <div><span>Transparency</span><strong>{vfyResult.file.hasAlpha ? "Yes (alpha)" : "No"}</strong></div>
+                      <div><span>Aspect ratio</span><strong>{vfyResult.file.aspectRatio ?? "—"}</strong></div>
+                      <div>
+                        <span>Average colour</span>
+                        <strong>
+                          {vfyResult.color?.average && (
+                            <span className="swatch" style={{ background: vfyResult.color.average }} />
+                          )}{" "}
+                          {vfyResult.color?.average ?? "—"}
+                        </strong>
+                      </div>
+                      <div><span>Brightness</span><strong>{vfyResult.color?.brightness != null ? `${Math.round(vfyResult.color.brightness * 100)}%` : "—"}</strong></div>
+                    </div>
+                  </>
+                )}
+
+                {vfyResult.hashes && (
+                  <>
+                    <h3>Hashes</h3>
+                    <p className="muted small">
+                      SHA-256 <code className="hash-line">{vfyResult.hashes.sha256}</code>
+                    </p>
+                    <p className="muted small">
+                      Perceptual hash <code className="hash-line">{vfyResult.hashes.averageHash}</code>{" "}
+                      — recognises the same picture after light edits, even without a watermark.
+                    </p>
+                  </>
+                )}
+
+                <h3>Embedded metadata</h3>
+                {(() => {
+                  const exif = Object.entries(vfyResult.metadata?.exif ?? {});
+                  const chunks = Object.entries(vfyResult.metadata?.textChunks ?? {});
+                  if (exif.length === 0 && chunks.length === 0) {
+                    return <p className="muted small">No EXIF or embedded text metadata in this file.</p>;
+                  }
+                  return (
+                    <div className="table-wrap">
+                      <table className="table">
+                        <tbody>
+                          {exif.map(([key, value]) => (
+                            <tr key={`exif-${key}`}><td>{key}</td><td className="meta-value">{value}</td></tr>
+                          ))}
+                          {chunks.map(([key, value]) => (
+                            <tr key={`text-${key}`}><td>{key}</td><td className="meta-value">{value}</td></tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })()}
+
+                {vfyResult.nearMatches && vfyResult.nearMatches.length > 0 && (
+                  <>
+                    <h3>Visually similar generations</h3>
+                    {vfyResult.nearMatches.map((match) => (
+                      <div key={match.generationId}>
+                        <p className="muted small">
+                          Visual distance {match.distance}/64 — 0 is identical, under 8 is the same picture lightly edited.
+                        </p>
+                        <GenerationCard
+                          record={match}
+                          onOpenProfile={(uid) => void openDetail(uid)}
+                          onViewChat={(uid, chatId) => void openPinnedChat(uid, chatId)}
+                        />
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+            )}
+          </section>
         )}
 
         {tab === "activity" && overview && (

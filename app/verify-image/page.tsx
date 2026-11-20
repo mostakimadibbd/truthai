@@ -62,7 +62,6 @@ function readBytesAt(
 
 type Found = {
   generationId: string;
-  creatorHash: string;
   legacyBrand: boolean;
 };
 
@@ -104,9 +103,14 @@ function extractFromPixels(
       }
       const match = /^(truthai|xyro-ai):([^:]+):([0-9a-f]{16})$/.exec(payload);
       if (!match) continue;
+      // PRIVACY (owner rule, 2026-11-20): the payload's creator
+      // ID (match[3]) is deliberately NOT surfaced here. It is a
+      // stable per-creator identifier — showing it publicly
+      // would let anyone link all of a person's creations
+      // together. Only signed-in TruthAI admins can resolve it,
+      // inside the admin panel, for safety investigations.
       return {
         generationId: match[2],
-        creatorHash: match[3],
         legacyBrand: match[1] === "xyro-ai",
       };
     }
@@ -238,14 +242,14 @@ export default function VerifyImagePage() {
                 <dt>Generation ID</dt>
                 <dd>{state.found.generationId}</dd>
               </div>
-              <div>
-                <dt>Creator fingerprint</dt>
-                <dd>{state.found.creatorHash}</dd>
-              </div>
             </dl>
             <p className="muted">
-              The fingerprint is a one-way hash of the creator’s account —
-              it can confirm a match, but it never reveals who they are.
+              Who created it is never shown publicly — the watermark also
+              carries a private creator ID, but only TruthAI admins can
+              see it, inside the admin panel, so a creator’s images can’t
+              be linked together by strangers. If this image concerns
+              you, share its Generation ID with us and an admin can trace
+              it.
             </p>
           </div>
         )}
