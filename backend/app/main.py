@@ -642,6 +642,33 @@ async def admin_image_verify(request: Request):
         return _error(error.status, error.code, error.message)
 
 
+@app.post("/v1/admin/media/move")
+async def admin_media_move(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    actor_uid, _actor_email, actor_role = gate
+    try:
+        body = await request.json()
+    except Exception:
+        return _error(400, "INVALID_JSON", "Send a JSON body.")
+    if not isinstance(body, dict) or not isinstance(body.get("publicId"), str):
+        return _error(400, "INVALID_BODY", "Send the media reference to move.")
+    try:
+        result = admin.move_media(
+            firestore_client(),
+            actor_uid,
+            actor_role,
+            body["publicId"],
+            body.get("resourceType") if isinstance(body.get("resourceType"), str) else "",
+            body.get("deliveryType") if isinstance(body.get("deliveryType"), str) else "",
+            body.get("destination") if isinstance(body.get("destination"), str) else "",
+        )
+        return {"success": True, **result}
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+
+
 @app.post("/v1/admin/media/upload")
 async def admin_media_upload(request: Request):
     gate = await _admin_gate(request)

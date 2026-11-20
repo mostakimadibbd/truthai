@@ -519,10 +519,18 @@ function GenerationCard({
   record,
   onOpenProfile,
   onViewChat,
+  onPreview,
+  onOriginal,
+  onMove,
+  onDelete,
 }: {
   record: GenerationRecord;
   onOpenProfile: (uid: string) => void;
   onViewChat: (uid: string, chatId: string) => void;
+  onPreview?: (record: GenerationRecord) => void;
+  onOriginal?: (record: GenerationRecord) => void;
+  onMove?: (record: GenerationRecord) => void;
+  onDelete?: (record: GenerationRecord) => void;
 }) {
   return (
     <div className="flag-card">
@@ -539,7 +547,7 @@ function GenerationCard({
       <p className="muted small">
         Generation ID <code>{record.generationId}</code>
         {record.creatorFingerprint && (
-          <> · Fingerprint <code>{record.creatorFingerprint}</code></>
+          <> · Creator ID <code>{record.creatorFingerprint}</code></>
         )}
       </p>
       <div className="flag-actions">
@@ -558,6 +566,35 @@ function GenerationCard({
           </button>
         )}
       </div>
+      {record.publicId && (onPreview || onOriginal || onMove || onDelete) && (
+        <div className="flag-actions">
+          {onPreview && (
+            <button type="button" className="btn btn-ghost" onClick={() => onPreview(record)}>
+              Preview
+            </button>
+          )}
+          {onOriginal && (
+            <button type="button" className="btn btn-ghost" onClick={() => onOriginal(record)}>
+              Original link
+            </button>
+          )}
+          {onMove && (
+            <button type="button" className="btn btn-ghost" onClick={() => onMove(record)}>
+              Move…
+            </button>
+          )}
+          {onDelete && (
+            <button type="button" className="btn btn-danger" onClick={() => onDelete(record)}>
+              Delete from Cloudinary
+            </button>
+          )}
+        </div>
+      )}
+      {record.publicId && (
+        <p className="muted small">
+          Stored at <code>{record.publicId}</code> in Cloudinary (private, authenticated).
+        </p>
+      )}
     </div>
   );
 }
@@ -697,6 +734,11 @@ export default function ConsolePage() {
   const [vfySearchBusy, setVfySearchBusy] = useState(false);
   const [vfyRecords, setVfyRecords] = useState<GenerationRecord[] | null>(null);
   const [vfyRecordsLabel, setVfyRecordsLabel] = useState("");
+  const [genDeleteTarget, setGenDeleteTarget] = useState<GenerationRecord | null>(null);
+  const [genMoveTarget, setGenMoveTarget] = useState<GenerationRecord | null>(null);
+  const [genMoveDest, setGenMoveDest] = useState("");
+  const [genActionBusy, setGenActionBusy] = useState(false);
+  const [genActionError, setGenActionError] = useState("");
   const [dbCollections, setDbCollections] = useState<DbCollection[]>([]);
   const [dbPath, setDbPath] = useState("");
   const [dbDocs, setDbDocs] = useState<DbDocSummary[]>([]);
@@ -1231,6 +1273,131 @@ export default function ConsolePage() {
       void runVerifyLookup("generationId", query, `Generation ${query}`);
     } else {
       void runVerifyLookup("uid", query, `All creations by account ${query}`);
+    }
+  };
+
+  // Media management for generation records (Image verify tab
+  // + trace results): preview through the gated download proxy,
+  // the original Cloudinary link on demand, move/rename, and
+  // delete — all audited by the backend. Deleting removes the
+  // Cloudinary asset only; the generation record stays for
+  // provenance. Moving repoints the records automatically.
+  const recordToEntry = (record: GenerationRecord): MediaEntry => ({
+    publicId: record.publicId as string,
+    resourceType: "image",
+    deliveryType: "authenticated",
+    format: record.format ?? "png",
+    bytes: record.bytes ?? null,
+    ownerUid: record.uid ?? null,
+    ownerEmail: record.creatorEmail ?? null,
+  });
+
+  const previewRecord = async (record: GenerationRecord) => {
+    if (!record.publicId) return;
+    const entry = recordToEntry(record);
+    setMediaPreviewBusy(entry.publicId);
+    try {
+      const blob = await fetchMediaBlob(entry);
+      if (!blob) {
+        setVfyError("That image couldn’t be previewed — it may already be deleted from Cloudinary.");
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      setMediaPreview({ entry, url, kind: "image" });
+    } finally {
+      setMediaPreviewBusy("");
+    }
+  };
+
+  const originalRecord = (record: GenerationRecord) => {
+    if (record.publicId) void fetchOriginalLink(recordToEntry(record));
+  };
+
+  const mapRecordLists = (fn: (record: GenerationRecord) => GenerationRecord) => {
+    setVfyRecords((rows) => (rows ? rows.map(fn) : rows));
+    setTraceRecords((rows) => (rows ? rows.map(fn) : rows));
+    setVfyResult((current) =>
+      current
+        ? {
+            ...current,
+            record: current.record ? fn(current.record) : current.record,
+            nearMatches: current.nearMatches?.map(fn),
+          }
+        : current,
+    );
+  };
+
+  const openGenMove = (record: GenerationRecord) => {
+    setGenMoveTarget(record);
+    setGenMoveDest(`xyro/flagged/${record.generationId}`);
+    setGenActionError("");
+  };
+
+  const openGenDelete = (record: GenerationRecord) => {
+    setGenDeleteTarget(record);
+    setGenActionError("");
+  };
+
+  const runGenDelete = async () => {
+    if (!user || !genDeleteTarget?.publicId) return;
+    const target = genDeleteTarget;
+    setGenActionBusy(true);
+    setGenActionError("");
+    try {
+      const res = await panelApi(user, "/api/media", {
+        method: "POST",
+        body: {
+          publicId: target.publicId,
+          resourceType: "image",
+          deliveryType: "authenticated",
+        },
+      });
+      if (!res.ok) {
+        throw new Error(await apiErrorMessage(res, "That image couldn’t be deleted."));
+      }
+      mapRecordLists((record) =>
+        record.publicId === target.publicId ? { ...record, publicId: null } : record,
+      );
+      setGenDeleteTarget(null);
+      setToast("Image deleted from Cloudinary. Its generation record is kept here for provenance.");
+      window.setTimeout(() => setToast(""), 4500);
+    } catch (error) {
+      setGenActionError(error instanceof Error ? error.message : "That image couldn’t be deleted.");
+    } finally {
+      setGenActionBusy(false);
+    }
+  };
+
+  const runGenMove = async () => {
+    if (!user || !genMoveTarget?.publicId) return;
+    const target = genMoveTarget;
+    const destination = genMoveDest.trim();
+    if (!destination) return;
+    setGenActionBusy(true);
+    setGenActionError("");
+    try {
+      const res = await panelApi(user, "/api/media/move", {
+        method: "POST",
+        body: {
+          publicId: target.publicId,
+          resourceType: "image",
+          deliveryType: "authenticated",
+          destination,
+        },
+      });
+      if (!res.ok) {
+        throw new Error(await apiErrorMessage(res, "That image couldn’t be moved."));
+      }
+      mapRecordLists((record) =>
+        record.publicId === target.publicId ? { ...record, publicId: destination } : record,
+      );
+      setGenMoveTarget(null);
+      setToast(`Image moved to ${destination} — the records and the creator’s chat now point there.`);
+      window.setTimeout(() => setToast(""), 4500);
+    } catch (error) {
+      setGenActionError(error instanceof Error ? error.message : "That image couldn’t be moved.");
+    } finally {
+      setGenActionBusy(false);
     }
   };
 
@@ -2591,6 +2758,10 @@ export default function ConsolePage() {
                       record={verifyResult.record}
                       onOpenProfile={(uid) => void openDetail(uid)}
                       onViewChat={(uid, chatId) => void openPinnedChat(uid, chatId)}
+                      onPreview={(r) => void previewRecord(r)}
+                      onOriginal={originalRecord}
+                      onMove={openGenMove}
+                      onDelete={openGenDelete}
                     />
                   )}
                 </div>
@@ -2604,6 +2775,10 @@ export default function ConsolePage() {
                   record={record}
                   onOpenProfile={(uid) => void openDetail(uid)}
                   onViewChat={(uid, chatId) => void openPinnedChat(uid, chatId)}
+                  onPreview={(r) => void previewRecord(r)}
+                  onOriginal={originalRecord}
+                  onMove={openGenMove}
+                  onDelete={openGenDelete}
                 />
               ))}
             </div>
@@ -3031,6 +3206,10 @@ export default function ConsolePage() {
                     record={record}
                     onOpenProfile={(uid) => void openDetail(uid)}
                     onViewChat={(uid, chatId) => void openPinnedChat(uid, chatId)}
+                    onPreview={(r) => void previewRecord(r)}
+                    onOriginal={originalRecord}
+                    onMove={openGenMove}
+                    onDelete={openGenDelete}
                   />
                 ))}
               </div>
@@ -3070,6 +3249,10 @@ export default function ConsolePage() {
                     record={vfyResult.record}
                     onOpenProfile={(uid) => void openDetail(uid)}
                     onViewChat={(uid, chatId) => void openPinnedChat(uid, chatId)}
+                    onPreview={(r) => void previewRecord(r)}
+                    onOriginal={originalRecord}
+                    onMove={openGenMove}
+                    onDelete={openGenDelete}
                   />
                 )}
 
@@ -3164,6 +3347,10 @@ export default function ConsolePage() {
                           record={match}
                           onOpenProfile={(uid) => void openDetail(uid)}
                           onViewChat={(uid, chatId) => void openPinnedChat(uid, chatId)}
+                          onPreview={(r) => void previewRecord(r)}
+                          onOriginal={originalRecord}
+                          onMove={openGenMove}
+                          onDelete={openGenDelete}
                         />
                       </div>
                     ))}
@@ -3777,6 +3964,68 @@ export default function ConsolePage() {
               </button>
               <button type="button" className="btn" onClick={closeMediaPreview}>
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {genDeleteTarget && (
+        <div className="modal-wrap" role="dialog" aria-modal="true" aria-label="Delete image from Cloudinary">
+          <div className="modal">
+            <h2>Delete this image from Cloudinary?</h2>
+            {genDeleteTarget.prompt && <p className="flag-prompt">“{genDeleteTarget.prompt}”</p>}
+            <p className="muted small">
+              Stored at <code>{genDeleteTarget.publicId}</code>. The file is removed from
+              Cloudinary and disappears from the creator’s chat. The generation record
+              itself is kept in this panel for provenance, and the deletion is written
+              to the audit log.
+            </p>
+            {genActionError && <div className="alert" role="alert">{genActionError}</div>}
+            <div className="modal-actions">
+              <button type="button" className="btn btn-ghost" disabled={genActionBusy} onClick={() => setGenDeleteTarget(null)}>
+                Cancel
+              </button>
+              <button type="button" className="btn btn-danger" disabled={genActionBusy} onClick={() => void runGenDelete()}>
+                {genActionBusy ? "Deleting…" : "Delete image"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {genMoveTarget && (
+        <div className="modal-wrap" role="dialog" aria-modal="true" aria-label="Move image in Cloudinary">
+          <div className="modal">
+            <h2>Move image in Cloudinary</h2>
+            <p className="muted small">
+              Currently at <code>{genMoveTarget.publicId}</code>. The generation record
+              and the creator’s chat are repointed to the new location automatically,
+              so the picture keeps working. The move is written to the audit log.
+            </p>
+            <div className="modal-field">
+              <span>Destination path</span>
+              <input
+                className="input"
+                type="text"
+                value={genMoveDest}
+                maxLength={200}
+                onChange={(event) => setGenMoveDest(event.target.value)}
+                placeholder="xyro/flagged/…"
+              />
+            </div>
+            {genActionError && <div className="alert" role="alert">{genActionError}</div>}
+            <div className="modal-actions">
+              <button type="button" className="btn btn-ghost" disabled={genActionBusy} onClick={() => setGenMoveTarget(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={genActionBusy || !genMoveDest.trim() || genMoveDest.trim() === genMoveTarget.publicId}
+                onClick={() => void runGenMove()}
+              >
+                {genActionBusy ? "Moving…" : "Move image"}
               </button>
             </div>
           </div>

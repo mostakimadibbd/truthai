@@ -1012,6 +1012,87 @@ def delete_media(db, actor_uid: str, actor_role: str, public_id: str, resource_t
     return {"deleted": True, "publicId": public_id}
 
 
+def move_media(db, actor_uid: str, actor_role: str, public_id: str, resource_type: str, delivery_type: str, destination: str) -> dict:
+    """Move/rename one Cloudinary asset (audited). Generation
+    records and the owner's upload doc that point at the old
+    public ID are updated to the new one, so a moved generated
+    image keeps working in its creator's chat."""
+    credentials = settings.cloudinary_credentials
+    if credentials is None:
+        raise AdminAuthError(503, "MEDIA_NOT_CONFIGURED", "Cloudinary isn’t configured on the backend.")
+    if resource_type not in ("image", "raw") or delivery_type not in ("authenticated", "upload"):
+        raise AdminAuthError(400, "INVALID_MEDIA", "That media reference isn’t valid.")
+    destination = (destination or "").strip().strip("/")
+    if (
+        not destination
+        or len(destination) > 200
+        or ".." in destination.split("/")
+        or not all(ch.isalnum() or ch in "/_-." for ch in destination)
+    ):
+        raise AdminAuthError(400, "INVALID_DESTINATION", "Give a valid destination path in Cloudinary (letters, numbers, / _ - . only).")
+    if destination == public_id:
+        raise AdminAuthError(400, "INVALID_DESTINATION", "That’s the image’s current location.")
+    cloud_name, api_key, api_secret = credentials
+    timestamp = int(time.time())
+    sign_params = {
+        "from_public_id": public_id,
+        "timestamp": timestamp,
+        "to_public_id": destination,
+        "type": delivery_type,
+    }
+    form = {
+        "api_key": api_key,
+        "timestamp": str(timestamp),
+        "from_public_id": public_id,
+        "to_public_id": destination,
+        "type": delivery_type,
+        "signature": _cloudinary_sign(sign_params, api_secret),
+    }
+    try:
+        response = httpx.post(
+            f"https://api.cloudinary.com/v1_1/{cloud_name}/{resource_type}/rename",
+            data=form,
+            timeout=20,
+        )
+        payload = response.json()
+    except Exception as error:  # noqa: BLE001
+        raise AdminAuthError(502, "MEDIA_MOVE_FAILED", f"Cloudinary couldn’t move that file ({type(error).__name__}).") from error
+    if response.status_code >= 400 or not isinstance(payload, dict) or payload.get("public_id") != destination:
+        message = ""
+        if isinstance(payload, dict):
+            message = str((payload.get("error") or {}).get("message") or "")
+        if "already exists" in message.lower():
+            raise AdminAuthError(409, "MEDIA_EXISTS", "Something already exists at that destination in Cloudinary.")
+        raise AdminAuthError(502, "MEDIA_MOVE_FAILED", f"Cloudinary couldn’t move that file. {message}".strip())
+    # Repoint the records that reference the old location.
+    records_updated = 0
+    try:
+        snaps = db.collection("imageGenerations").where("publicId", "==", public_id).limit(50).get()
+        for snap in snaps:
+            data = snap.to_dict() or {}
+            db.collection("imageGenerations").document(snap.id).set(
+                {"publicId": destination}, merge=True
+            )
+            records_updated += 1
+            uid, asset_id = data.get("uid"), data.get("assetId")
+            if isinstance(uid, str) and isinstance(asset_id, str):
+                try:
+                    db.collection(f"users/{uid}/uploads").document(asset_id).set(
+                        {"publicId": destination}, merge=True
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    _audit_media(db, actor_uid, actor_role, "media_move", public_id, _media_owner(public_id))
+    return {
+        "moved": True,
+        "publicId": destination,
+        "fromPublicId": public_id,
+        "recordsUpdated": records_updated,
+    }
+
+
 def upload_media(db, actor_uid: str, actor_role: str, filename: str, data: bytes, resource_type: str) -> dict:
     """Admin upload into xyro/admin-uploads (signed, audited)."""
     credentials = settings.cloudinary_credentials

@@ -2424,6 +2424,92 @@ def test_admin_image_lookup_and_verify():
         admin.firebase_auth = original_auth
 
 
+def test_admin_media_move():
+    """Moving a generated image in Cloudinary repoints the
+    generation record and the owner's upload doc, and audits."""
+    import httpx as httpx_module
+
+    from app import admin
+    from app.config import settings
+
+    originals = (
+        settings.cloudinary_url,
+        settings.cloudinary_cloud_name,
+        settings.cloudinary_api_key,
+        settings.cloudinary_api_secret,
+    )
+    settings.cloudinary_url = ""
+    settings.cloudinary_cloud_name = "cloud-x"
+    settings.cloudinary_api_key = "key-1"
+    settings.cloudinary_api_secret = "secret-1"
+
+    class _Resp:
+        def __init__(self, payload, status=200):
+            self._payload = payload
+            self.status_code = status
+
+        def json(self):
+            return self._payload
+
+    real_post = httpx_module.post
+    httpx_module.post = lambda url, **kw: _Resp({"public_id": kw["data"]["to_public_id"]})
+    try:
+        db = _AdminDb()
+        db.store[("imageGenerations", "gen-move")] = {
+            "generationId": "gen-move",
+            "uid": "dev1",
+            "assetId": "asset-1",
+            "publicId": "xyro/generated/dev1/gen-move",
+            "createdAtMs": 1700000000000,
+        }
+        db.store[("users/dev1/uploads", "asset-1")] = {
+            "publicId": "xyro/generated/dev1/gen-move",
+            "status": "ready",
+        }
+        result = admin.move_media(
+            db, "boss1", "owner",
+            "xyro/generated/dev1/gen-move", "image", "authenticated",
+            "xyro/flagged/gen-move",
+        )
+        assert result["moved"] is True
+        assert result["publicId"] == "xyro/flagged/gen-move"
+        assert result["recordsUpdated"] == 1
+        assert db.store[("imageGenerations", "gen-move")]["publicId"] == "xyro/flagged/gen-move"
+        assert db.store[("users/dev1/uploads", "asset-1")]["publicId"] == "xyro/flagged/gen-move"
+        audits = [data for (collection, _), data in db.store.items() if collection == "adminActions"]
+        assert any(entry.get("action") == "media_move" for entry in audits)
+
+        for bad in ("", "xyro/generated/dev1/gen-move", "bad path!", "../escape"):
+            try:
+                admin.move_media(
+                    db, "boss1", "owner",
+                    "xyro/generated/dev1/gen-move", "image", "authenticated", bad,
+                )
+                raise AssertionError(f"destination {bad!r} accepted")
+            except admin.AdminAuthError as error:
+                assert error.code == "INVALID_DESTINATION"
+
+        httpx_module.post = lambda url, **kw: _Resp(
+            {"error": {"message": "Resource already exists"}}, status=409
+        )
+        try:
+            admin.move_media(
+                db, "boss1", "owner",
+                "xyro/flagged/gen-move", "image", "authenticated", "xyro/other",
+            )
+            raise AssertionError("conflicting move accepted")
+        except admin.AdminAuthError as error:
+            assert error.code == "MEDIA_EXISTS"
+    finally:
+        httpx_module.post = real_post
+        (
+            settings.cloudinary_url,
+            settings.cloudinary_cloud_name,
+            settings.cloudinary_api_key,
+            settings.cloudinary_api_secret,
+        ) = originals
+
+
 def test_admin_image_deep_analysis():
     """The Image verify panel's deep analysis: file facts,
     embedded text metadata, hashes — plus provenance fallbacks:
