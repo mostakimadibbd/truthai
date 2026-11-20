@@ -2305,6 +2305,125 @@ def test_admin_timed_suspension():
         admin.firebase_auth = original_auth
 
 
+def _ts_watermark_frame(payload: bytes) -> bytes:
+    """The MAIN app's frame format (lib/server/watermark.ts):
+    magic + version 1 + uint16BE length + payload + CRC-32."""
+    import binascii
+
+    crc = binascii.crc32(payload) & 0xFFFFFFFF
+    return b"XYRO" + bytes([1]) + len(payload).to_bytes(2, "big") + payload + crc.to_bytes(4, "big")
+
+
+def _ts_watermark_embed(rgba: bytearray, width: int, frame: bytes, start_bit: int) -> None:
+    for i in range(len(frame) * 8):
+        bit = (frame[i >> 3] >> (7 - (i & 7))) & 1
+        absolute = start_bit + i
+        pixel = absolute // 3
+        channel = absolute % 3
+        offset = pixel * 4 + channel
+        rgba[offset] = (rgba[offset] & 0xFE) | bit
+
+
+def test_watermark_provenance_extract():
+    """The backend reads the main app's TILED watermark: a copy
+    at any tile origin verifies, a tampered CRC does not."""
+    from app import watermark
+
+    width = height = 300
+    payload = b"truthai:gen-123:0123456789abcdef"
+    frame = _ts_watermark_frame(payload)
+
+    rgba = bytearray(width * height * 4)
+    _ts_watermark_embed(rgba, width, frame, 0)
+    assert watermark.extract_provenance(bytes(rgba), width, height) == payload.decode()
+
+    # Only the (256, 0) tile copy survives — still found.
+    rgba2 = bytearray(width * height * 4)
+    _ts_watermark_embed(rgba2, width, frame, (0 * width + 256) * 3)
+    assert watermark.extract_provenance(bytes(rgba2), width, height) == payload.decode()
+
+    # Corrupt one payload bit after embedding: CRC rejects it.
+    # Bit 60 of the frame is payload bit 4; it lives at pixel 20,
+    # channel 0 → RGBA byte offset 80.
+    rgba3 = bytearray(width * height * 4)
+    _ts_watermark_embed(rgba3, width, frame, 0)
+    rgba3[80] ^= 1
+    assert watermark.extract_provenance(bytes(rgba3), width, height) is None
+
+    # No watermark at all.
+    assert watermark.extract_provenance(bytes(width * height * 4), width, height) is None
+
+
+def test_admin_image_lookup_and_verify():
+    """Image tracing: records resolve by generation ID and by
+    creator fingerprint, and an uploaded watermarked image is
+    traced back to its record + creator."""
+    import io
+
+    from PIL import Image
+
+    from app import admin
+
+    db = _AdminDb()
+    db.store[("imageGenerations", "gen-123")] = {
+        "generationId": "gen-123",
+        "assetId": "asset-1",
+        "uid": "dev1",
+        "creatorFingerprint": "0123456789abcdef",
+        "chatId": "chat-9",
+        "prompt": "a red kite over Dhaka",
+        "model": "flux-test",
+        "provider": "cloudflare",
+        "publicId": "xyro/generated/dev1/gen-123",
+        "format": "png",
+        "bytes": 12345,
+        "width": 300,
+        "height": 300,
+        "createdAtMs": 1700000000000,
+    }
+    records = {"dev1": _FakeUserRecord("dev1", "dev@example.com")}
+    fake_auth = _FakeAuthModule(records)
+    original_auth = admin.firebase_auth
+    admin.firebase_auth = lambda: fake_auth
+    try:
+        by_id = admin.lookup_image_generations(db, "boss1", generation_id="gen-123")
+        assert len(by_id["records"]) == 1
+        row = by_id["records"][0]
+        assert row["chatId"] == "chat-9"
+        assert row["creatorEmail"] == "dev@example.com"
+
+        by_fp = admin.lookup_image_generations(db, "boss1", fingerprint="0123456789abcdef")
+        assert [r["generationId"] for r in by_fp["records"]] == ["gen-123"]
+
+        missing = admin.lookup_image_generations(db, "boss1", generation_id="nope")
+        assert missing["records"] == []
+
+        # Upload-to-verify: a PNG carrying the hidden payload
+        # resolves to the same record and creator.
+        width = height = 300
+        image = Image.new("RGBA", (width, height), (24, 40, 90, 255))
+        rgba = bytearray(image.tobytes())
+        frame = _ts_watermark_frame(b"truthai:gen-123:0123456789abcdef")
+        _ts_watermark_embed(rgba, width, frame, 0)
+        stamped = Image.frombytes("RGBA", (width, height), bytes(rgba))
+        buffer = io.BytesIO()
+        stamped.save(buffer, format="PNG")
+        result = admin.verify_image(db, "boss1", buffer.getvalue())
+        assert result["found"] is True
+        assert result["generationId"] == "gen-123"
+        assert result["creatorFingerprint"] == "0123456789abcdef"
+        assert result["creatorEmail"] == "dev@example.com"
+        assert result["record"]["chatId"] == "chat-9"
+
+        # A plain image has no credentials to find.
+        plain = io.BytesIO()
+        Image.new("RGBA", (64, 64), (0, 0, 0, 255)).save(plain, format="PNG")
+        clean = admin.verify_image(db, "boss1", plain.getvalue())
+        assert clean["found"] is False
+    finally:
+        admin.firebase_auth = original_auth
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):

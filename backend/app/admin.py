@@ -1088,6 +1088,188 @@ def download_media(public_id: str, resource_type: str, format_: str, delivery_ty
     return response.content, response.headers.get("content-type", "application/octet-stream")
 
 
+def media_original_url(db, actor_uid: str, actor_role: str, public_id: str, resource_type: str, delivery_type: str, format_: str) -> dict:
+    """The ORIGINAL Cloudinary link for one asset — ADMIN ONLY,
+    minted on demand and audited (owner requirement, 2026-11-20).
+    End users never see a Cloudinary link (their files stream
+    through the app's own /api/files route); this exists so the
+    owner can open the asset at the source and manage it there.
+    Public assets get their plain delivery URL; authenticated
+    assets get a signed download URL (same construction as
+    download_media, returned instead of fetched)."""
+    credentials = settings.cloudinary_credentials
+    if credentials is None:
+        raise AdminAuthError(503, "MEDIA_NOT_CONFIGURED", "Cloudinary isn’t configured on the backend.")
+    if resource_type not in ("image", "raw") or delivery_type not in ("authenticated", "upload"):
+        raise AdminAuthError(400, "INVALID_MEDIA", "That media reference isn’t valid.")
+    cloud_name, api_key, api_secret = credentials
+    if delivery_type == "upload":
+        url = f"https://res.cloudinary.com/{cloud_name}/{resource_type}/upload/{public_id}"
+        if resource_type == "image" and format_ and not public_id.endswith(f".{format_}"):
+            url += f".{format_}"
+    else:
+        timestamp = int(time.time())
+        sign_params = {
+            "public_id": public_id,
+            "format": format_,
+            "type": delivery_type,
+            "timestamp": timestamp,
+        }
+        query = {
+            **sign_params,
+            "api_key": api_key,
+            "signature": _cloudinary_sign(sign_params, api_secret),
+        }
+        from urllib.parse import urlencode
+
+        url = f"https://api.cloudinary.com/v1_1/{cloud_name}/{resource_type}/download?{urlencode(query)}"
+    _audit_media(db, actor_uid, actor_role, "media_original_url", public_id, _media_owner(public_id))
+    return {"url": url}
+
+
+def _generation_view(doc_id: str, data: dict) -> dict:
+    """One imageGenerations record, panel-shaped."""
+    return {
+        "generationId": data.get("generationId") or doc_id,
+        "assetId": data.get("assetId"),
+        "uid": data.get("uid"),
+        "creatorFingerprint": data.get("creatorFingerprint"),
+        "chatId": data.get("chatId"),
+        "prompt": data.get("prompt"),
+        "model": data.get("model"),
+        "provider": data.get("provider"),
+        "publicId": data.get("publicId"),
+        "format": data.get("format"),
+        "bytes": data.get("bytes"),
+        "width": data.get("width"),
+        "height": data.get("height"),
+        "createdAtMs": data.get("createdAtMs"),
+    }
+
+
+def _creator_identity(uid: str | None) -> tuple[str | None, str | None]:
+    """(email, displayName) for a uid, best effort."""
+    if not uid:
+        return None, None
+    email = _resolve_emails([uid]).get(uid)
+    name = None
+    try:
+        record = firebase_auth().get_user(uid)
+        name = getattr(record, "display_name", None)
+        if email is None:
+            email = getattr(record, "email", None)
+    except Exception:
+        pass
+    return email, name
+
+
+def lookup_image_generations(db, actor_uid: str, *, generation_id: str = "", fingerprint: str = "", uid: str = "") -> dict:
+    """Trace generated images: by generation ID (exact), by
+    creator fingerprint (every image that account created), or
+    by creator uid. Records come from the imageGenerations
+    collection the app writes at creation time; each result is
+    enriched with the creator's email/name so the panel can
+    open the profile and the originating chat."""
+    records: list[dict] = []
+    collection = db.collection("imageGenerations")
+    if generation_id:
+        snap = collection.document(generation_id).get()
+        if snap.exists:
+            records.append(_generation_view(snap.id, snap.to_dict() or {}))
+    elif fingerprint or uid:
+        field = "creatorFingerprint" if fingerprint else "uid"
+        value = fingerprint or uid
+        snaps = collection.where(field, "==", value).limit(50).get()
+        views = [_generation_view(snap.id, snap.to_dict() or {}) for snap in snaps]
+        views.sort(key=lambda row: row.get("createdAtMs") or 0, reverse=True)
+        records = views
+    for row in records:
+        email, name = _creator_identity(row.get("uid"))
+        row["creatorEmail"] = email
+        row["creatorName"] = name
+    try:
+        db.collection("adminActions").add(
+            {
+                "action": "image_lookup",
+                "actorUid": actor_uid,
+                "targetUid": records[0].get("uid") if records else None,
+                "query": (generation_id or fingerprint or uid)[:120],
+                "results": len(records),
+                "ts": int(time.time() * 1000),
+            }
+        )
+    except Exception:
+        pass
+    return {"records": records}
+
+
+def verify_image(db, actor_uid: str, image_bytes: bytes) -> dict:
+    """Detect the hidden provenance credentials in an image the
+    admin uploads: extract the watermark payload (the main app's
+    tiled LSB frame), then resolve the generation record and
+    the creator. An image generated before records existed (or
+    whose record was removed) still yields its generation ID +
+    fingerprint from the pixels alone."""
+    import io
+
+    from PIL import Image
+
+    from . import watermark
+
+    if len(image_bytes) > 20 * 1024 * 1024:
+        raise AdminAuthError(413, "IMAGE_TOO_LARGE", "That image is too large to verify (20 MB max).")
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        image.load()
+    except Exception as error:  # noqa: BLE001
+        raise AdminAuthError(422, "INVALID_IMAGE", "That file couldn’t be read as an image.") from error
+    width, height = image.size
+    if width * height > 64_000_000:
+        raise AdminAuthError(413, "IMAGE_TOO_LARGE", "That image’s dimensions are too large to verify.")
+    rgba = image.convert("RGBA").tobytes()
+    payload = watermark.extract_provenance(rgba, width, height)
+    if not payload:
+        return {
+            "found": False,
+            "reason": "No TruthAI watermark could be read from this image. It may not be ours, or the mark was destroyed (JPEG re-encode, screenshot, heavy edit or crop).",
+        }
+    parts = payload.split(":")
+    if len(parts) != 3 or parts[0] not in ("truthai", "xyro-ai"):
+        return {"found": False, "reason": "A watermark was present but its payload wasn’t recognised."}
+    _, generation_id, fingerprint = parts
+    record = None
+    snap = db.collection("imageGenerations").document(generation_id).get()
+    if snap.exists:
+        record = _generation_view(snap.id, snap.to_dict() or {})
+    creator_uid = record.get("uid") if record else None
+    email, name = _creator_identity(creator_uid)
+    if record:
+        record["creatorEmail"] = email
+        record["creatorName"] = name
+    try:
+        db.collection("adminActions").add(
+            {
+                "action": "image_verify",
+                "actorUid": actor_uid,
+                "targetUid": creator_uid,
+                "generationId": generation_id,
+                "ts": int(time.time() * 1000),
+            }
+        )
+    except Exception:
+        pass
+    return {
+        "found": True,
+        "payload": payload,
+        "generationId": generation_id,
+        "creatorFingerprint": fingerprint,
+        "record": record,
+        "creatorUid": creator_uid,
+        "creatorEmail": email,
+        "creatorName": name,
+    }
+
+
 def _live_streams() -> dict:
     """What's happening right now in the Realtime Database:
     how many chat stream nodes exist and how many are actively
@@ -2183,6 +2365,7 @@ DATABASE_COLLECTIONS = [
     "searchEvents",
     "chatErrors",
     "safetyFlags",
+    "imageGenerations",
     "deletedUsers",
     "deviceSignals",
     "chatJobs",

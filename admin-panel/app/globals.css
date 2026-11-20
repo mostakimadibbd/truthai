@@ -460,6 +460,19 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
 .flag-chip.status-dismissed { background: var(--panel-2); color: var(--muted); }
 .flag-chip.status-actioned { background: #14331f; color: #7ee2a8; }
 .flag-prompt { margin: 8px 0 6px; font-size: 0.92rem; word-break: break-word; white-space: pre-wrap; }
+.trace-card {
+  border: 1px solid var(--border, #2a3a5f); border-radius: 12px;
+  padding: 14px 16px; margin: 14px 0;
+}
+.trace-card h3 { margin: 0 0 6px; }
+.trace-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.trace-row .input { flex: 1 1 260px; }
+.trace-upload { cursor: pointer; }
+.original-link {
+  word-break: break-all; background: var(--panel, #0f1830);
+  border: 1px solid var(--border, #2a3a5f); border-radius: 8px; padding: 10px;
+  font-size: 0.82rem;
+}
 .pill-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
 .modal-field select {
   width: 100%; padding: 9px 10px; border-radius: 8px;

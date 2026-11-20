@@ -633,8 +633,14 @@ export async function POST(request: NextRequest) {
     // the whole creation.
     const generationId = randomUUID();
     const watermarkPayload = buildWatermarkPayload(generationId, auth.uid);
+    // The creator fingerprint embedded in the picture itself —
+    // also stored on the provenance record below so the admin
+    // panel can resolve a fingerprint (or an uploaded image)
+    // back to the account that created it.
+    const creatorFingerprint = watermarkPayload.split(":").at(-1) ?? "";
     let watermarked: Buffer | null = null;
     let usedModel = "";
+    let usedSource = "";
     let anySourceAnswered = false;
 
     type ImageSource = {
@@ -721,6 +727,7 @@ export async function POST(request: NextRequest) {
       try {
         watermarked = await embedWatermark(produced.bytes, watermarkPayload);
         usedModel = produced.model;
+        usedSource = source.label;
         break;
       } catch (error) {
         console.error(`Image from ${source.label} could not be processed.`, error);
@@ -745,6 +752,19 @@ export async function POST(request: NextRequest) {
     } catch (error) {
       console.error("Generated image storage failed.", error);
       return errorResponse(503, "IMAGE_STORAGE_FAILED", `The generated image couldn’t be saved. (${cloudinaryErrorMessage(error)})`);
+    }
+
+    // Dimensions of the stored (watermarked) picture, for the
+    // provenance record. Best-effort: a metadata failure never
+    // blocks the creation.
+    let imageWidth: number | null = null;
+    let imageHeight: number | null = null;
+    try {
+      const meta = await sharp(watermarked).metadata();
+      imageWidth = typeof meta.width === "number" ? meta.width : null;
+      imageHeight = typeof meta.height === "number" ? meta.height : null;
+    } catch {
+      /* dimensions stay null */
     }
 
     const assetId = randomUUID();
@@ -798,6 +818,33 @@ export async function POST(request: NextRequest) {
       model: usedModel,
       createdAt: Timestamp.fromMillis(Date.now() + 1),
     });
+    // Provenance record (owner requirement, 2026-11-20): EVERY
+    // generation is registered top-level under its generation
+    // ID with the creator fingerprint that is also hidden in
+    // the picture's pixels, so the admin panel can trace any
+    // image — by ID, by fingerprint, or by uploading the image
+    // itself — back to the account, the chat and the exact
+    // prompt that produced it. Server-only collection (client
+    // access denied in firestore.rules, like safetyFlags).
+    batch.create(db.collection("imageGenerations").doc(generationId), {
+      generationId,
+      assetId,
+      uid: auth.uid,
+      creatorFingerprint,
+      chatId,
+      userMessageId,
+      assistantMessageId,
+      prompt: prompt.slice(0, 2000),
+      model: usedModel,
+      provider: usedSource,
+      publicId: stored.publicId,
+      format: "png",
+      bytes: stored.bytes,
+      width: imageWidth,
+      height: imageHeight,
+      createdAt: now,
+      createdAtMs: Date.now(),
+    });
     batch.set(
       chatRef,
       {
@@ -811,7 +858,7 @@ export async function POST(request: NextRequest) {
     await batch.commit();
 
     await recordBudget({
-      firestoreWrites: 4,
+      firestoreWrites: 5,
       firestoreReads: 2,
       redisCommands: 4,
     });

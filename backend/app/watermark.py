@@ -70,6 +70,67 @@ def _extract_python(buf: bytes) -> bytes:
     )
 
 
+def extract_provenance(rgba: bytes, width: int, height: int) -> str | None:
+    """Extract a TruthAI provenance payload written by the MAIN
+    app's watermark (lib/server/watermark.ts). That frame format
+    differs from this module's legacy frame: magic "XYRO" +
+    version byte (1) + uint16BE length + payload + CRC-32(IEEE)
+    of the payload, one bit per RGB channel (alpha skipped,
+    MSB first), TILED at every 256x256 pixel origin. Scans the
+    tile origins in the same order and returns the payload
+    (e.g. "truthai:<generationId>:<uidHash>"), or None when no
+    intact copy verifies. Pure function of the RGBA bytes so it
+    is unit-testable without an image decoder."""
+    import binascii
+
+    tile = 256
+    header_bytes = 7  # magic(4) + version(1) + length(2)
+    crc_bytes = 4
+    max_payload = 512
+    capacity_bits = width * height * 3
+
+    def read_bytes(start_bit: int, count: int) -> bytes | None:
+        if start_bit + count * 8 > capacity_bits:
+            return None
+        out = bytearray(count)
+        for i in range(count * 8):
+            absolute = start_bit + i
+            pixel = absolute // 3
+            channel = absolute % 3
+            bit = rgba[pixel * 4 + channel] & 1
+            out[i >> 3] = (out[i >> 3] << 1) | bit
+        return bytes(out)
+
+    starts: list[int] = []
+    ty = 0
+    while ty < height:
+        tx = 0
+        while tx < width:
+            starts.append((ty * width + tx) * 3)
+            tx += tile
+        ty += tile
+
+    for start in starts:
+        header = read_bytes(start, header_bytes)
+        if header is None or header[:4] != b"XYRO" or header[4] != 1:
+            continue
+        length = int.from_bytes(header[5:7], "big")
+        if length == 0 or length > max_payload:
+            continue
+        rest = read_bytes(start + header_bytes * 8, length + crc_bytes)
+        if rest is None:
+            continue
+        payload = rest[:length]
+        stored_crc = int.from_bytes(rest[length:], "big")
+        if (binascii.crc32(payload) & 0xFFFFFFFF) != stored_crc:
+            continue
+        try:
+            return payload.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+    return None
+
+
 def embed(pixel_bytes: bytes | bytearray, payload: bytes) -> bytearray:
     """Return a copy of pixel_bytes with payload embedded in LSBs."""
     buf = bytearray(pixel_bytes)

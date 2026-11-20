@@ -193,6 +193,14 @@ service cloud.firestore {
     match /safetyFlags/{flagId} {
       allow read, write: if false;
     }
+    // Image provenance records (generation ID + creator
+    // fingerprint + prompt + chat link for every generated
+    // picture). Server-written only; read by the admin backend
+    // so any image can be traced to its creator. No client
+    // access.
+    match /imageGenerations/{generationId} {
+      allow read, write: if false;
+    }
     // Fallback media blob store (chunked file storage used when
     // Cloudinary is unavailable) and its usage counters. Served
     // only through the session-checked /api/media route;

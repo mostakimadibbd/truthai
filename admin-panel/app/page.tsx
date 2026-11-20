@@ -247,6 +247,37 @@ type MediaEntry = {
   previewUrl?: string | null;
 };
 
+type GenerationRecord = {
+  generationId: string;
+  assetId?: string | null;
+  uid?: string | null;
+  creatorFingerprint?: string | null;
+  chatId?: string | null;
+  prompt?: string | null;
+  model?: string | null;
+  provider?: string | null;
+  publicId?: string | null;
+  format?: string | null;
+  bytes?: number | null;
+  width?: number | null;
+  height?: number | null;
+  createdAtMs?: number | null;
+  creatorEmail?: string | null;
+  creatorName?: string | null;
+};
+
+type VerifyResult = {
+  found: boolean;
+  reason?: string;
+  payload?: string;
+  generationId?: string;
+  creatorFingerprint?: string;
+  record?: GenerationRecord | null;
+  creatorUid?: string | null;
+  creatorEmail?: string | null;
+  creatorName?: string | null;
+};
+
 type FlagEntry = {
   id: string;
   uid: string;
@@ -470,6 +501,53 @@ function Sparkline({ values, height = 36 }: { values: number[]; height?: number 
   );
 }
 
+function GenerationCard({
+  record,
+  onOpenProfile,
+  onViewChat,
+}: {
+  record: GenerationRecord;
+  onOpenProfile: (uid: string) => void;
+  onViewChat: (uid: string, chatId: string) => void;
+}) {
+  return (
+    <div className="flag-card">
+      <div className="flag-main">
+        <span className="flag-chip signal">{record.model ?? "unknown model"}</span>
+        {record.provider && <span className="flag-chip signal">via {record.provider}</span>}
+        <span className="muted small">
+          {record.createdAtMs ? dateTime(record.createdAtMs) : ""}
+          {record.width && record.height ? ` · ${record.width}×${record.height}` : ""}
+          {record.bytes ? ` · ${bytes(record.bytes)}` : ""}
+        </span>
+      </div>
+      {record.prompt && <p className="flag-prompt">“{record.prompt}”</p>}
+      <p className="muted small">
+        Generation ID <code>{record.generationId}</code>
+        {record.creatorFingerprint && (
+          <> · Fingerprint <code>{record.creatorFingerprint}</code></>
+        )}
+      </p>
+      <div className="flag-actions">
+        {record.uid && (
+          <button type="button" className="btn btn-ghost" onClick={() => onOpenProfile(record.uid as string)}>
+            {record.creatorEmail ?? record.creatorName ?? record.uid}
+          </button>
+        )}
+        {record.uid && record.chatId && (
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => onViewChat(record.uid as string, record.chatId as string)}
+          >
+            View chat
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function WeekBars({ week, field }: { week: (Totals & { day: string })[]; field: "totalTokens" | "requests" }) {
   const max = Math.max(1, ...week.map((day) => day[field]));
   return (
@@ -587,6 +665,14 @@ export default function ConsolePage() {
     text?: string;
   } | null>(null);
   const [mediaPreviewBusy, setMediaPreviewBusy] = useState("");
+  const [traceQuery, setTraceQuery] = useState("");
+  const [traceBusy, setTraceBusy] = useState(false);
+  const [traceError, setTraceError] = useState("");
+  const [traceRecords, setTraceRecords] = useState<GenerationRecord[] | null>(null);
+  const [verifyBusy, setVerifyBusy] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null);
+  const [originalLink, setOriginalLink] = useState<{ publicId: string; url: string } | null>(null);
+  const [originalBusy, setOriginalBusy] = useState("");
   const [dbCollections, setDbCollections] = useState<DbCollection[]>([]);
   const [dbPath, setDbPath] = useState("");
   const [dbDocs, setDbDocs] = useState<DbDocSummary[]>([]);
@@ -997,6 +1083,91 @@ export default function ConsolePage() {
     }
   };
 
+  // Image tracing: search the provenance records by generation
+  // ID (a UUID) or creator fingerprint (16 hex chars), or
+  // upload an image and let the backend read the hidden
+  // watermark credentials out of its pixels.
+  const runTraceSearch = async () => {
+    if (!user) return;
+    const query = traceQuery.trim();
+    if (!query) return;
+    setTraceBusy(true);
+    setTraceError("");
+    setTraceRecords(null);
+    try {
+      const param = /^[0-9a-f]{16}$/i.test(query) ? "fingerprint" : "generationId";
+      const res = await panelApi(
+        user,
+        `/api/image-lookup?${param}=${encodeURIComponent(query)}`,
+      );
+      if (!res.ok) {
+        throw new Error(await apiErrorMessage(res, "The image records couldn’t be searched."));
+      }
+      const data = (await res.json()) as { records: GenerationRecord[] };
+      setTraceRecords(data.records);
+    } catch (error) {
+      setTraceError(error instanceof Error ? error.message : "The image records couldn’t be searched.");
+    } finally {
+      setTraceBusy(false);
+    }
+  };
+
+  const runTraceUpload = async (file: File) => {
+    if (!user) return;
+    setVerifyBusy(true);
+    setVerifyResult(null);
+    setTraceError("");
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const text = String(reader.result ?? "");
+          resolve(text.includes(",") ? text.slice(text.indexOf(",") + 1) : text);
+        };
+        reader.onerror = () => reject(new Error("read failed"));
+        reader.readAsDataURL(file);
+      });
+      const res = await panelApi(user, "/api/image-verify", {
+        method: "POST",
+        body: { imageBase64: base64 },
+      });
+      if (!res.ok) {
+        throw new Error(await apiErrorMessage(res, "That image couldn’t be checked."));
+      }
+      setVerifyResult((await res.json()) as VerifyResult);
+    } catch (error) {
+      setTraceError(error instanceof Error ? error.message : "That image couldn’t be checked.");
+    } finally {
+      setVerifyBusy(false);
+    }
+  };
+
+  const fetchOriginalLink = async (entry: MediaEntry) => {
+    if (!user) return;
+    setOriginalBusy(entry.publicId);
+    try {
+      const res = await panelApi(user, "/api/media/original-url", {
+        method: "POST",
+        body: {
+          publicId: entry.publicId,
+          resourceType: entry.resourceType,
+          deliveryType: entry.deliveryType,
+          format: entry.format ?? "",
+        },
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { url: string };
+        setOriginalLink({ publicId: entry.publicId, url: data.url });
+      } else {
+        setMediaError(await apiErrorMessage(res, "The original link couldn’t be created."));
+      }
+    } catch {
+      setMediaError("The original link couldn’t be created.");
+    } finally {
+      setOriginalBusy("");
+    }
+  };
+
   const fetchMediaBlob = async (entry: MediaEntry): Promise<Blob | null> => {
     if (!user) return null;
     const params = new URLSearchParams({
@@ -1225,22 +1396,23 @@ export default function ConsolePage() {
     [user],
   );
 
-  // From a safety flag: open the account and pin the flagged
-  // chat open with its messages loaded, so the admin reads the
-  // exact conversation that was flagged (the chat may not be
-  // among the drawer's recent six, so it gets its own block).
-  const openFlagChat = useCallback(
-    async (flag: FlagEntry) => {
-      if (!user || !flag.uid || !flag.chatId) return;
-      await openDetail(flag.uid);
-      setPinnedChatId(flag.chatId);
-      setOpenChatId(flag.chatId);
+  // Open an account and pin one specific chat open with its
+  // messages loaded — used by safety flags ("the flagged chat")
+  // and by image tracing ("the chat that created this image").
+  // The chat may not be among the drawer's recent six, so it
+  // gets its own pinned block there.
+  const openPinnedChat = useCallback(
+    async (uid: string, chatId: string) => {
+      if (!user || !uid || !chatId) return;
+      await openDetail(uid);
+      setPinnedChatId(chatId);
+      setOpenChatId(chatId);
       setChatLoading(true);
       setChatMessages([]);
       try {
         const res = await panelApi(
           user,
-          `/api/user-chats?uid=${encodeURIComponent(flag.uid)}&chatId=${encodeURIComponent(flag.chatId)}`,
+          `/api/user-chats?uid=${encodeURIComponent(uid)}&chatId=${encodeURIComponent(chatId)}`,
         );
         if (res.ok) {
           setChatMessages(((await res.json()) as { messages: ChatMessageRow[] }).messages);
@@ -2196,7 +2368,7 @@ export default function ConsolePage() {
                       <button
                         type="button"
                         className="btn btn-ghost"
-                        onClick={() => void openFlagChat(flag)}
+                        onClick={() => flag.uid && flag.chatId && void openPinnedChat(flag.uid, flag.chatId)}
                       >
                         View chat
                       </button>
@@ -2264,6 +2436,80 @@ export default function ConsolePage() {
               </p>
             )}
             {mediaError && <div className="alert" role="alert">{mediaError}</div>}
+
+            <div className="trace-card">
+              <h3>Trace an image</h3>
+              <p className="muted small">
+                Every generated picture carries a hidden watermark with its generation
+                ID and creator fingerprint, and a full record is saved at creation.
+                Search by generation ID or fingerprint — or upload an image and the
+                system reads the hidden credentials from its pixels and finds the
+                creator, their profile and the exact chat.
+              </p>
+              <div className="trace-row">
+                <input
+                  className="input"
+                  type="search"
+                  placeholder="Generation ID or creator fingerprint…"
+                  value={traceQuery}
+                  onChange={(event) => setTraceQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void runTraceSearch();
+                  }}
+                />
+                <button type="button" className="btn" disabled={traceBusy || !traceQuery.trim()} onClick={() => void runTraceSearch()}>
+                  {traceBusy ? "Searching…" : "Search"}
+                </button>
+                <label className="btn btn-ghost trace-upload">
+                  {verifyBusy ? "Checking…" : "Upload image"}
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/bmp"
+                    hidden
+                    disabled={verifyBusy}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = "";
+                      if (file) void runTraceUpload(file);
+                    }}
+                  />
+                </label>
+              </div>
+              {traceError && <div className="alert" role="alert">{traceError}</div>}
+              {verifyResult && !verifyResult.found && (
+                <p className="muted small">{verifyResult.reason}</p>
+              )}
+              {verifyResult?.found && (
+                <div>
+                  <p className="muted small">
+                    Watermark read from the image — generation{" "}
+                    <code>{verifyResult.generationId}</code> · fingerprint{" "}
+                    <code>{verifyResult.creatorFingerprint}</code>
+                    {!verifyResult.record &&
+                      " · No saved record for this one (it was created before records were kept, or the record was removed) — the fingerprint still identifies the creator’s watermark."}
+                  </p>
+                  {verifyResult.record && (
+                    <GenerationCard
+                      record={verifyResult.record}
+                      onOpenProfile={(uid) => void openDetail(uid)}
+                      onViewChat={(uid, chatId) => void openPinnedChat(uid, chatId)}
+                    />
+                  )}
+                </div>
+              )}
+              {traceRecords && traceRecords.length === 0 && (
+                <p className="muted small">No generation records match that search.</p>
+              )}
+              {traceRecords?.map((record) => (
+                <GenerationCard
+                  key={record.generationId}
+                  record={record}
+                  onOpenProfile={(uid) => void openDetail(uid)}
+                  onViewChat={(uid, chatId) => void openPinnedChat(uid, chatId)}
+                />
+              ))}
+            </div>
+
             <input
               className="input media-search"
               type="search"
@@ -2326,6 +2572,14 @@ export default function ConsolePage() {
                       </button>
                       <button type="button" className="btn btn-ghost" onClick={() => void downloadMedia(entry)}>
                         Download
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        disabled={originalBusy === entry.publicId}
+                        onClick={() => void fetchOriginalLink(entry)}
+                      >
+                        {originalBusy === entry.publicId ? "Loading…" : "Original link"}
                       </button>
                       {mediaConfirmDelete === entry.publicId ? (
                         <>
@@ -2846,7 +3100,7 @@ export default function ConsolePage() {
                       className="mini-row chat-open-row"
                       onClick={() => void loadChatMessages(detail.uid, pinnedChatId)}
                     >
-                      <span>🚩 Flagged chat</span>
+                      <span>📌 Pinned chat (flag / image trace)</span>
                       <span className="muted small">{openChatId === pinnedChatId ? "hide" : "show"}</span>
                     </button>
                     {openChatId === pinnedChatId && (
@@ -3086,6 +3340,39 @@ export default function ConsolePage() {
               >
                 {creating ? "Creating…" : "Create account"}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {originalLink && (
+        <div className="modal-wrap" role="dialog" aria-modal="true" aria-label="Original Cloudinary link">
+          <div className="modal">
+            <h2>Original Cloudinary link</h2>
+            <p className="muted">
+              Admin only — users never see this link; their files always stream
+              through our own domain. Use it to open or manage the asset at the
+              source. Revealing it is written to the audit log.
+            </p>
+            <p className="original-link"><code>{originalLink.url}</code></p>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-ghost" onClick={() => setOriginalLink(null)}>
+                Close
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(originalLink.url).catch(() => undefined);
+                  setToast("Original link copied.");
+                  window.setTimeout(() => setToast(""), 2500);
+                }}
+              >
+                Copy link
+              </button>
+              <a className="btn" href={originalLink.url} target="_blank" rel="noreferrer">
+                Open at Cloudinary
+              </a>
             </div>
           </div>
         </div>

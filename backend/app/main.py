@@ -572,6 +572,76 @@ async def admin_media_delete(request: Request):
         return _error(error.status, error.code, error.message)
 
 
+@app.post("/v1/admin/media/original-url")
+async def admin_media_original_url(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    actor_uid, _actor_email, actor_role = gate
+    try:
+        body = await request.json()
+    except Exception:
+        return _error(400, "INVALID_JSON", "Send a JSON body.")
+    if not isinstance(body, dict) or not isinstance(body.get("publicId"), str):
+        return _error(400, "INVALID_BODY", "Send the media reference.")
+    try:
+        result = admin.media_original_url(
+            firestore_client(),
+            actor_uid,
+            actor_role,
+            body["publicId"],
+            body.get("resourceType") if isinstance(body.get("resourceType"), str) else "",
+            body.get("deliveryType") if isinstance(body.get("deliveryType"), str) else "",
+            body.get("format") if isinstance(body.get("format"), str) else "",
+        )
+        return {"success": True, **result}
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+
+
+@app.get("/v1/admin/images/lookup")
+async def admin_image_lookup(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    actor_uid, _actor_email, _actor_role = gate
+    try:
+        result = admin.lookup_image_generations(
+            firestore_client(),
+            actor_uid,
+            generation_id=request.query_params.get("generationId", ""),
+            fingerprint=request.query_params.get("fingerprint", ""),
+            uid=request.query_params.get("uid", ""),
+        )
+        return {"success": True, **result}
+    except Exception:
+        return _error(503, "IMAGE_LOOKUP_FAILED", "Image records couldn’t be loaded.")
+
+
+@app.post("/v1/admin/images/verify")
+async def admin_image_verify(request: Request):
+    gate = await _admin_gate(request)
+    if isinstance(gate, JSONResponse):
+        return gate
+    actor_uid, _actor_email, _actor_role = gate
+    try:
+        body = await request.json()
+    except Exception:
+        return _error(400, "INVALID_JSON", "Send a JSON body.")
+    image_b64 = body.get("imageBase64") if isinstance(body, dict) else None
+    if not isinstance(image_b64, str) or not image_b64:
+        return _error(400, "INVALID_BODY", "Send {imageBase64}.")
+    try:
+        raw = base64.b64decode(image_b64, validate=True)
+    except Exception:
+        return _error(400, "INVALID_IMAGE", "The image data wasn’t valid base64.")
+    try:
+        result = admin.verify_image(firestore_client(), actor_uid, raw)
+        return {"success": True, **result}
+    except admin.AdminAuthError as error:
+        return _error(error.status, error.code, error.message)
+
+
 @app.post("/v1/admin/media/upload")
 async def admin_media_upload(request: Request):
     gate = await _admin_gate(request)
