@@ -3335,3 +3335,173 @@ body:has(.chat-app) #main {
 .docs-code { margin: 14px 0; padding: 14px 16px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--panel-2); overflow-x: auto; font-size: 0.82rem; line-height: 1.55; }
 .docs-code code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
 .article-body code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.86em; }
+
+/* ---- Settings redesign (2026-11): sidebar nav with icons,
+   elevated cards, modern toggles and inputs. Blue/azure only,
+   driven by the theme variables so both themes hold. ---- */
+.settings-page { padding-block: 54px 110px; }
+.settings-page .workspace-heading h1 { font-size: 31px; letter-spacing: -0.02em; }
+.settings-page .workspace-heading .eyebrow { letter-spacing: 0.14em; }
+.settings-layout {
+  grid-template-columns: 268px minmax(0, 780px);
+  gap: 42px;
+  margin-top: 34px;
+  align-items: start;
+}
+.settings-nav {
+  position: sticky;
+  top: 88px;
+  display: grid;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.settings-nav a {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  color: var(--muted);
+  text-decoration: none;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.settings-nav a:hover { background: var(--surface-soft); color: var(--text); }
+.settings-nav a:focus-visible { outline: 2px solid var(--accent-mid); outline-offset: 2px; }
+.settings-nav a[aria-current="page"] {
+  background: color-mix(in srgb, var(--accent-mid) 13%, transparent);
+  color: var(--text);
+}
+.settings-nav-icon {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  color: var(--muted-3);
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.settings-nav-icon svg { width: 18px; height: 18px; }
+.settings-nav a:hover .settings-nav-icon { color: var(--text); }
+.settings-nav a[aria-current="page"] .settings-nav-icon {
+  background: var(--accent-mid);
+  border-color: transparent;
+  color: #fff;
+}
+.settings-nav-text { display: grid; gap: 1px; min-width: 0; padding-top: 1px; }
+.settings-nav-label { font-size: 14.5px; font-weight: 600; line-height: 1.3; color: inherit; }
+.settings-nav-blurb { font-size: 12px; line-height: 1.45; color: var(--muted-2); }
+.settings-sections { gap: 16px; }
+.settings-content {
+  padding: 28px 30px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgb(10 20 40 / 0.05), 0 16px 36px -22px rgb(10 20 40 / 0.28);
+}
+.settings-content h2 { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; margin-bottom: 6px; }
+.settings-content h3 { font-size: 16px; font-weight: 650; }
+.settings-content > p { font-size: 14px; line-height: 1.65; color: var(--muted); margin-bottom: 20px; }
+.settings-field { padding: 20px 0; gap: 8px; }
+.settings-label { font-size: 14.5px; }
+.settings-hint { font-size: 13px; }
+.settings-content input[type="text"],
+.settings-content input[type="password"],
+.settings-content input[type="email"],
+.settings-content select,
+.settings-content textarea {
+  background: var(--bg-input);
+  border-color: var(--line-2);
+  border-radius: 10px;
+  padding: 11px 14px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.settings-content input[type="text"]:focus,
+.settings-content input[type="password"]:focus,
+.settings-content input[type="email"]:focus,
+.settings-content select:focus,
+.settings-content textarea:focus {
+  outline: none;
+  border-color: var(--accent-mid);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-mid) 24%, transparent);
+}
+.settings-radio-group { gap: 10px; }
+.settings-radio-group label {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.settings-radio-group label:hover { border-color: var(--line-strong); }
+.settings-radio-group label:has(input:checked) {
+  border-color: var(--accent-mid);
+  background: color-mix(in srgb, var(--accent-mid) 8%, transparent);
+}
+.settings-radio-group input[type="radio"] { accent-color: var(--accent-mid); width: 17px; height: 17px; flex: 0 0 auto; }
+.settings-switch-row { padding: 4px 0; }
+.settings-switch-row input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 46px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  position: relative;
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition: background 0.18s ease;
+}
+.settings-switch-row input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.3);
+  transition: transform 0.18s ease;
+}
+.settings-switch-row input[type="checkbox"]:checked { background: var(--accent-mid); }
+.settings-switch-row input[type="checkbox"]:checked::after { transform: translateX(20px); }
+.settings-switch-row input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent-mid); outline-offset: 2px; }
+.settings-file-list li, .settings-session-list li { border-radius: 12px; padding: 14px 16px; }
+.settings-usage-row { padding: 16px 0; }
+.settings-avatar { width: 72px; height: 72px; border: 2px solid var(--line); }
+.settings-badge { font-weight: 600; }
+.dev-card { border-radius: 16px; padding: 18px 20px; }
+.dev-stat { border-radius: 16px; }
+.settings-danger-zone {
+  border-color: color-mix(in srgb, #e5484d 42%, transparent);
+  background: color-mix(in srgb, #e5484d 5%, transparent);
+  border-radius: 14px;
+}
+@media (max-width: 900px) {
+  .settings-layout { grid-template-columns: 1fr; gap: 18px; margin-top: 24px; }
+  .settings-nav {
+    position: static;
+    display: flex;
+    overflow-x: auto;
+    gap: 6px;
+    padding-bottom: 4px;
+    scrollbar-width: thin;
+  }
+  .settings-nav a { flex: 0 0 auto; align-items: center; padding: 8px 12px 8px 8px; }
+  .settings-nav-icon { width: 30px; height: 30px; border-radius: 9px; }
+  .settings-nav-icon svg { width: 16px; height: 16px; }
+  .settings-nav-blurb { display: none; }
+  .settings-nav-text { padding-top: 0; }
+  .settings-content { padding: 22px 18px; border-radius: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-nav a, .settings-nav-icon,
+  .settings-switch-row input[type="checkbox"],
+  .settings-switch-row input[type="checkbox"]::after { transition: none; }
+}

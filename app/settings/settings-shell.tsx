@@ -45,6 +45,43 @@ type ProfileView = { displayName: string; photoURL: string; email: string };
 
 const APP_VERSION = "0.1.0";
 
+// Navigation presentation for the redesigned settings sidebar:
+// one stroke icon + a one-line description per section.
+const SETTINGS_NAV_META: Record<SettingsTabId, { icon: string; blurb: string }> = {
+  profile: {
+    icon: "M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
+    blurb: "Name, photo and email",
+  },
+  general: {
+    icon: "M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6",
+    blurb: "Appearance, language and behaviour",
+  },
+  personalization: {
+    icon: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3zM19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z",
+    blurb: "Memory and response style",
+  },
+  data: {
+    icon: "M12 8c4.97 0 9-1.34 9-3s-4.03-3-9-3-9 1.34-9 3 4.03 3 9 3zM21 12c0 1.66-4.03 3-9 3s-9-1.34-9-3M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5",
+    blurb: "Exports, uploads and deletion",
+  },
+  security: {
+    icon: "M12 2l7 3v5c0 5-3.5 9.3-7 11-3.5-1.7-7-6-7-11V5l7-3zM9 12l2 2 4-4",
+    blurb: "Password, sessions and devices",
+  },
+  developer: {
+    icon: "M16 18l6-6-6-6M8 6l-6 6 6 6",
+    blurb: "API keys and developer access",
+  },
+  usage: {
+    icon: "M3 3v18h18M8 17v-6M13 17V7M18 17v-3",
+    blurb: "Requests, tokens and plan",
+  },
+  account: {
+    icon: "M3 6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6zM3 10h18",
+    blurb: "Sign out and account actions",
+  },
+};
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -193,7 +230,15 @@ export default function SettingsShell({ tab }: { tab: SettingsTabId }) {
               href={`/settings/${entry.id}`}
               aria-current={entry.id === tab ? "page" : undefined}
             >
-              {entry.label}
+              <span className="settings-nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d={SETTINGS_NAV_META[entry.id].icon} />
+                </svg>
+              </span>
+              <span className="settings-nav-text">
+                <span className="settings-nav-label">{entry.label}</span>
+                <span className="settings-nav-blurb">{SETTINGS_NAV_META[entry.id].blurb}</span>
+              </span>
             </Link>
           ))}
         </nav>
